@@ -6,17 +6,8 @@
     "strict": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "./build",
-    "rootDir": "./src",
     "skipLibCheck": true,
     "declaration": true,
     "sourceMap": true
-  },
-  "include": [
-    "src/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "tests"
-  ]
+  }
 }

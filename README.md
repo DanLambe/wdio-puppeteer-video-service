@@ -39,7 +39,10 @@ export const config = {
 
 - WebdriverIO V9
 - Chromium-based browser (Chrome, Edge)
-- Use `runner: 'local'` (not compatible with standalone mode if accessing local files directly, but should work in general).
+- **FFmpeg**: Uses `ffmpeg-static` automatically for convenience.
+    - If you wish to use a custom FFmpeg, ensure it is in your system PATH and `ffmpeg-static` is not interfering (though currently we prefer static).
+    - > **License Note**: This package depends on `ffmpeg-static` which downloads an FFmpeg binary. Ensure you comply with FFmpeg's licensing (LGPL/GPL) for your specific usage.
+- Use `runner: 'local'`
 
 ## Output
 Videos are saved in the `outputDir`.

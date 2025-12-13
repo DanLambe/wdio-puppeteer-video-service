@@ -1,22 +1,22 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PuppeteerScreenRecorder } from 'puppeteer-screen-recorder';
 import type { Services, Frameworks } from '@wdio/types';
 import type { Browser } from 'webdriverio';
 import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core';
 import type { WdioPuppeteerVideoServiceOptions } from './types.js';
+import { FfmpegRecorder } from './recorder.js';
 
 /**
- * WebdriverIO Service to record videos using Puppeteer
+ * WebdriverIO Service to record videos using Puppeteer and FFmpeg
  */
 export default class WdioPuppeteerVideoService implements Services.ServiceInstance {
   private _browser?: Browser;
   private _options: WdioPuppeteerVideoServiceOptions;
-  private _recorder?: PuppeteerScreenRecorder;
+  private _recorder?: FfmpegRecorder;
   private _currentSegment = 0;
   private _currentTestTitle = '';
-  private _currentTestFile = '';
+  // private _currentTestFile = ''; // Unused
   private _recordedSegments: string[] = [];
   private _isChromium = false;
 
@@ -43,8 +43,8 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
       browserName === 'chrome' ||
       browserName === 'microsoftedge' ||
       browserName === 'edge' ||
-      (caps as any)['goog:chromeOptions'] ||
-      (caps as any)['ms:edgeOptions'];
+      !!(caps as any)['goog:chromeOptions'] ||
+      !!(caps as any)['ms:edgeOptions'];
 
     if (!this._isChromium) {
       console.warn(
@@ -64,8 +64,6 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
     }
 
     this._currentTestTitle = test.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    // Use test.file or parent suite title for uniqueness if needed, but title is usually good enough for local
-    // Ideally we'd use a full path or hash. For now, title.
     this._currentSegment = 1;
     this._recordedSegments = [];
 
@@ -77,7 +75,7 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
     _context: unknown,
     result: Frameworks.TestResult
   ): Promise<void> {
-    if (!this._isChromium || !this._recorder) {
+    if (!this._isChromium) {
       return;
     }
 
@@ -97,7 +95,6 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
   async afterCommand(commandName: string): Promise<void> {
     if (
       !this._isChromium ||
-      !this._recorder ||
       !['switchWindow', 'switchToWindow'].includes(commandName)
     ) {
       return;
@@ -134,14 +131,11 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
       }
 
       const filePath = this._getSegmentPath();
-      this._recorder = new PuppeteerScreenRecorder(page as any, {
-        followNewTab: false, // We handle tabs manually
-        fps: this._options.fps,
-        ffmpeg_Path: undefined, // relying on default or env? package usually handles it
-        videoFrame: {
-          width: this._options.videoWidth,
-          height: this._options.videoHeight,
-        },
+      
+      this._recorder = new FfmpegRecorder(page, {
+        fps: this._options.fps || 30,
+        width: this._options.videoWidth || 1920,
+        height: this._options.videoHeight || 1080
       });
 
       await this._recorder.start(filePath);
@@ -158,6 +152,7 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
       } catch (e) {
         console.warn('[WdioPuppeteerVideoService] Error stopping recorder:', e);
       }
+      this._recorder = undefined;
     }
   }
 
@@ -189,7 +184,6 @@ export default class WdioPuppeteerVideoService implements Services.ServiceInstan
         }
       } catch (e) {
         // access denied or other error on page
-
       }
     }
     return undefined;
