@@ -1,7 +1,18 @@
+import WdioPuppeteerVideoService from './service.js'
+import type {
+  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
+  WdioPuppeteerVideoServiceLogLevel,
+  WdioPuppeteerVideoServiceMergeOptions,
+  WdioPuppeteerVideoServiceOptions,
+  WdioPuppeteerVideoServiceTranscodeOptions,
+} from './types.js'
 
-import WdioPuppeteerVideoService from './service.js';
-import type { WdioPuppeteerVideoServiceOptions } from './types.js';
-
-export default WdioPuppeteerVideoService;
-export { WdioPuppeteerVideoService };
-export type { WdioPuppeteerVideoServiceOptions };
+export default WdioPuppeteerVideoService
+export { WdioPuppeteerVideoService }
+export type {
+  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
+  WdioPuppeteerVideoServiceLogLevel,
+  WdioPuppeteerVideoServiceMergeOptions,
+  WdioPuppeteerVideoServiceOptions,
+  WdioPuppeteerVideoServiceTranscodeOptions,
+}

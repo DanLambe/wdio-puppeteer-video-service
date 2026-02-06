@@ -1,12 +1,13 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node", "@wdio/globals/types", "expect-webdriverio", "@wdio/mocha-framework"],
+    "types": [
+      "node",
+      "@wdio/globals/types",
+      "expect-webdriverio",
+      "@wdio/mocha-framework"
+    ],
     "noEmit": true
   },
-  "include": [
-    "tests/**/*.ts",
-    "src/**/*.ts",
-    "wdio.conf.ts"
-  ]
+  "include": ["tests/**/*.ts", "src/**/*.ts"]
 }
