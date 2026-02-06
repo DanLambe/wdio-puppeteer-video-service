@@ -1,15 +1,27 @@
 {
   "name": "wdio-puppeteer-video-service",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WebdriverIO Service to record videos using Puppeteer",
   "type": "module",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "import": "./build/index.js",
       "types": "./build/index.d.ts"
     }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -19,6 +31,7 @@
     "test:e2e:merge": "tsx tests/scripts/run-e2e-video-modes.ts merge",
     "test:e2e:both": "tsx tests/scripts/run-e2e-video-modes.ts both",
     "test:unit": "vitest run --dir tests/unit",
+    "release:check": "npm run lint && npm run test:unit && npm run clean && npm run build && npm pack --dry-run",
     "lint": "biome check",
     "format": "biome format --write"
   },

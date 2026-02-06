@@ -1,0 +1,93 @@
+name: Publish To NPM
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to npm (false = validation only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      package_name: ${{ steps.package_meta.outputs.name }}
+      package_version: ${{ steps.package_meta.outputs.version }}
+      should_publish: ${{ steps.npm_check.outputs.should_publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Read Package Metadata
+        id: package_meta
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          echo "name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Check npm For Existing Version
+        id: npm_check
+        shell: bash
+        run: |
+          package_name="${{ steps.package_meta.outputs.name }}"
+          package_version="${{ steps.package_meta.outputs.version }}"
+
+          if npm view "$package_name@$package_version" version > /dev/null 2>&1; then
+            echo "Package $package_name@$package_version is already published."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Package $package_name@$package_version is not published yet."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Release Checks
+        run: npm run release:check
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    if: needs.verify.outputs.should_publish == 'true' && (github.event_name == 'push' || inputs.publish == true)
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js For npm Publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Package
+        run: npm run clean && npm run build
+
+      - name: Log Publish Target
+        run: echo "Publishing ${{ needs.verify.outputs.package_name }}@${{ needs.verify.outputs.package_version }} to npm"
+
+      - name: Publish To npm
+        run: npm publish --access public --provenance
