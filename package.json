@@ -1,0 +1,75 @@
+{
+  "name": "wdio-puppeteer-video-service",
+  "version": "0.1.1",
+  "description": "WebdriverIO Service to record videos using Puppeteer",
+  "type": "module",
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": "./build/index.js",
+      "types": "./build/index.d.ts"
+    }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rimraf build",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:e2e": "tsx tests/scripts/run-e2e-video-modes.ts multipart",
+    "test:e2e:merge": "tsx tests/scripts/run-e2e-video-modes.ts merge",
+    "test:e2e:both": "tsx tests/scripts/run-e2e-video-modes.ts both",
+    "test:unit": "vitest run --dir tests/unit",
+    "release:check": "npm run lint && npm run test:unit && npm run clean && npm run build && npm pack --dry-run",
+    "lint": "biome check",
+    "format": "biome format --write"
+  },
+  "keywords": [
+    "webdriverio",
+    "wdio",
+    "wdio-service",
+    "puppeteer",
+    "video",
+    "record"
+  ],
+  "author": {
+    "name": "Dan Lambe",
+    "email": "danjlambe@gmail.com"
+  },
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "puppeteer-core": "^24.0.0",
+    "webdriverio": "^9.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^25.2.1",
+    "@wdio/cli": "^9.23.3",
+    "@wdio/globals": "^9.17.0",
+    "@wdio/local-runner": "^9.23.3",
+    "@wdio/mocha-framework": "^9.23.3",
+    "@wdio/spec-reporter": "^9.23.3",
+    "@wdio/types": "^9.20.0",
+    "expect-webdriverio": "^5.6.4",
+    "ffmpeg-static": "^5.3.0",
+    "fs-extra": "^11.3.3",
+    "puppeteer-core": "^24.37.1",
+    "rimraf": "^6.1.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "webdriverio": "^9.21.0"
+  }
+}
