@@ -67,11 +67,13 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.verify.outputs.should_publish == 'true' && (github.event_name == 'push' || inputs.publish == true)
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js For npm Publish
         uses: actions/setup-node@v4
@@ -91,3 +93,38 @@ jobs:
 
       - name: Publish To npm
         run: npm publish --access public --provenance
+
+      - name: Generate Release Notes
+        id: release_notes
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1 || true)"
+          commit_range="HEAD"
+          if [ -n "$latest_tag" ]; then
+            commit_range="${latest_tag}..HEAD"
+          fi
+
+          npx tsx scripts/generate-release-notes.ts "${{ needs.verify.outputs.package_version }}" "$commit_range" > release-notes.md
+          echo "release_tag=v${{ needs.verify.outputs.package_version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Git Tag
+        shell: bash
+        run: |
+          release_tag="${{ steps.release_notes.outputs.release_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$release_tag" > /dev/null 2>&1; then
+            echo "Tag $release_tag already exists on origin. Skipping tag creation."
+            exit 0
+          fi
+
+          git tag -a "$release_tag" -m "Release $release_tag"
+          git push origin "$release_tag"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_notes.outputs.release_tag }}
+          name: ${{ steps.release_notes.outputs.release_tag }}
+          body_path: release-notes.md

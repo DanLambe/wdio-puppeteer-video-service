@@ -1,0 +1,131 @@
+name: Bug report
+description: Report a reproducible issue with the WDIO Puppeteer Video Service
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out all required fields so we can reproduce and triage quickly.
+
+  - type: input
+    id: package_version
+    attributes:
+      label: Package version
+      description: Version of `wdio-puppeteer-video-service` you are using
+      placeholder: 0.1.1
+    validations:
+      required: true
+
+  - type: input
+    id: webdriverio_version
+    attributes:
+      label: WebdriverIO version
+      description: Exact WebdriverIO version in your project
+      placeholder: 9.24.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: framework
+    attributes:
+      label: WDIO framework
+      description: Framework configured in your WebdriverIO setup
+      options:
+        - Mocha
+        - Jasmine
+        - Cucumber
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: Browser capabilities (sanitized)
+      description: Paste the capabilities used for the failing run (remove secrets)
+      placeholder: |
+        [{
+          "browserName": "chrome",
+          "goog:chromeOptions": { "args": ["--headless=new"] }
+        }]
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: service_options
+    attributes:
+      label: Service options / usage
+      description: Paste how you configure this service in `wdio.conf.*`
+      placeholder: |
+        services: [
+          [WdioPuppeteerVideoService, {
+            outputDir: "videos",
+            outputFormat: "mp4",
+            mp4Mode: "auto",
+            mergeSegments: { enabled: true }
+          }]
+        ]
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment details
+      description: OS, Node version, CI/local, container/VM, browser version, ffmpeg version/path
+      placeholder: |
+        - OS: ubuntu-latest
+        - Node: 24.x
+        - Run context: GitHub Actions
+        - Browser: Chrome 145
+        - FFmpeg: /usr/bin/ffmpeg (ffmpeg -version output ...)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide a minimal reproducible sequence
+      placeholder: |
+        1. Configure service with ...
+        2. Run `npx wdio run ...`
+        3. Open/close a new window during test
+        4. Observe missing video artifact
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      placeholder: Video artifacts should be written for each test
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      placeholder: No artifacts are generated and service logs warning ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / stack trace
+      description: Include WDIO logs and service logs around the failure
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Any extra details, screenshots, or links to a repro repo

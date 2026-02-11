@@ -1,0 +1,6 @@
+{
+  "sonarlint.connectedMode.project": {
+    "connectionId": "danlambe",
+    "projectKey": "DanLambe_wdio-puppeteer-video-service"
+  }
+}

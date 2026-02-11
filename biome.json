@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.3.14/schema.json",
   "files": {
-    "includes": ["**", "!build", "!node_modules"]
+    "includes": ["**", "!build", "!node_modules", "!coverage"]
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "javascript": {
