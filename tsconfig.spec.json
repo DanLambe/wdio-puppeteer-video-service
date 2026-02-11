@@ -5,7 +5,9 @@
       "node",
       "@wdio/globals/types",
       "expect-webdriverio",
-      "@wdio/mocha-framework"
+      "@wdio/mocha-framework",
+      "@wdio/jasmine-framework",
+      "@wdio/cucumber-framework"
     ],
     "noEmit": true
   },

@@ -33,10 +33,14 @@ describe('WdioPuppeteerVideoService unit', () => {
         videoWidth: number
         videoHeight: number
         fps: number
+        outputFormat?: 'webm' | 'mp4'
+        mp4Mode?: string
         maxFileNameLength?: number
+        fileNameStyle?: string
         fileNameOverflowStrategy?: string
+        performanceProfile?: string
         transcode?: { deleteOriginal?: boolean }
-        mergeSegments?: { deleteSegments?: boolean }
+        mergeSegments?: { deleteSegments?: boolean; enabled?: boolean }
       }
       _logLevel: string
     }
@@ -46,10 +50,70 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.videoHeight).toBe(720)
     expect(service._options.fps).toBe(30)
     expect(service._options.maxFileNameLength).toBeGreaterThanOrEqual(40)
+    expect(service._options.fileNameStyle).toBe('test')
     expect(service._options.fileNameOverflowStrategy).toBe('truncate')
+    expect(service._options.mp4Mode).toBe('auto')
+    expect(service._options.performanceProfile).toBe('default')
     expect(service._options.transcode?.deleteOriginal).toBe(true)
     expect(service._options.mergeSegments?.deleteSegments).toBe(true)
     expect(service._logLevel).toBe('warn')
+  })
+
+  it('parallel performance profile applies conservative defaults', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'parallel',
+    }) as unknown as {
+      _options: {
+        videoWidth: number
+        videoHeight: number
+        fps: number
+        outputFormat?: 'webm' | 'mp4'
+        mp4Mode?: string
+        performanceProfile?: string
+        mergeSegments?: { enabled?: boolean; deleteSegments?: boolean }
+      }
+    }
+
+    expect(service._options.performanceProfile).toBe('parallel')
+    expect(service._options.videoWidth).toBe(1280)
+    expect(service._options.videoHeight).toBe(720)
+    expect(service._options.fps).toBe(24)
+    expect(service._options.outputFormat).toBe('webm')
+    expect(service._options.mp4Mode).toBe('auto')
+    expect(service._options.mergeSegments?.enabled).toBe(false)
+    expect(service._options.mergeSegments?.deleteSegments).toBe(true)
+  })
+
+  it('parallel performance profile does not override explicit values', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'parallel',
+      videoWidth: 1920,
+      videoHeight: 1080,
+      fps: 30,
+      outputFormat: 'mp4',
+      mp4Mode: 'direct',
+      mergeSegments: {
+        enabled: true,
+        deleteSegments: false,
+      },
+    }) as unknown as {
+      _options: {
+        videoWidth: number
+        videoHeight: number
+        fps: number
+        outputFormat?: 'webm' | 'mp4'
+        mp4Mode?: string
+        mergeSegments?: { enabled?: boolean; deleteSegments?: boolean }
+      }
+    }
+
+    expect(service._options.videoWidth).toBe(1920)
+    expect(service._options.videoHeight).toBe(1080)
+    expect(service._options.fps).toBe(30)
+    expect(service._options.outputFormat).toBe('mp4')
+    expect(service._options.mp4Mode).toBe('direct')
+    expect(service._options.mergeSegments?.enabled).toBe(true)
+    expect(service._options.mergeSegments?.deleteSegments).toBe(false)
   })
 
   it('constructor honors explicit service logLevel', () => {
@@ -60,6 +124,145 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._logLevel).toBe('silent')
+  })
+
+  it('normalizeMp4Mode supports known values and falls back to auto', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _normalizeMp4Mode: (mode: string | undefined) => string
+    }
+
+    expect(service._normalizeMp4Mode('auto')).toBe('auto')
+    expect(service._normalizeMp4Mode('direct')).toBe('direct')
+    expect(service._normalizeMp4Mode('transcode')).toBe('transcode')
+    expect(service._normalizeMp4Mode('invalid')).toBe('auto')
+    expect(service._normalizeMp4Mode(undefined)).toBe('auto')
+  })
+
+  it('normalizeFileNameStyle supports known values and falls back to test', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _normalizeFileNameStyle: (mode: string | undefined) => string
+    }
+
+    expect(service._normalizeFileNameStyle('test')).toBe('test')
+    expect(service._normalizeFileNameStyle('session')).toBe('session')
+    expect(service._normalizeFileNameStyle('sessionFull')).toBe('sessionFull')
+    expect(service._normalizeFileNameStyle('invalid')).toBe('test')
+    expect(service._normalizeFileNameStyle(undefined)).toBe('test')
+  })
+
+  it('shouldTranscode respects mp4 mode and transcode override', () => {
+    const autoService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'auto',
+    }) as unknown as {
+      _forceMp4Transcode: boolean
+      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
+    }
+
+    autoService._forceMp4Transcode = false
+    expect(autoService._shouldTranscode('mp4')).toBe(false)
+    autoService._forceMp4Transcode = true
+    expect(autoService._shouldTranscode('mp4')).toBe(true)
+    expect(autoService._shouldTranscode('webm')).toBe(false)
+
+    const directService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'direct',
+    }) as unknown as {
+      _forceMp4Transcode: boolean
+      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
+    }
+    directService._forceMp4Transcode = true
+    expect(directService._shouldTranscode('mp4')).toBe(false)
+
+    const transcodeService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'transcode',
+    }) as unknown as {
+      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
+    }
+    expect(transcodeService._shouldTranscode('mp4')).toBe(true)
+
+    const overrideService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'direct',
+      transcode: { enabled: true },
+    }) as unknown as {
+      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
+    }
+    expect(overrideService._shouldTranscode('mp4')).toBe(true)
+  })
+
+  it('configureMp4RecordingMode enables fallback in auto mode only', async () => {
+    const autoService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'auto',
+    }) as unknown as {
+      _forceMp4Transcode: boolean
+      _resolveFfmpegPath: () => string
+      _supportsDirectMp4: (ffmpegPath: string) => Promise<boolean>
+      _configureMp4RecordingMode: () => Promise<void>
+    }
+
+    autoService._resolveFfmpegPath = () => '/tmp/ffmpeg'
+    autoService._supportsDirectMp4 = async () => false
+    await autoService._configureMp4RecordingMode()
+    expect(autoService._forceMp4Transcode).toBe(true)
+
+    const directService = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'direct',
+    }) as unknown as {
+      _forceMp4Transcode: boolean
+      _resolveFfmpegPath: () => string
+      _supportsDirectMp4: (ffmpegPath: string) => Promise<boolean>
+      _configureMp4RecordingMode: () => Promise<void>
+    }
+    directService._resolveFfmpegPath = () => '/tmp/ffmpeg'
+    directService._supportsDirectMp4 = async () => false
+    await directService._configureMp4RecordingMode()
+    expect(directService._forceMp4Transcode).toBe(false)
+  })
+
+  it('configureMp4RecordingMode respects explicit transcode override', async () => {
+    const service = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+      mp4Mode: 'auto',
+      transcode: { enabled: true },
+    }) as unknown as {
+      _forceMp4Transcode: boolean
+      _configureMp4RecordingMode: () => Promise<void>
+    }
+
+    service._forceMp4Transcode = false
+    await service._configureMp4RecordingMode()
+    expect(service._forceMp4Transcode).toBe(false)
+  })
+
+  it('marks EPIPE and destroyed-stream write errors as benign', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _isBenignStreamWriteError: (error: NodeJS.ErrnoException) => boolean
+    }
+
+    expect(
+      service._isBenignStreamWriteError({
+        name: 'Error',
+        message: 'broken pipe',
+        code: 'EPIPE',
+      }),
+    ).toBe(true)
+    expect(
+      service._isBenignStreamWriteError({
+        name: 'Error',
+        message: 'Cannot call write after a stream was destroyed.',
+      }),
+    ).toBe(true)
+    expect(
+      service._isBenignStreamWriteError({
+        name: 'Error',
+        message: 'some other write error',
+      }),
+    ).toBe(false)
   })
 
   it('buildTestSlug is deterministic, sanitized, and retry-aware', () => {
@@ -101,6 +304,92 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     const slug = service._buildTestSlug(testCase)
     expect(slug).toMatch(/^my_test_name_abc123def456_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug falls back to fullName when title is generic', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    const slug = service._buildTestSlug(
+      createTest({
+        title: 'index',
+        fullTitle: 'index',
+        fullName: 'should support jasmine naming',
+      }),
+    )
+
+    expect(slug).toMatch(/^should_support_jasmine_naming_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug can use cucumber pickle name from context', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    const slug = service._buildTestSlug(
+      createTest({ title: 'index', fullTitle: '', fullName: '' }),
+      {
+        pickle: { name: 'user can check out successfully' },
+      },
+    )
+
+    expect(slug).toMatch(/^user_can_check_out_successfully_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug supports full-session-only filename style', () => {
+    const service = new WdioPuppeteerVideoService({
+      fileNameStyle: 'sessionFull',
+    }) as unknown as {
+      _sessionIdToken: string
+      _sessionIdFullToken: string
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    service._sessionIdToken = 'abc123def456'
+    service._sessionIdFullToken = '550e8400_e29b_41d4_a716_446655440000'
+    const slug = service._buildTestSlug(createTest({ title: 'ignored' }))
+
+    expect(slug).toBe('550e8400_e29b_41d4_a716_446655440000')
+  })
+
+  it('buildTestSlug supports short-session-only filename style', () => {
+    const service = new WdioPuppeteerVideoService({
+      fileNameStyle: 'session',
+    }) as unknown as {
+      _sessionIdToken: string
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    service._sessionIdToken = 'abc123def456'
+    const slug = service._buildTestSlug(createTest({ title: 'ignored' }))
+
+    expect(slug).toBe('abc123def456')
+  })
+
+  it('buildTestSlug appends retry token for session-only filename style', () => {
+    const service = new WdioPuppeteerVideoService({
+      fileNameStyle: 'session',
+    }) as unknown as {
+      _sessionIdToken: string
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    service._sessionIdToken = 'abc123def456'
+    const slug = service._buildTestSlug(
+      createTest({ title: 'ignored', _currentRetry: 2 }),
+    )
+
+    expect(slug).toBe('abc123def456_retry2')
+  })
+
+  it('reserveUniqueSlug appends run suffix to prevent collisions', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _reserveUniqueSlug: (baseSlug: string) => string
+    }
+
+    expect(service._reserveUniqueSlug('same_slug')).toBe('same_slug')
+    expect(service._reserveUniqueSlug('same_slug')).toBe('same_slug_run2')
   })
 
   it('buildSessionIdToken prefers first guid segment', () => {

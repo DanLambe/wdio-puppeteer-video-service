@@ -3,45 +3,21 @@ import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
-const mergeSegmentsEnabled = ['1', 'true', 'yes'].includes(
-  (process.env.WDIO_MERGE_SEGMENTS ?? '').toLowerCase(),
-)
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
-const runMode =
-  process.env.WDIO_VIDEO_MODE || (mergeSegmentsEnabled ? 'merge' : 'multipart')
 const resultsDir = path.resolve(
-  process.env.WDIO_RESULTS_DIR || path.join('tests/results', runMode),
+  process.env.WDIO_RESULTS_DIR || path.join('tests/results', 'cucumber'),
 )
-const expectedTestTitles = [
-  'should record a simple navigation',
-  'should handle iframe switching',
-  'should handle multiple tabs and closing tabs',
-  'should handle javascript alerts',
-  'should handle viewport resizing',
-  'should record a longer multi-step journey',
+const expectedScenarioTitles = [
+  'cucumber style should keep scenario name in video filename',
 ]
 
 export const config: WebdriverIO.Config = {
-  //
-  // ====================
-  // Runner Configuration
-  // ====================
   runner: 'local',
   tsConfigPath: './tsconfig.spec.json',
-  //
-  // ==================
-  // Specify Test Files
-  // ==================
-  specs: ['./specs/**/*.test.ts'],
-  // Patterns to exclude.
-  exclude: [],
-  //
-  // ============
-  // Capabilities
-  // ============
-  maxInstances: 3,
+  specs: [path.resolve('tests/cucumber/features/**/*.feature')],
+  maxInstances: 1,
   capabilities: [
     {
       browserName: 'chrome',
@@ -55,10 +31,6 @@ export const config: WebdriverIO.Config = {
       },
     },
   ],
-  //
-  // ===================
-  // Test Configurations
-  // ===================
   logLevel: 'error',
   bail: 0,
   waitforTimeout: 10000,
@@ -77,16 +49,15 @@ export const config: WebdriverIO.Config = {
           enabled: true,
         },
         mergeSegments: {
-          enabled: mergeSegmentsEnabled,
-          deleteSegments: true,
+          enabled: false,
         },
       },
     ],
   ],
-  framework: 'mocha',
+  framework: 'cucumber',
   reporters: ['spec'],
-  mochaOpts: {
-    ui: 'bdd',
+  cucumberOpts: {
+    require: [path.resolve('tests/cucumber/steps/**/*.ts')],
     timeout: 60000,
   },
   onPrepare: async () => {
@@ -95,11 +66,10 @@ export const config: WebdriverIO.Config = {
   onComplete: async () => {
     await assertVideoArtifacts({
       resultsDir,
-      expectedTitles: expectedTestTitles,
+      expectedTitles: expectedScenarioTitles,
       expectVideos,
-      mergeSegmentsEnabled,
       fileNameStyle: 'test',
-      runLabel: runMode,
+      runLabel: 'cucumber',
     })
   },
 }

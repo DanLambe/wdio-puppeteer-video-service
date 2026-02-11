@@ -10,6 +10,14 @@ export type WdioPuppeteerVideoServiceFileNameOverflowStrategy =
   | 'truncate'
   | 'session'
 
+export type WdioPuppeteerVideoServiceFileNameStyle =
+  | 'test'
+  | 'session'
+  | 'sessionFull'
+
+export type WdioPuppeteerVideoServiceMp4Mode = 'auto' | 'direct' | 'transcode'
+export type WdioPuppeteerVideoServicePerformanceProfile = 'default' | 'parallel'
+
 export interface WdioPuppeteerVideoServiceOptions {
   /**
    * Directory where videos will be saved.
@@ -42,6 +50,19 @@ export interface WdioPuppeteerVideoServiceOptions {
   fps?: number
 
   /**
+   * Optional performance profile that applies conservative defaults for parallel workers.
+   *
+   * - `default`: keeps standard defaults
+   * - `parallel`: when corresponding options are unset, uses lower-overhead defaults
+   *   (`videoWidth: 1280`, `videoHeight: 720`, `fps: 24`, `outputFormat: webm`)
+   *
+   * Explicit user options always take precedence over profile defaults.
+   *
+   * @default 'default'
+   */
+  performanceProfile?: WdioPuppeteerVideoServicePerformanceProfile
+
+  /**
    * Service log level.
    *
    * If omitted, the service attempts to use the WebdriverIO log level.
@@ -71,6 +92,20 @@ export interface WdioPuppeteerVideoServiceOptions {
   fileNameOverflowStrategy?: WdioPuppeteerVideoServiceFileNameOverflowStrategy
 
   /**
+   * Base naming style used for generated video files.
+   *
+   * - `test` (default): test/scenario-oriented slug with session + hash suffix
+   * - `session`: session-id-only slug using a short session token
+   * - `sessionFull`: session-id-only slug using the full session id token
+   *
+   * Note: session-only styles can produce duplicate names across multiple tests in one session,
+   * so the service appends `_runN` when needed to avoid overwriting prior artifacts.
+   *
+   * @default 'test'
+   */
+  fileNameStyle?: WdioPuppeteerVideoServiceFileNameStyle
+
+  /**
    * Explicit path to the ffmpeg binary.
    * If omitted, the service tries `FFMPEG_PATH`, then `ffmpeg` on PATH,
    * and finally `ffmpeg-static` if it is installed in the project.
@@ -86,6 +121,19 @@ export interface WdioPuppeteerVideoServiceOptions {
    * @default 'webm'
    */
   outputFormat?: 'webm' | 'mp4'
+
+  /**
+   * MP4 recording strategy when `outputFormat` is `mp4`.
+   *
+   * - `auto` (default): attempts direct MP4 if ffmpeg supports Puppeteer's MP4 pipeline, otherwise falls back to transcode.
+   * - `direct`: always use Puppeteer direct MP4 recording.
+   * - `transcode`: always record WebM then transcode to H.264 MP4.
+   *
+   * `transcode.enabled` still forces transcode when set to `true`.
+   *
+   * @default 'auto'
+   */
+  mp4Mode?: WdioPuppeteerVideoServiceMp4Mode
 
   /**
    * Optional post-processing step to transcode recordings into an H.264 MP4 for maximum compatibility.

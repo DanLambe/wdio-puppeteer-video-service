@@ -2,31 +2,52 @@ import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 
-type VideoMode = 'multipart' | 'merge'
+type FrameworkMode = 'jasmine' | 'cucumber'
 type FfmpegDetectionResult = {
   available: boolean
   resolvedPath?: string
   checkedCandidates: string[]
 }
+
 const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 const require = createRequire(import.meta.url)
 
 const requestedMode = process.argv[2] || 'both'
 
-let modeOrder: VideoMode[]
-if (requestedMode === 'both') {
-  modeOrder = ['multipart', 'merge']
-} else if (requestedMode === 'multipart' || requestedMode === 'merge') {
-  modeOrder = [requestedMode]
-} else {
-  modeOrder = []
+const resolveFrameworkOrder = (mode: string): FrameworkMode[] => {
+  if (mode === 'both') {
+    return ['jasmine', 'cucumber']
+  }
+  if (mode === 'jasmine' || mode === 'cucumber') {
+    return [mode]
+  }
+  return []
 }
 
-if (modeOrder.length === 0) {
+const frameworkOrder: FrameworkMode[] = resolveFrameworkOrder(requestedMode)
+
+if (frameworkOrder.length === 0) {
   console.error(
-    `[e2e:modes] Invalid mode "${requestedMode}". Use multipart, merge, or both.`,
+    `[e2e:frameworks] Invalid mode "${requestedMode}". Use jasmine, cucumber, or both.`,
   )
   process.exit(1)
+}
+
+const frameworkConfigMap: Record<
+  FrameworkMode,
+  {
+    configPath: string
+    resultsDirName: string
+  }
+> = {
+  jasmine: {
+    configPath: 'tests/wdio.jasmine.conf.ts',
+    resultsDirName: 'jasmine',
+  },
+  cucumber: {
+    configPath: 'tests/wdio.cucumber.conf.ts',
+    resultsDirName: 'cucumber',
+  },
 }
 
 const resolveOptionalFfmpegStaticPath = (): string | undefined => {
@@ -105,38 +126,32 @@ const detectFfmpeg = async (): Promise<FfmpegDetectionResult> => {
   }
 }
 
-const runWdio = async (mode: VideoMode): Promise<void> => {
+const runWdioFramework = async (
+  framework: FrameworkMode,
+  ffmpegDetection: FfmpegDetectionResult,
+): Promise<void> => {
+  const target = frameworkConfigMap[framework]
   const nodeCommand = process.execPath
   const wdioCliPath = path.resolve('node_modules/@wdio/cli/bin/wdio.js')
-  const resultsDir = path.resolve('tests/results', mode)
-  const mergeEnabled = mode === 'merge' ? '1' : '0'
-  const ffmpegDetection = await detectFfmpeg()
-  if (!ffmpegDetection.available) {
-    console.warn(
-      `[e2e:modes] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
-    )
-  }
+  const resultsDir = path.resolve('tests/results', target.resultsDirName)
+  const configPath = path.resolve(target.configPath)
 
-  console.log(`[e2e:modes] Starting ${mode} run. Artifacts => ${resultsDir}`)
+  console.log(
+    `[e2e:frameworks] Starting ${framework} run. Artifacts => ${resultsDir}`,
+  )
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      nodeCommand,
-      [wdioCliPath, 'run', 'tests/wdio.conf.ts'],
-      {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          ...(ffmpegDetection.resolvedPath
-            ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
-            : {}),
-          WDIO_MERGE_SEGMENTS: mergeEnabled,
-          WDIO_VIDEO_MODE: mode,
-          WDIO_RESULTS_DIR: resultsDir,
-          WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
-        },
+    const child = spawn(nodeCommand, [wdioCliPath, 'run', configPath], {
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        ...(ffmpegDetection.resolvedPath
+          ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
+          : {}),
+        WDIO_RESULTS_DIR: resultsDir,
+        WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
       },
-    )
+    })
 
     child.on('error', (error) => {
       reject(error)
@@ -147,16 +162,25 @@ const runWdio = async (mode: VideoMode): Promise<void> => {
         resolve()
         return
       }
-      reject(new Error(`[e2e:modes] ${mode} run failed with code ${code}`))
+      reject(
+        new Error(`[e2e:frameworks] ${framework} run failed with code ${code}`),
+      )
     })
   })
 
-  console.log(`[e2e:modes] Completed ${mode} run.`)
+  console.log(`[e2e:frameworks] Completed ${framework} run.`)
 }
 
-for (const mode of modeOrder) {
-  // Sequential runs preserve distinct artifact folders for each mode.
-  await runWdio(mode)
+const ffmpegDetection = await detectFfmpeg()
+if (!ffmpegDetection.available) {
+  console.warn(
+    `[e2e:frameworks] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
+  )
 }
 
-console.log('[e2e:modes] All requested runs completed successfully.')
+for (const framework of frameworkOrder) {
+  // Run sequentially so results and logs stay isolated per framework.
+  await runWdioFramework(framework, ffmpegDetection)
+}
+
+console.log('[e2e:frameworks] All requested framework runs completed.')

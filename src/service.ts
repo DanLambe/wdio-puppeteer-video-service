@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import type { WriteStream } from 'node:fs'
 import { createWriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
@@ -16,11 +15,23 @@ import type {
 import type { Browser } from 'webdriverio'
 import type {
   WdioPuppeteerVideoServiceFileNameOverflowStrategy,
+  WdioPuppeteerVideoServiceFileNameStyle,
   WdioPuppeteerVideoServiceLogLevel,
   WdioPuppeteerVideoServiceMergeOptions,
+  WdioPuppeteerVideoServiceMp4Mode,
   WdioPuppeteerVideoServiceOptions,
+  WdioPuppeteerVideoServicePerformanceProfile,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'
+import {
+  buildFullSessionIdToken,
+  buildSessionIdToken,
+  buildTestSlugFromMetadata,
+  collectSlugMetadata,
+  reserveUniqueSlug,
+  type SlugMetadata,
+  sanitizeFileToken,
+} from './video-name-utils.js'
 
 type OutputFormat = NonNullable<
   WdioPuppeteerVideoServiceOptions['outputFormat']
@@ -38,6 +49,10 @@ interface ActiveSegment {
     Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
   writeStream: WriteStream
   writeStreamDone: Promise<void>
+  writeStreamErrored: boolean
+  writeStreamErrorMessage?: string
+  onWriteStreamError: (error: NodeJS.ErrnoException) => void
+  onRecorderError: (error: unknown) => void
 }
 
 const WINDOW_SEGMENT_COMMANDS = new Set([
@@ -56,7 +71,9 @@ const DEFAULT_MAX_FILENAME_LENGTH = 255
 const WINDOWS_MAX_PATH_LENGTH = 259
 const SEGMENT_SUFFIX_MAX_LENGTH = '_part9999.webm'.length
 const MIN_SAFE_FILENAME_LENGTH = 40
+const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
 const require = createRequire(import.meta.url)
+const DEFAULT_OUTPUT_DIR = 'videos'
 const LOG_LEVEL_PRIORITY: Record<WdioPuppeteerVideoServiceLogLevel, number> = {
   silent: 0,
   error: 1,
@@ -64,6 +81,11 @@ const LOG_LEVEL_PRIORITY: Record<WdioPuppeteerVideoServiceLogLevel, number> = {
   info: 3,
   debug: 4,
   trace: 5,
+}
+const LOG_METHOD_MAP: Record<string, (...args: unknown[]) => void> = {
+  error: console.error,
+  warn: console.warn,
+  info: console.info,
 }
 
 /**
@@ -78,10 +100,11 @@ export default class WdioPuppeteerVideoService
   private _activeSegment?: ActiveSegment
   private _currentSegment = 0
   private _currentTestSlug = ''
-  private _recordedSegments = new Set<string>()
+  private readonly _recordedSegments = new Set<string>()
   private _isChromium = false
   private _currentWindowHandle: string | undefined
   private _sessionIdToken = ''
+  private _sessionIdFullToken = ''
   private _logLevel: WdioPuppeteerVideoServiceLogLevel = 'warn'
   private readonly _hasExplicitLogLevel: boolean
   private _ffmpegAvailable = false
@@ -89,11 +112,19 @@ export default class WdioPuppeteerVideoService
   private _ffmpegCandidates: string[] = []
   private _recordingTask: Promise<void> = Promise.resolve()
   private _warnedAboutMp4Compatibility = false
+  private _warnedAboutMp4AutoFallback = false
   private _warnedAboutMissingFfmpeg = false
+  private _forceMp4Transcode = false
+  private readonly _slugUsageCount = new Map<string, number>()
+  private readonly _maxSlugLength: number
+  private _pageMarkerCounter = 0
 
   constructor(options: WdioPuppeteerVideoServiceOptions) {
     this._hasExplicitLogLevel = typeof options.logLevel === 'string'
     this._logLevel = this._normalizeLogLevel(options.logLevel)
+    const performanceProfile = this._normalizePerformanceProfile(
+      options.performanceProfile,
+    )
 
     const transcodeOptions = options.transcode ?? {}
     const mergedTranscode: WdioPuppeteerVideoServiceTranscodeOptions = {
@@ -106,32 +137,49 @@ export default class WdioPuppeteerVideoService
       ...mergeOptions,
     }
 
-    if (options.ffmpegArgs && !mergedTranscode.ffmpegArgs) {
-      mergedTranscode.ffmpegArgs = options.ffmpegArgs
-    }
-
     if (options.ffmpegArgs) {
+      mergedTranscode.ffmpegArgs ??= options.ffmpegArgs
       this._log(
         'warn',
         '[WdioPuppeteerVideoService] `ffmpegArgs` is deprecated. Use `transcode.ffmpegArgs` instead.',
       )
     }
 
-    const mergedOptions: WdioPuppeteerVideoServiceOptions = {
+    let mergedOptions: WdioPuppeteerVideoServiceOptions = {
       outputDir: 'videos',
       saveAllVideos: false,
       videoWidth: 1280,
       videoHeight: 720,
       fps: 30,
       outputFormat: 'webm',
+      mp4Mode: 'auto',
+      fileNameStyle: 'test',
       fileNameOverflowStrategy: 'truncate',
       maxFileNameLength:
         process.platform === 'win32'
           ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
           : DEFAULT_MAX_FILENAME_LENGTH,
       ...options,
+      performanceProfile,
       transcode: mergedTranscode,
       mergeSegments: mergedMergeSegments,
+    }
+
+    if (performanceProfile === 'parallel') {
+      mergedOptions = {
+        ...mergedOptions,
+        videoWidth: options.videoWidth ?? 1280,
+        videoHeight: options.videoHeight ?? 720,
+        fps: options.fps ?? 24,
+        outputFormat: options.outputFormat ?? 'webm',
+      }
+
+      if (options.mergeSegments?.enabled === undefined) {
+        mergedOptions.mergeSegments = {
+          ...mergedMergeSegments,
+          enabled: false,
+        }
+      }
     }
 
     this._options = {
@@ -149,7 +197,14 @@ export default class WdioPuppeteerVideoService
       fileNameOverflowStrategy: this._normalizeFileNameOverflowStrategy(
         mergedOptions.fileNameOverflowStrategy,
       ),
+      fileNameStyle: this._normalizeFileNameStyle(mergedOptions.fileNameStyle),
+      mp4Mode: this._normalizeMp4Mode(mergedOptions.mp4Mode),
+      performanceProfile: this._normalizePerformanceProfile(
+        mergedOptions.performanceProfile,
+      ),
     }
+
+    this._maxSlugLength = this._computeMaxSlugLength()
   }
 
   async before(
@@ -165,6 +220,7 @@ export default class WdioPuppeteerVideoService
     }
 
     this._sessionIdToken = this._buildSessionIdToken(browser.sessionId)
+    this._sessionIdFullToken = this._buildFullSessionIdToken(browser.sessionId)
     const caps = browser.capabilities
     const browserName = caps.browserName?.toLowerCase()
     this._isChromium =
@@ -187,35 +243,28 @@ export default class WdioPuppeteerVideoService
       this._ffmpegCandidates,
     )
     this._ffmpegAvailable = !!this._resolvedFfmpegPath
-    if (!this._ffmpegAvailable) {
-      this._warnMissingFfmpeg('Video recording is disabled for this worker.')
-    } else {
+    if (this._ffmpegAvailable) {
       this._log(
         'info',
         `[WdioPuppeteerVideoService] Using ffmpeg binary: ${this._resolvedFfmpegPath}`,
       )
+      await this._configureMp4RecordingMode()
+    } else {
+      this._warnMissingFfmpeg('Video recording is disabled for this worker.')
     }
 
-    await fs.mkdir(this._options.outputDir ?? 'videos', { recursive: true })
+    await fs.mkdir(this._options.outputDir ?? DEFAULT_OUTPUT_DIR, {
+      recursive: true,
+    })
   }
 
-  async beforeTest(test: Frameworks.Test): Promise<void> {
+  async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
     if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
       return
     }
 
     await this._runSerializedRecordingTask(async () => {
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Starting test recording: ${test.fullTitle || test.title}`,
-      )
-      this._currentTestSlug = this._buildTestSlug(test)
-      this._currentSegment = 1
-      this._recordedSegments.clear()
-      this._currentWindowHandle = undefined
-      this._activeSegment = undefined
-
-      await this._startRecording()
+      await this._startRecordingForEntity(test, context)
     })
   }
 
@@ -224,35 +273,35 @@ export default class WdioPuppeteerVideoService
     _context: unknown,
     result: Frameworks.TestResult,
   ): Promise<void> {
-    if (!this._isChromium || !this._ffmpegAvailable) {
+    await this._finalizeIfRecording(result.passed)
+  }
+
+  async beforeScenario(
+    world: Frameworks.World,
+    context: unknown,
+  ): Promise<void> {
+    if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
       return
     }
 
     await this._runSerializedRecordingTask(async () => {
-      await this._stopRecording()
-
-      const shouldKeepArtifacts =
-        !result.passed || !!this._options.saveAllVideos
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Finished test recording (passed=${result.passed}, keepArtifacts=${shouldKeepArtifacts}).`,
-      )
-      if (!shouldKeepArtifacts) {
-        await this._deleteSegments()
-        this._resetTestState()
-        return
-      }
-
-      if (this._options.mergeSegments?.enabled) {
-        await this._mergeSegmentsForCurrentTest()
-      }
-
-      this._resetTestState()
+      const cucumberEntity = {
+        title: world?.pickle?.name || 'scenario',
+        fullTitle: world?.pickle?.name || 'scenario',
+      } as Frameworks.Test
+      await this._startRecordingForEntity(cucumberEntity, context ?? world)
     })
   }
 
+  async afterScenario(
+    _world: Frameworks.World,
+    result: Frameworks.PickleResult,
+  ): Promise<void> {
+    await this._finalizeIfRecording(result.passed)
+  }
+
   async after(): Promise<void> {
-    if (!this._isChromium || !this._ffmpegAvailable) {
+    if (!this._isRecordingActive()) {
       return
     }
 
@@ -299,7 +348,7 @@ export default class WdioPuppeteerVideoService
       if (commandName === 'closeWindow') {
         const handleAfterClose = await this._browser
           .getWindowHandle()
-          .catch(() => undefined)
+          .catch(() => undefined /* window may already be closed */)
         if (!handleAfterClose) {
           this._currentWindowHandle = undefined
           return
@@ -313,7 +362,7 @@ export default class WdioPuppeteerVideoService
 
       const handle = await this._browser
         .getWindowHandle()
-        .catch(() => undefined)
+        .catch(() => undefined /* window may already be closed */)
 
       if (!handle || this._currentWindowHandle === handle) {
         return
@@ -340,11 +389,11 @@ export default class WdioPuppeteerVideoService
         (await this._browser.getPuppeteer()) as unknown as PuppeteerBrowser
       const windowHandle = await this._browser
         .getWindowHandle()
-        .catch(() => undefined)
+        .catch(() => undefined /* window may already be closed */)
 
-      const targetId = `wdio-video-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const targetId = this._nextPageMarkerId()
       await this._browser.execute((id: string) => {
-        const win = window as unknown as { _wdio_video_id?: string }
+        const win = globalThis as unknown as { _wdio_video_id?: string }
         win._wdio_video_id = id
       }, targetId)
 
@@ -357,10 +406,11 @@ export default class WdioPuppeteerVideoService
         return
       }
 
-      await page.bringToFront().catch(() => {})
+      await page.bringToFront().catch(() => {
+        /* best-effort focus */
+      })
       const outputFormat: OutputFormat = this._options.outputFormat ?? 'webm'
-      const transcodeEnabled =
-        outputFormat === 'mp4' && (this._options.transcode?.enabled ?? false)
+      const transcodeEnabled = this._shouldTranscode(outputFormat)
 
       if (
         outputFormat === 'mp4' &&
@@ -390,6 +440,41 @@ export default class WdioPuppeteerVideoService
 
       const writeStream = createWriteStream(recordingPath)
       const writeStreamDone = finished(writeStream)
+      let activeSegmentRef: ActiveSegment | undefined
+      const onWriteStreamError = (error: NodeJS.ErrnoException) => {
+        if (activeSegmentRef?.writeStreamErrored) {
+          return
+        }
+        const writeErrorMessage = this._describeError(error)
+        if (activeSegmentRef) {
+          activeSegmentRef.writeStreamErrored = true
+          activeSegmentRef.writeStreamErrorMessage = writeErrorMessage
+        }
+        if (this._isBenignStreamWriteError(error)) {
+          this._log(
+            'debug',
+            `[WdioPuppeteerVideoService] Recording stream closed while recorder was still flushing (${writeErrorMessage}).`,
+          )
+        } else {
+          this._log(
+            'warn',
+            `[WdioPuppeteerVideoService] Recording stream error: ${writeErrorMessage}`,
+          )
+        }
+      }
+      let recorderErrorLogged = false
+      const onRecorderError = (error: unknown) => {
+        if (recorderErrorLogged) {
+          return
+        }
+        recorderErrorLogged = true
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Recorder stream error: ${this._describeError(error)}`,
+        )
+      }
+      writeStream.on('error', onWriteStreamError)
+      recorder.on('error', onRecorderError)
       recorder.pipe(writeStream)
 
       this._recorder = recorder
@@ -405,7 +490,12 @@ export default class WdioPuppeteerVideoService
         },
         writeStream,
         writeStreamDone,
+        writeStreamErrored: false,
+        writeStreamErrorMessage: undefined,
+        onWriteStreamError,
+        onRecorderError,
       }
+      activeSegmentRef = this._activeSegment
 
       this._currentWindowHandle = windowHandle
       this._log(
@@ -421,6 +511,65 @@ export default class WdioPuppeteerVideoService
         e,
       )
     }
+  }
+
+  private async _startRecordingForEntity(
+    test: Frameworks.Test,
+    context: unknown,
+  ): Promise<void> {
+    if (this._currentTestSlug) {
+      return
+    }
+
+    const metadata = this._collectSlugMetadata(test, context)
+    const testName = metadata.testNameToken
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Starting test recording: ${testName}`,
+    )
+    const baseSlug = this._buildTestSlugFromMetadata(metadata)
+    this._currentTestSlug = this._reserveUniqueSlug(baseSlug)
+    this._currentSegment = 1
+    this._recordedSegments.clear()
+    this._currentWindowHandle = undefined
+    this._activeSegment = undefined
+
+    await this._startRecording()
+  }
+
+  private async _finalizeIfRecording(passed: boolean): Promise<void> {
+    if (!this._isRecordingActive()) {
+      return
+    }
+
+    await this._runSerializedRecordingTask(async () => {
+      await this._finalizeCurrentTestRecording(passed)
+    })
+  }
+
+  private async _finalizeCurrentTestRecording(passed: boolean): Promise<void> {
+    if (!this._currentTestSlug) {
+      return
+    }
+
+    await this._stopRecording()
+
+    const shouldKeepArtifacts = !passed || !!this._options.saveAllVideos
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
+    )
+    if (!shouldKeepArtifacts) {
+      await this._deleteSegments()
+      this._resetTestState()
+      return
+    }
+
+    if (this._options.mergeSegments?.enabled) {
+      await this._mergeSegmentsForCurrentTest()
+    }
+
+    this._resetTestState()
   }
 
   private async _stopRecording(): Promise<void> {
@@ -442,22 +591,27 @@ export default class WdioPuppeteerVideoService
       )
     }
 
-    const streamOk = await this._waitForWriteStream(activeSegment)
-    if (!streamOk) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
-      )
-      activeSegment.transcode = false
-      activeSegment.outputPath = activeSegment.recordingPath
-      activeSegment.outputFormat = activeSegment.recordingFormat
-    }
+    try {
+      const streamOk = await this._waitForWriteStream(activeSegment)
+      if (!streamOk) {
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
+        )
+        activeSegment.transcode = false
+        activeSegment.outputPath = activeSegment.recordingPath
+        activeSegment.outputFormat = activeSegment.recordingFormat
+      }
 
-    await this._finalizeSegment(activeSegment)
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Finalized segment ${this._currentSegment} (${activeSegment.outputPath})`,
-    )
+      await this._finalizeSegment(activeSegment)
+      this._log(
+        'debug',
+        `[WdioPuppeteerVideoService] Finalized segment ${this._currentSegment} (${activeSegment.outputPath})`,
+      )
+    } finally {
+      recorder.off('error', activeSegment.onRecorderError)
+      activeSegment.writeStream.off('error', activeSegment.onWriteStreamError)
+    }
   }
 
   private async _deleteSegments(): Promise<void> {
@@ -491,8 +645,11 @@ export default class WdioPuppeteerVideoService
 
     const deleteSegments = this._options.mergeSegments?.deleteSegments ?? true
     const extension = path.extname(segmentPaths[0]).toLowerCase()
-    const mergedFormat =
-      extension === '.mp4' ? 'mp4' : extension === '.webm' ? 'webm' : undefined
+    const extensionToFormat: Record<string, OutputFormat> = {
+      '.mp4': 'mp4',
+      '.webm': 'webm',
+    }
+    const mergedFormat: OutputFormat | undefined = extensionToFormat[extension]
 
     if (!mergedFormat) {
       this._log(
@@ -520,12 +677,16 @@ export default class WdioPuppeteerVideoService
     )
 
     if (segmentPaths.length === 1) {
-      await fs.unlink(mergedPath).catch(() => {})
+      await fs.unlink(mergedPath).catch(() => {
+        /* may not exist yet */
+      })
 
       if (deleteSegments) {
         await fs.rename(segmentPaths[0], mergedPath).catch(async () => {
           await fs.copyFile(segmentPaths[0], mergedPath)
-          await fs.unlink(segmentPaths[0]).catch(() => {})
+          await fs.unlink(segmentPaths[0]).catch(() => {
+            /* best-effort cleanup */
+          })
         })
         this._recordedSegments.clear()
       } else {
@@ -537,7 +698,7 @@ export default class WdioPuppeteerVideoService
     }
 
     const concatListPath = path.join(
-      this._options.outputDir || 'videos',
+      this._options.outputDir || DEFAULT_OUTPUT_DIR,
       `${this._currentTestSlug}_concat_${Date.now().toString(36)}.txt`,
     )
 
@@ -558,7 +719,9 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    await fs.unlink(mergedPath).catch(() => {})
+    await fs.unlink(mergedPath).catch(() => {
+      /* may not exist yet */
+    })
 
     const merged = await this._runFfmpeg(
       [
@@ -576,7 +739,9 @@ export default class WdioPuppeteerVideoService
       'segment merge',
     )
 
-    await fs.unlink(concatListPath).catch(() => {})
+    await fs.unlink(concatListPath).catch(() => {
+      /* best-effort cleanup */
+    })
 
     if (!merged) {
       return
@@ -589,7 +754,9 @@ export default class WdioPuppeteerVideoService
     }
 
     for (const filePath of segmentPaths) {
-      await fs.unlink(filePath).catch(() => {})
+      await fs.unlink(filePath).catch(() => {
+        /* best-effort cleanup */
+      })
       this._recordedSegments.delete(filePath)
     }
   }
@@ -598,18 +765,18 @@ export default class WdioPuppeteerVideoService
     const resolvedFormat = format ?? this._options.outputFormat ?? 'webm'
     const fileStem = this._currentTestSlug || 'test'
     const filename = `${fileStem}_part${this._currentSegment}.${resolvedFormat}`
-    return path.join(this._options.outputDir || 'videos', filename)
+    return path.join(this._options.outputDir || DEFAULT_OUTPUT_DIR, filename)
   }
 
   private _getMergedOutputPath(format?: OutputFormat): string {
     const resolvedFormat = format ?? this._options.outputFormat ?? 'webm'
     const fileStem = this._currentTestSlug || 'test'
     const filename = `${fileStem}.${resolvedFormat}`
-    return path.join(this._options.outputDir || 'videos', filename)
+    return path.join(this._options.outputDir || DEFAULT_OUTPUT_DIR, filename)
   }
 
   private _extractPartNumber(filePath: string): number {
-    const partMatch = path.basename(filePath).match(/_part(\d+)\./)
+    const partMatch = new RegExp(/_part(\d+)\./).exec(path.basename(filePath))
     if (!partMatch) {
       return Number.MAX_SAFE_INTEGER
     }
@@ -620,8 +787,8 @@ export default class WdioPuppeteerVideoService
   private _buildConcatList(segmentPaths: string[]): string {
     return segmentPaths
       .map((filePath) => {
-        const normalizedPath = path.resolve(filePath).replace(/\\/g, '/')
-        const escapedPath = normalizedPath.replace(/'/g, "'\\''")
+        const normalizedPath = path.resolve(filePath).replaceAll('\\', '/')
+        const escapedPath = normalizedPath.replaceAll("'", String.raw`'\''`)
         return `file '${escapedPath}'`
       })
       .join('\n')
@@ -633,6 +800,69 @@ export default class WdioPuppeteerVideoService
     return this._resolvedFfmpegPath || configuredPath || envPath || 'ffmpeg'
   }
 
+  private _shouldTranscode(outputFormat: OutputFormat): boolean {
+    if (outputFormat !== 'mp4') {
+      return false
+    }
+
+    if (this._options.transcode?.enabled === true) {
+      return true
+    }
+
+    const mode = this._options.mp4Mode ?? 'auto'
+    return mode === 'transcode' || (mode === 'auto' && this._forceMp4Transcode)
+  }
+
+  private async _configureMp4RecordingMode(): Promise<void> {
+    this._forceMp4Transcode = false
+
+    const outputFormat = this._options.outputFormat ?? 'webm'
+    if (outputFormat !== 'mp4') {
+      return
+    }
+
+    if (this._options.transcode?.enabled === true) {
+      return
+    }
+
+    const mode = this._options.mp4Mode ?? 'auto'
+    if (mode === 'transcode') {
+      this._forceMp4Transcode = true
+      this._log(
+        'info',
+        '[WdioPuppeteerVideoService] MP4 strategy is set to transcode mode.',
+      )
+      return
+    }
+
+    const ffmpegPath = this._resolveFfmpegPath()
+    const supportsDirectMp4 = await this._supportsDirectMp4(ffmpegPath)
+    if (supportsDirectMp4) {
+      this._log(
+        'info',
+        '[WdioPuppeteerVideoService] Detected ffmpeg support for direct MP4 recording.',
+      )
+      return
+    }
+
+    if (mode === 'direct') {
+      this._log(
+        'warn',
+        '[WdioPuppeteerVideoService] MP4 strategy is `direct`, but detected ffmpeg may not support Puppeteer direct MP4 mode. Consider using `mp4Mode: transcode` or `mp4Mode: auto`.',
+      )
+      return
+    }
+
+    this._forceMp4Transcode = true
+    if (!this._warnedAboutMp4AutoFallback) {
+      this._warnedAboutMp4AutoFallback = true
+      this._log(
+        'warn',
+        '[WdioPuppeteerVideoService] Direct MP4 compatibility probe failed. Falling back to MP4 transcode mode (`mp4Mode: auto`).',
+      )
+    }
+  }
+
   private async _findActivePage(
     puppeteerBrowser: PuppeteerBrowser,
     targetId: string,
@@ -640,7 +870,9 @@ export default class WdioPuppeteerVideoService
     const startedAt = Date.now()
 
     while (Date.now() - startedAt < ACTIVE_PAGE_TIMEOUT_MS) {
-      const pages = await puppeteerBrowser.pages().catch(() => [])
+      const pages = await puppeteerBrowser
+        .pages()
+        .catch(() => [] /* browser may be closing */)
       const page = await this._findPageWithId(pages, targetId)
       if (page) {
         return page
@@ -657,24 +889,35 @@ export default class WdioPuppeteerVideoService
 
     await page
       .setViewport({ width: targetWidth + 1, height: targetHeight })
-      .catch(() => {})
+      .catch(() => {
+        /* best-effort viewport resize */
+      })
     await delay(50)
     await page
       .setViewport({ width: targetWidth, height: targetHeight })
-      .catch(() => {})
+      .catch(() => {
+        /* best-effort viewport resize */
+      })
   }
 
   private async _waitForWriteStream(segment: ActiveSegment): Promise<boolean> {
+    if (segment.writeStreamErrored) {
+      await segment.writeStreamDone.catch(() => {
+        /* already errored */
+      })
+      return false
+    }
+
     const ok = await Promise.race([
       segment.writeStreamDone.then(() => true).catch(() => false),
       delay(WRITE_STREAM_TIMEOUT_MS).then(() => false),
     ])
 
     if (!ok) {
-      segment.writeStream.destroy(
-        new Error('Timed out waiting for recording stream to finish'),
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Timed out waiting for recording stream to finish: ${segment.recordingPath}`,
       )
-      await segment.writeStreamDone.catch(() => {})
       return false
     }
 
@@ -692,7 +935,9 @@ export default class WdioPuppeteerVideoService
         'warn',
         `[WdioPuppeteerVideoService] Recording file is empty: ${segment.recordingPath}`,
       )
-      await fs.unlink(segment.recordingPath).catch(() => {})
+      await fs.unlink(segment.recordingPath).catch(() => {
+        /* best-effort cleanup */
+      })
       return
     }
 
@@ -712,7 +957,9 @@ export default class WdioPuppeteerVideoService
         segment.transcodeOptions.deleteOriginal &&
         segment.recordingPath !== segment.outputPath
       ) {
-        await fs.unlink(segment.recordingPath).catch(() => {})
+        await fs.unlink(segment.recordingPath).catch(() => {
+          /* best-effort cleanup */
+        })
       }
       return
     }
@@ -761,7 +1008,7 @@ export default class WdioPuppeteerVideoService
 
     const ffmpegPath = this._resolveFfmpegPath()
 
-    return await new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       const proc = spawn(ffmpegPath, args, {
         stdio: ['ignore', 'ignore', 'pipe'],
       })
@@ -858,7 +1105,7 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _canExecuteFfmpeg(ffmpegPath: string): Promise<boolean> {
-    return await new Promise<boolean>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       const proc = spawn(ffmpegPath, ['-version'], {
         stdio: ['ignore', 'ignore', 'ignore'],
       })
@@ -884,6 +1131,76 @@ export default class WdioPuppeteerVideoService
       proc.on('close', (code) => {
         clearTimeout(timer)
         settle(code === 0)
+      })
+    })
+  }
+
+  private async _supportsDirectMp4(ffmpegPath: string): Promise<boolean> {
+    const outputTarget = process.platform === 'win32' ? 'NUL' : '/dev/null'
+    const args = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=black:s=16x16:r=1',
+      '-frames:v',
+      '1',
+      '-c:v',
+      'mpeg4',
+      '-movflags',
+      '+frag_keyframe+empty_moov+default_base_moof+hybrid_fragmented',
+      '-f',
+      'mp4',
+      '-y',
+      outputTarget,
+    ]
+
+    return new Promise<boolean>((resolve) => {
+      const proc = spawn(ffmpegPath, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      let settled = false
+      const settle = (value: boolean) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        resolve(value)
+      }
+
+      const timer = setTimeout(() => {
+        proc.kill()
+        settle(false)
+      }, MP4_DIRECT_PROBE_TIMEOUT_MS)
+
+      proc.stderr?.on('data', (chunk) => {
+        const next = stderr + chunk.toString('utf8')
+        stderr = next.length > 8_192 ? next.slice(-8_192) : next
+      })
+
+      proc.on('error', () => {
+        clearTimeout(timer)
+        settle(false)
+      })
+
+      proc.on('close', (code) => {
+        clearTimeout(timer)
+        if (code === 0) {
+          settle(true)
+          return
+        }
+
+        const details = stderr.trim()
+        if (details.length > 0) {
+          this._log(
+            'debug',
+            `[WdioPuppeteerVideoService] Direct MP4 probe failed: ${details}`,
+          )
+        }
+        settle(false)
       })
     })
   }
@@ -914,7 +1231,7 @@ export default class WdioPuppeteerVideoService
     for (const page of pages) {
       try {
         const id = await page.evaluate(() => {
-          const win = window as unknown as { _wdio_video_id?: string }
+          const win = globalThis as unknown as { _wdio_video_id?: string }
           return win._wdio_video_id
         })
         if (id === targetId) {
@@ -963,25 +1280,9 @@ export default class WdioPuppeteerVideoService
     level: string | undefined,
   ): WdioPuppeteerVideoServiceLogLevel {
     const normalized = (level || '').toLowerCase()
-    if (normalized === 'trace') {
-      return 'trace'
+    if (normalized in LOG_LEVEL_PRIORITY) {
+      return normalized as WdioPuppeteerVideoServiceLogLevel
     }
-    if (normalized === 'debug') {
-      return 'debug'
-    }
-    if (normalized === 'info') {
-      return 'info'
-    }
-    if (normalized === 'warn') {
-      return 'warn'
-    }
-    if (normalized === 'error') {
-      return 'error'
-    }
-    if (normalized === 'silent') {
-      return 'silent'
-    }
-
     return 'warn'
   }
 
@@ -1008,38 +1309,13 @@ export default class WdioPuppeteerVideoService
     }
 
     const formattedMessage = this._formatLogMessage(message)
-    if (level === 'error') {
-      if (details === undefined) {
-        console.error(formattedMessage)
-        return
-      }
-      console.error(formattedMessage, details)
-      return
-    }
-
-    if (level === 'warn') {
-      if (details === undefined) {
-        console.warn(formattedMessage)
-        return
-      }
-      console.warn(formattedMessage, details)
-      return
-    }
-
-    if (level === 'info') {
-      if (details === undefined) {
-        console.info(formattedMessage)
-        return
-      }
-      console.info(formattedMessage, details)
-      return
-    }
+    const logMethod = LOG_METHOD_MAP[level] ?? console.debug
 
     if (details === undefined) {
-      console.debug(formattedMessage)
-      return
+      logMethod(formattedMessage)
+    } else {
+      logMethod(formattedMessage, details)
     }
-    console.debug(formattedMessage, details)
   }
 
   private _resetTestState(): void {
@@ -1051,91 +1327,59 @@ export default class WdioPuppeteerVideoService
     this._recordedSegments.clear()
   }
 
-  private _buildTestSlug(test: Frameworks.Test): string {
-    const retry =
-      typeof test._currentRetry === 'number' && test._currentRetry > 0
-        ? `_retry${test._currentRetry}`
-        : ''
-    const fileName = test.file ? path.parse(test.file).name : 'spec'
-    const hashInput = `${test.file ?? ''}|${test.fullTitle ?? ''}|${test.title}|${test._currentRetry ?? 0}`
-    const shortHash = createHash('sha1')
-      .update(hashInput)
-      .digest('hex')
-      .slice(0, 8)
-    const sessionPrefix = this._sessionIdToken ? `${this._sessionIdToken}_` : ''
-    const suffixToken = `${sessionPrefix}${shortHash}${retry}`
-    const maxSlugLength = this._getMaxSlugLength()
-
-    if (suffixToken.length >= maxSlugLength) {
-      return this._buildOverflowSlug(shortHash, retry, maxSlugLength)
-    }
-
-    const baseBudget = Math.max(1, maxSlugLength - suffixToken.length - 1)
-    const baseCandidate = this._sanitizeFileToken(test.title, baseBudget)
-    const fallbackCandidate =
-      this._sanitizeFileToken(fileName, Math.min(40, baseBudget)) || 'test'
-
-    if (this._options.fileNameOverflowStrategy === 'session') {
-      const preferredBase = baseCandidate || fallbackCandidate
-      const preferred = `${preferredBase}_${suffixToken}`
-      if (preferred.length <= maxSlugLength) {
-        return preferred
-      }
-      return this._buildOverflowSlug(shortHash, retry, maxSlugLength)
-    }
-
-    const selectedBase = baseCandidate || fallbackCandidate
-    const slug = `${selectedBase}_${suffixToken}`
-    if (slug.length <= maxSlugLength) {
-      return slug
-    }
-
-    const trimmedBase = this._sanitizeFileToken(selectedBase, baseBudget)
-    const trimmedSlug = `${trimmedBase || fallbackCandidate}_${suffixToken}`
-    if (trimmedSlug.length <= maxSlugLength) {
-      return trimmedSlug
-    }
-
-    return this._buildOverflowSlug(shortHash, retry, maxSlugLength)
+  private _isRecordingActive(): boolean {
+    return this._isChromium && this._ffmpegAvailable
   }
 
-  private _buildOverflowSlug(
-    shortHash: string,
-    retryToken: string,
-    maxSlugLength: number,
-  ): string {
-    const sessionToken = this._sessionIdToken || 'session'
-    const full = `${sessionToken}_${shortHash}${retryToken}`
-    if (full.length <= maxSlugLength) {
-      return full
-    }
+  /** @internal Exposed for unit testing only. */
+  private _buildTestSlug(test: Frameworks.Test, context?: unknown): string {
+    const metadata = this._collectSlugMetadata(test, context)
+    return this._buildTestSlugFromMetadata(metadata)
+  }
 
-    const compact = `${sessionToken}_${shortHash}`
-    if (compact.length <= maxSlugLength) {
-      return compact
-    }
+  private _buildTestSlugFromMetadata(metadata: SlugMetadata): string {
+    return buildTestSlugFromMetadata(metadata, {
+      maxSlugLength: this._getMaxSlugLength(),
+      fileNameStyle: this._options.fileNameStyle ?? 'test',
+      fileNameOverflowStrategy:
+        this._options.fileNameOverflowStrategy ?? 'truncate',
+      sessionIdToken: this._sessionIdToken,
+      sessionIdFullToken: this._sessionIdFullToken,
+    })
+  }
 
-    const sessionBudget = Math.max(4, maxSlugLength - shortHash.length - 1)
-    const compactSession = this._sanitizeFileToken(sessionToken, sessionBudget)
-    const compactSlug = `${compactSession}_${shortHash}`
-    if (compactSlug.length <= maxSlugLength) {
-      return compactSlug
-    }
+  private _collectSlugMetadata(
+    test: Frameworks.Test,
+    context: unknown,
+  ): SlugMetadata {
+    return collectSlugMetadata(test, context)
+  }
 
-    return shortHash.slice(0, Math.max(6, maxSlugLength))
+  private _reserveUniqueSlug(baseSlug: string): string {
+    return reserveUniqueSlug(
+      baseSlug,
+      this._getMaxSlugLength(),
+      this._slugUsageCount,
+    )
   }
 
   private _getMaxSlugLength(): number {
+    return this._maxSlugLength
+  }
+
+  private _computeMaxSlugLength(): number {
     const effectiveMaxFilenameLength = this._getEffectiveMaxFilenameLength()
     return Math.max(16, effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH)
   }
 
   private _getEffectiveMaxFilenameLength(): number {
-    const configuredMax = this._options.maxFileNameLength
-      ? Math.floor(this._options.maxFileNameLength)
-      : process.platform === 'win32'
+    const platformDefault =
+      process.platform === 'win32'
         ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
         : DEFAULT_MAX_FILENAME_LENGTH
+    const configuredMax = this._options.maxFileNameLength
+      ? Math.floor(this._options.maxFileNameLength)
+      : platformDefault
 
     let effectiveMax = configuredMax
     if (process.platform === 'win32') {
@@ -1156,16 +1400,7 @@ export default class WdioPuppeteerVideoService
     value: string | undefined,
     maxLength: number,
   ): string {
-    const normalized = (value ?? '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-
-    if (normalized.length <= maxLength) {
-      return normalized
-    }
-
-    return normalized.slice(0, maxLength).replace(/_+$/g, '')
+    return sanitizeFileToken(value, maxLength)
   }
 
   private _normalizeOutputDir(outputDir: string | undefined): string {
@@ -1195,14 +1430,73 @@ export default class WdioPuppeteerVideoService
     return 'truncate'
   }
 
-  private _buildSessionIdToken(sessionId: string | undefined): string {
-    const primaryChunk = sessionId?.split('-')[0]
-    const sanitizedPrimary = this._sanitizeFileToken(primaryChunk, 12)
-    if (sanitizedPrimary) {
-      return sanitizedPrimary.slice(0, 12)
+  private _normalizeFileNameStyle(
+    style: WdioPuppeteerVideoServiceFileNameStyle | undefined,
+  ): WdioPuppeteerVideoServiceFileNameStyle {
+    if (style === 'session') {
+      return 'session'
+    }
+    if (style === 'sessionFull') {
+      return 'sessionFull'
+    }
+    return 'test'
+  }
+
+  private _normalizeMp4Mode(
+    mode: WdioPuppeteerVideoServiceMp4Mode | undefined,
+  ): WdioPuppeteerVideoServiceMp4Mode {
+    if (mode === 'direct') {
+      return 'direct'
+    }
+    if (mode === 'transcode') {
+      return 'transcode'
+    }
+    return 'auto'
+  }
+
+  private _normalizePerformanceProfile(
+    profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
+  ): WdioPuppeteerVideoServicePerformanceProfile {
+    if (profile === 'parallel') {
+      return 'parallel'
+    }
+    return 'default'
+  }
+
+  private _isBenignStreamWriteError(error: NodeJS.ErrnoException): boolean {
+    if (error.code === 'EPIPE') {
+      return true
     }
 
-    const sanitized = this._sanitizeFileToken(sessionId, 12)
-    return sanitized.slice(0, 12)
+    const message = error.message.toLowerCase()
+    return (
+      message.includes('cannot call write after a stream was destroyed') ||
+      message.includes('write after end')
+    )
+  }
+
+  private _describeError(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message
+    }
+    if (typeof error === 'string') {
+      return error
+    }
+    return String(error)
+  }
+
+  private _nextPageMarkerId(): string {
+    this._pageMarkerCounter += 1
+    const sessionToken =
+      this._sessionIdToken || this._sessionIdFullToken || 'session'
+    return `wdio-video-${sessionToken}-${Date.now().toString(36)}-${this._pageMarkerCounter.toString(36)}`
+  }
+
+  private _buildSessionIdToken(sessionId: string | undefined): string {
+    return buildSessionIdToken(sessionId)
+  }
+
+  private _buildFullSessionIdToken(sessionId: string | undefined): string {
+    return buildFullSessionIdToken(sessionId)
   }
 }
