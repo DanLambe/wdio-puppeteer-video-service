@@ -10,5 +10,6 @@ export type {
   WdioPuppeteerVideoServiceMp4Mode,
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
+  WdioPuppeteerVideoServicePostProcessMode,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'

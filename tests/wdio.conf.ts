@@ -14,6 +14,14 @@ const runMode =
 const resultsDir = path.resolve(
   process.env.WDIO_RESULTS_DIR || path.join('tests/results', runMode),
 )
+const configuredMaxInstances = Number.parseInt(
+  process.env.WDIO_MAX_INSTANCES ?? '2',
+  10,
+)
+const maxInstances =
+  Number.isFinite(configuredMaxInstances) && configuredMaxInstances > 0
+    ? configuredMaxInstances
+    : 2
 const expectedTestTitles = [
   'should record a simple navigation',
   'should handle iframe switching',
@@ -41,7 +49,7 @@ export const config: WebdriverIO.Config = {
   // ============
   // Capabilities
   // ============
-  maxInstances: 3,
+  maxInstances,
   capabilities: [
     {
       browserName: 'chrome',

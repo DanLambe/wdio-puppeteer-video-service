@@ -17,6 +17,7 @@ export type WdioPuppeteerVideoServiceFileNameStyle =
 
 export type WdioPuppeteerVideoServiceMp4Mode = 'auto' | 'direct' | 'transcode'
 export type WdioPuppeteerVideoServicePerformanceProfile = 'default' | 'parallel'
+export type WdioPuppeteerVideoServicePostProcessMode = 'immediate' | 'deferred'
 
 export interface WdioPuppeteerVideoServiceOptions {
   /**
@@ -48,6 +49,113 @@ export interface WdioPuppeteerVideoServiceOptions {
    * @default 30
    */
   fps?: number
+
+  /**
+   * Record only retry attempts (`attempt > 0`) instead of every first run.
+   *
+   * This reduces capture overhead for mostly-green suites.
+   *
+   * @default false
+   */
+  recordOnRetries?: boolean
+
+  /**
+   * Record once per spec file instead of per test/scenario.
+   *
+   * In this mode, recording starts on the first entity that qualifies for recording
+   * and finalizes in the worker `after` hook.
+   *
+   * @default false
+   */
+  specLevelRecording?: boolean
+
+  /**
+   * Skip the viewport "kickoff" resize sequence used to prime early screencast frames.
+   *
+   * Disabling this can reduce per-recording overhead in constrained CI environments.
+   *
+   * @default false
+   */
+  skipViewPortKickoff?: boolean
+
+  /**
+   * Controls whether window/tab switching commands create recording segments (`_partN`).
+   *
+   * Disabling this avoids stop/start churn around `newWindow`, `switchWindow`,
+   * `switchToWindow`, and `closeWindow`, but recordings may miss activity that
+   * happens in windows that were never attached for capture.
+   *
+   * @default true
+   */
+  segmentOnWindowSwitch?: boolean
+
+  /**
+   * Maximum concurrent active recorders within the current Node.js process.
+   *
+   * Use `0` (or omit) for no explicit limit.
+   *
+   * @default 0
+   */
+  maxConcurrentRecordings?: number
+
+  /**
+   * Maximum concurrent active recorders across WDIO worker processes on the same host.
+   *
+   * This uses a lock-file slot semaphore and can reduce host CPU contention in CI.
+   * Use `0` (or omit) to disable the global limiter.
+   *
+   * @default 0
+   */
+  maxGlobalRecordings?: number
+
+  /**
+   * Optional directory used for global recording lock files.
+   *
+   * If omitted, a `.wdio-video-global-slots` directory inside `outputDir` is used.
+   */
+  globalRecordingLockDir?: string
+
+  /**
+   * Post-processing execution mode for ffmpeg-heavy steps (segment merge and transcode).
+   *
+   * - `immediate` (default): process artifacts at test finalization
+   * - `deferred`: queue processing and execute in the worker `after` hook
+   *
+   * @default 'immediate'
+   */
+  postProcessMode?: WdioPuppeteerVideoServicePostProcessMode
+
+  /**
+   * Optional spec-path include patterns for deciding whether to record.
+   *
+   * Patterns are case-insensitive and support `*` wildcards.
+   * If provided, only matching spec paths are eligible for recording.
+   */
+  includeSpecPatterns?: string[]
+
+  /**
+   * Optional spec-path exclude patterns for deciding whether to record.
+   *
+   * Patterns are case-insensitive and support `*` wildcards.
+   */
+  excludeSpecPatterns?: string[]
+
+  /**
+   * Optional tag include patterns for deciding whether to record.
+   *
+   * Primarily useful for Cucumber tag metadata.
+   * Patterns are case-insensitive and support `*` wildcards.
+   * If provided, at least one tag must match for recording to start.
+   */
+  includeTagPatterns?: string[]
+
+  /**
+   * Optional tag exclude patterns for deciding whether to record.
+   *
+   * Primarily useful for Cucumber tag metadata.
+   * Patterns are case-insensitive and support `*` wildcards.
+   */
+  excludeTagPatterns?: string[]
 
   /**
    * Optional performance profile that applies conservative defaults for parallel workers.

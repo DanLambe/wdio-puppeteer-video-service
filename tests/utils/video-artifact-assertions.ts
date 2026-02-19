@@ -7,6 +7,7 @@ interface VideoArtifactAssertionOptions {
   resultsDir: string
   expectedTitles: string[]
   expectVideos: boolean
+  expectZeroVideos?: boolean
   mergeSegmentsEnabled?: boolean
   fileNameStyle?: VideoFileNameStyle
   runLabel: string
@@ -75,29 +76,11 @@ const toTitlePattern = (
   )
 }
 
-export const assertVideoArtifacts = async ({
-  resultsDir,
-  expectedTitles,
-  expectVideos,
-  mergeSegmentsEnabled = false,
-  fileNameStyle = 'test',
-  runLabel,
-}: VideoArtifactAssertionOptions): Promise<void> => {
-  const files = await readdir(resultsDir).catch(() => [])
-  const mediaFiles = files.filter(
-    (file) => file.endsWith('.mp4') || file.endsWith('.webm'),
-  )
-
-  if (mediaFiles.length === 0) {
-    if (!expectVideos) {
-      console.warn(
-        `[wdio:e2e:${runLabel}] No video files were generated in ${resultsDir}. Skipping artifact assertions because WDIO_EXPECT_VIDEOS=${process.env.WDIO_EXPECT_VIDEOS ?? '0'}.`,
-      )
-      return
-    }
-    throw new Error(`No video files were generated in ${resultsDir}`)
-  }
-
+const warnSmallFiles = async (
+  mediaFiles: string[],
+  resultsDir: string,
+  runLabel: string,
+): Promise<void> => {
   for (const file of mediaFiles) {
     const filePath = path.join(resultsDir, file)
     const fileSize = await stat(filePath)
@@ -109,6 +92,46 @@ export const assertVideoArtifacts = async ({
       )
     }
   }
+}
+
+export const assertVideoArtifacts = async ({
+  resultsDir,
+  expectedTitles,
+  expectVideos,
+  expectZeroVideos = false,
+  mergeSegmentsEnabled = false,
+  fileNameStyle = 'test',
+  runLabel,
+}: VideoArtifactAssertionOptions): Promise<void> => {
+  const files = await readdir(resultsDir).catch(() => [])
+  const mediaFiles = files.filter(
+    (file) => file.endsWith('.mp4') || file.endsWith('.webm'),
+  )
+
+  if (expectZeroVideos) {
+    if (mediaFiles.length > 0) {
+      throw new Error(
+        `Expected no video files in ${resultsDir}, but found: ${mediaFiles.join(', ')}`,
+      )
+    }
+
+    console.log(
+      `[wdio:e2e:${runLabel}] Verified no video artifacts were generated (expectZeroVideos=true, dir=${resultsDir}).`,
+    )
+    return
+  }
+
+  if (mediaFiles.length === 0) {
+    if (!expectVideos) {
+      console.warn(
+        `[wdio:e2e:${runLabel}] No video files were generated in ${resultsDir}. Skipping artifact assertions because WDIO_EXPECT_VIDEOS=${process.env.WDIO_EXPECT_VIDEOS ?? '0'}.`,
+      )
+      return
+    }
+    throw new Error(`No video files were generated in ${resultsDir}`)
+  }
+
+  await warnSmallFiles(mediaFiles, resultsDir, runLabel)
 
   const missingTitles: string[] = []
   for (const title of expectedTitles) {
@@ -137,6 +160,15 @@ export const assertVideoArtifacts = async ({
   console.log(
     `[wdio:e2e:${runLabel}] Verified ${mediaFiles.length} artifacts (style=${fileNameStyle}, merge=${mergeSegmentsEnabled}, expectVideos=${expectVideos}, dir=${resultsDir}).`,
   )
+}
+
+export const listVideoArtifacts = async (
+  resultsDir: string,
+): Promise<string[]> => {
+  const files = await readdir(resultsDir).catch(() => [])
+  return files
+    .filter((file) => file.endsWith('.mp4') || file.endsWith('.webm'))
+    .sort((a, b) => a.localeCompare(b))
 }
 
 export { toFileToken }
