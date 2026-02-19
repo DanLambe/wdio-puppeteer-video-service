@@ -1,15 +1,8 @@
 import { spawn } from 'node:child_process'
-import { createRequire } from 'node:module'
 import path from 'node:path'
+import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
 
 type VideoMode = 'multipart' | 'merge'
-type FfmpegDetectionResult = {
-  available: boolean
-  resolvedPath?: string
-  checkedCandidates: string[]
-}
-const FFMPEG_CHECK_TIMEOUT_MS = 5_000
-const require = createRequire(import.meta.url)
 
 const requestedMode = process.argv[2] || 'both'
 
@@ -29,93 +22,14 @@ if (modeOrder.length === 0) {
   process.exit(1)
 }
 
-const resolveOptionalFfmpegStaticPath = (): string | undefined => {
-  try {
-    const resolved = require('ffmpeg-static') as string | null
-    if (typeof resolved === 'string' && resolved.trim().length > 0) {
-      return resolved
-    }
-  } catch {
-    // optional dependency
-  }
-  return undefined
-}
-
-const canExecuteFfmpeg = async (ffmpegPath: string): Promise<boolean> => {
-  return await new Promise<boolean>((resolve) => {
-    const proc = spawn(ffmpegPath, ['-version'], {
-      stdio: ['ignore', 'ignore', 'ignore'],
-    })
-    let settled = false
-    const settle = (value: boolean) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      resolve(value)
-    }
-
-    const timer = setTimeout(() => {
-      proc.kill()
-      settle(false)
-    }, FFMPEG_CHECK_TIMEOUT_MS)
-
-    proc.on('error', () => {
-      clearTimeout(timer)
-      settle(false)
-    })
-
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      settle(code === 0)
-    })
-  })
-}
-
-const detectFfmpeg = async (): Promise<FfmpegDetectionResult> => {
-  const envPath = process.env.FFMPEG_PATH?.trim()
-  const staticPath = resolveOptionalFfmpegStaticPath()
-  const candidatePaths = [envPath, 'ffmpeg', staticPath]
-  const checkedCandidates: string[] = []
-  const seen = new Set<string>()
-
-  for (const candidate of candidatePaths) {
-    if (!candidate) {
-      continue
-    }
-    const normalizedCandidate = candidate.trim()
-    if (!normalizedCandidate || seen.has(normalizedCandidate)) {
-      continue
-    }
-    seen.add(normalizedCandidate)
-    checkedCandidates.push(normalizedCandidate)
-
-    if (await canExecuteFfmpeg(normalizedCandidate)) {
-      return {
-        available: true,
-        resolvedPath: normalizedCandidate,
-        checkedCandidates,
-      }
-    }
-  }
-
-  return {
-    available: false,
-    checkedCandidates,
-  }
-}
-
-const runWdio = async (mode: VideoMode): Promise<void> => {
+const runWdio = async (
+  mode: VideoMode,
+  ffmpegDetection: FfmpegDetectionResult,
+): Promise<void> => {
   const nodeCommand = process.execPath
   const wdioCliPath = path.resolve('node_modules/@wdio/cli/bin/wdio.js')
   const resultsDir = path.resolve('tests/results', mode)
   const mergeEnabled = mode === 'merge' ? '1' : '0'
-  const ffmpegDetection = await detectFfmpeg()
-  if (!ffmpegDetection.available) {
-    console.warn(
-      `[e2e:modes] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
-    )
-  }
 
   console.log(`[e2e:modes] Starting ${mode} run. Artifacts => ${resultsDir}`)
 
@@ -154,9 +68,16 @@ const runWdio = async (mode: VideoMode): Promise<void> => {
   console.log(`[e2e:modes] Completed ${mode} run.`)
 }
 
+const ffmpegDetection = await detectFfmpeg()
+if (!ffmpegDetection.available) {
+  console.warn(
+    `[e2e:modes] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
+  )
+}
+
 for (const mode of modeOrder) {
   // Sequential runs preserve distinct artifact folders for each mode.
-  await runWdio(mode)
+  await runWdio(mode, ffmpegDetection)
 }
 
 console.log('[e2e:modes] All requested runs completed successfully.')

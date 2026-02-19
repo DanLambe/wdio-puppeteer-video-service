@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { WriteStream } from 'node:fs'
 import { createWriteStream } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -21,6 +22,7 @@ import type {
   WdioPuppeteerVideoServiceMp4Mode,
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
+  WdioPuppeteerVideoServicePostProcessMode,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'
 import {
@@ -55,6 +57,41 @@ interface ActiveSegment {
   onRecorderError: (error: unknown) => void
 }
 
+interface DeferredTranscodeTask {
+  kind: 'transcode'
+  inputPath: string
+  outputPath: string
+  deleteOriginal: boolean
+  ffmpegArgs?: string[]
+}
+
+interface DeferredMergeTask {
+  kind: 'merge'
+  segmentPaths: string[]
+  mergedPath: string
+  deleteSegments: boolean
+  transcodeToMp4?: {
+    outputPath: string
+    deleteOriginal: boolean
+    ffmpegArgs?: string[]
+  }
+}
+
+type DeferredPostProcessTask = DeferredTranscodeTask | DeferredMergeTask
+
+interface MergeExecutionOptions {
+  segmentPaths: string[]
+  mergedPath: string
+  deleteSegments: boolean
+  writeFailureContext: string
+  ffmpegOperation: string
+}
+
+const SEGMENT_EXTENSION_TO_FORMAT: Record<string, OutputFormat> = {
+  '.mp4': 'mp4',
+  '.webm': 'webm',
+}
+
 const WINDOW_SEGMENT_COMMANDS = new Set([
   'switchWindow',
   'switchToWindow',
@@ -72,6 +109,9 @@ const WINDOWS_MAX_PATH_LENGTH = 259
 const SEGMENT_SUFFIX_MAX_LENGTH = '_part9999.webm'.length
 const MIN_SAFE_FILENAME_LENGTH = 40
 const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
+const GLOBAL_RECORDING_SLOT_POLL_MS = 100
+const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
+const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 const require = createRequire(import.meta.url)
 const DEFAULT_OUTPUT_DIR = 'videos'
 const LOG_LEVEL_PRIORITY: Record<WdioPuppeteerVideoServiceLogLevel, number> = {
@@ -94,14 +134,21 @@ const LOG_METHOD_MAP: Record<string, (...args: unknown[]) => void> = {
 export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
+  private static _activeRecordingSlots = 0
+  private static readonly _recordingSlotWaiters: Array<() => void> = []
+
   private _browser?: Browser
   private readonly _options: WdioPuppeteerVideoServiceOptions
   private _recorder?: ScreenRecorder
   private _activeSegment?: ActiveSegment
   private _currentSegment = 0
   private _currentTestSlug = ''
+  private _currentRecordingRetryCount = 0
   private readonly _recordedSegments = new Set<string>()
+  private readonly _entityAttemptCount = new Map<string, number>()
   private _isChromium = false
+  private _specHadFailure = false
+  private _specPaths: string[] = []
   private _currentWindowHandle: string | undefined
   private _sessionIdToken = ''
   private _sessionIdFullToken = ''
@@ -111,12 +158,18 @@ export default class WdioPuppeteerVideoService
   private _resolvedFfmpegPath: string | undefined
   private _ffmpegCandidates: string[] = []
   private _recordingTask: Promise<void> = Promise.resolve()
+  private readonly _deferredPostProcessTasks: DeferredPostProcessTask[] = []
   private _warnedAboutMp4Compatibility = false
   private _warnedAboutMp4AutoFallback = false
   private _warnedAboutMissingFfmpeg = false
   private _forceMp4Transcode = false
   private readonly _slugUsageCount = new Map<string, number>()
   private readonly _maxSlugLength: number
+  private _ownsRecordingSlot = false
+  private _ownsGlobalRecordingSlot = false
+  private _globalRecordingSlotPath: string | undefined
+  private _globalRecordingSlotFileHandle: FileHandle | undefined
+  private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
 
   constructor(options: WdioPuppeteerVideoServiceOptions) {
@@ -137,8 +190,10 @@ export default class WdioPuppeteerVideoService
       ...mergeOptions,
     }
 
-    if (options.ffmpegArgs) {
-      mergedTranscode.ffmpegArgs ??= options.ffmpegArgs
+    const legacyFfmpegArgs = (options as unknown as { ffmpegArgs?: string[] })
+      .ffmpegArgs
+    if (legacyFfmpegArgs !== undefined) {
+      mergedTranscode.ffmpegArgs ??= legacyFfmpegArgs
       this._log(
         'warn',
         '[WdioPuppeteerVideoService] `ffmpegArgs` is deprecated. Use `transcode.ffmpegArgs` instead.',
@@ -151,6 +206,17 @@ export default class WdioPuppeteerVideoService
       videoWidth: 1280,
       videoHeight: 720,
       fps: 30,
+      recordOnRetries: false,
+      specLevelRecording: false,
+      skipViewPortKickoff: false,
+      segmentOnWindowSwitch: true,
+      maxConcurrentRecordings: 0,
+      maxGlobalRecordings: 0,
+      postProcessMode: 'immediate',
+      includeSpecPatterns: [],
+      excludeSpecPatterns: [],
+      includeTagPatterns: [],
+      excludeTagPatterns: [],
       outputFormat: 'webm',
       mp4Mode: 'auto',
       fileNameStyle: 'test',
@@ -202,6 +268,43 @@ export default class WdioPuppeteerVideoService
       performanceProfile: this._normalizePerformanceProfile(
         mergedOptions.performanceProfile,
       ),
+      recordOnRetries: this._normalizeBoolean(mergedOptions.recordOnRetries),
+      specLevelRecording: this._normalizeBoolean(
+        mergedOptions.specLevelRecording,
+      ),
+      skipViewPortKickoff: this._normalizeBoolean(
+        mergedOptions.skipViewPortKickoff,
+      ),
+      segmentOnWindowSwitch: this._normalizeBoolean(
+        mergedOptions.segmentOnWindowSwitch,
+        true,
+      ),
+      maxConcurrentRecordings: this._normalizeNonNegativeInt(
+        mergedOptions.maxConcurrentRecordings,
+        0,
+      ),
+      maxGlobalRecordings: this._normalizeNonNegativeInt(
+        mergedOptions.maxGlobalRecordings,
+        0,
+      ),
+      globalRecordingLockDir: this._normalizeOptionalDir(
+        mergedOptions.globalRecordingLockDir,
+      ),
+      postProcessMode: this._normalizePostProcessMode(
+        mergedOptions.postProcessMode,
+      ),
+      includeSpecPatterns: this._normalizePatternList(
+        mergedOptions.includeSpecPatterns,
+      ),
+      excludeSpecPatterns: this._normalizePatternList(
+        mergedOptions.excludeSpecPatterns,
+      ),
+      includeTagPatterns: this._normalizePatternList(
+        mergedOptions.includeTagPatterns,
+      ),
+      excludeTagPatterns: this._normalizePatternList(
+        mergedOptions.excludeTagPatterns,
+      ),
     }
 
     this._maxSlugLength = this._computeMaxSlugLength()
@@ -209,10 +312,13 @@ export default class WdioPuppeteerVideoService
 
   async before(
     _capabilities: WebdriverIO.Capabilities,
-    _specs: string[],
+    specs: string[],
     browser: Browser,
   ): Promise<void> {
     this._browser = browser
+    this._specPaths = specs
+    this._specHadFailure = false
+    this._entityAttemptCount.clear()
 
     if (!this._hasExplicitLogLevel) {
       const inheritedLogLevel = this._resolveWdioLogLevel(browser)
@@ -264,7 +370,25 @@ export default class WdioPuppeteerVideoService
     }
 
     await this._runSerializedRecordingTask(async () => {
-      await this._startRecordingForEntity(test, context)
+      if (!this._shouldRecordForFilters(test, context)) {
+        return
+      }
+
+      const retryCount = this._resolveRetryCountForEntity(test, context)
+      if (!this._shouldRecordForRetryCount(retryCount)) {
+        return
+      }
+
+      if (this._options.specLevelRecording) {
+        if (this._currentTestSlug) {
+          return
+        }
+
+        await this._startSpecLevelRecording(retryCount)
+        return
+      }
+
+      await this._startRecordingForEntity(test, context, retryCount)
     })
   }
 
@@ -273,7 +397,7 @@ export default class WdioPuppeteerVideoService
     _context: unknown,
     result: Frameworks.TestResult,
   ): Promise<void> {
-    await this._finalizeIfRecording(result.passed)
+    await this._afterTestOrScenario(result.passed)
   }
 
   async beforeScenario(
@@ -289,7 +413,33 @@ export default class WdioPuppeteerVideoService
         title: world?.pickle?.name || 'scenario',
         fullTitle: world?.pickle?.name || 'scenario',
       } as Frameworks.Test
-      await this._startRecordingForEntity(cucumberEntity, context ?? world)
+      const scenarioContext = context ?? world
+      if (!this._shouldRecordForFilters(cucumberEntity, scenarioContext)) {
+        return
+      }
+
+      const retryCount = this._resolveRetryCountForEntity(
+        cucumberEntity,
+        scenarioContext,
+      )
+      if (!this._shouldRecordForRetryCount(retryCount)) {
+        return
+      }
+
+      if (this._options.specLevelRecording) {
+        if (this._currentTestSlug) {
+          return
+        }
+
+        await this._startSpecLevelRecording(retryCount)
+        return
+      }
+
+      await this._startRecordingForEntity(
+        cucumberEntity,
+        scenarioContext,
+        retryCount,
+      )
     })
   }
 
@@ -297,17 +447,38 @@ export default class WdioPuppeteerVideoService
     _world: Frameworks.World,
     result: Frameworks.PickleResult,
   ): Promise<void> {
-    await this._finalizeIfRecording(result.passed)
+    await this._afterTestOrScenario(result.passed)
+  }
+
+  private async _afterTestOrScenario(passed: boolean): Promise<void> {
+    if (this._options.specLevelRecording) {
+      if (!passed) {
+        this._specHadFailure = true
+      }
+      return
+    }
+
+    await this._finalizeIfRecording(passed)
   }
 
   async after(): Promise<void> {
-    if (!this._isRecordingActive()) {
+    if (!this._isRecordingActive() && !this._hasDeferredPostProcessTasks()) {
       return
     }
 
     await this._runSerializedRecordingTask(async () => {
-      await this._stopRecording()
-      this._resetTestState()
+      if (this._isRecordingActive()) {
+        if (this._options.specLevelRecording && this._currentTestSlug) {
+          await this._finalizeCurrentTestRecording(!this._specHadFailure)
+        } else {
+          await this._stopRecording()
+          this._resetTestState()
+        }
+      }
+
+      await this._flushDeferredPostProcessTasks()
+      this._entityAttemptCount.clear()
+      this._specHadFailure = false
     })
   }
 
@@ -317,6 +488,10 @@ export default class WdioPuppeteerVideoService
     }
 
     if (!this._currentTestSlug) {
+      return
+    }
+
+    if (!this._options.segmentOnWindowSwitch) {
       return
     }
 
@@ -333,6 +508,10 @@ export default class WdioPuppeteerVideoService
     }
 
     if (!this._currentTestSlug) {
+      return
+    }
+
+    if (!this._options.segmentOnWindowSwitch) {
       return
     }
 
@@ -384,6 +563,7 @@ export default class WdioPuppeteerVideoService
       return
     }
 
+    let acquiredRecordingSlot = false
     try {
       const puppeteerBrowser =
         (await this._browser.getPuppeteer()) as unknown as PuppeteerBrowser
@@ -430,6 +610,16 @@ export default class WdioPuppeteerVideoService
 
       const recordingPath = this._getSegmentPath(recordingFormat)
       const outputPath = this._getSegmentPath(outputFormat)
+
+      const acquiredSlot = await this._acquireRecordingSlot()
+      if (!acquiredSlot) {
+        this._log(
+          'warn',
+          '[WdioPuppeteerVideoService] Recording slot acquisition timed out. Recording skipped for this segment.',
+        )
+        return
+      }
+      acquiredRecordingSlot = true
 
       const ffmpegPath = this._resolveFfmpegPath()
       const recorder = await page.screencast({
@@ -503,8 +693,11 @@ export default class WdioPuppeteerVideoService
         `[WdioPuppeteerVideoService] Recording segment ${this._currentSegment} to ${outputPath}`,
       )
 
-      await this._kickOffScreencastFrames(page)
+      await this._kickOffScreencastFramesIfEnabled(page)
     } catch (e) {
+      if (acquiredRecordingSlot && !this._recorder) {
+        this._releaseRecordingSlot()
+      }
       this._log(
         'error',
         '[WdioPuppeteerVideoService] Failed to start recording:',
@@ -516,12 +709,16 @@ export default class WdioPuppeteerVideoService
   private async _startRecordingForEntity(
     test: Frameworks.Test,
     context: unknown,
+    retryCount: number,
   ): Promise<void> {
     if (this._currentTestSlug) {
       return
     }
 
-    const metadata = this._collectSlugMetadata(test, context)
+    const metadata = this._applyRetryCountToMetadata(
+      this._collectSlugMetadata(test, context),
+      retryCount,
+    )
     const testName = metadata.testNameToken
     this._log(
       'debug',
@@ -530,11 +727,370 @@ export default class WdioPuppeteerVideoService
     const baseSlug = this._buildTestSlugFromMetadata(metadata)
     this._currentTestSlug = this._reserveUniqueSlug(baseSlug)
     this._currentSegment = 1
+    this._currentRecordingRetryCount = retryCount
     this._recordedSegments.clear()
     this._currentWindowHandle = undefined
     this._activeSegment = undefined
 
     await this._startRecording()
+  }
+
+  private async _startSpecLevelRecording(retryCount: number): Promise<void> {
+    const specMetadata = this._buildSpecLevelSlugMetadata(retryCount)
+    const specEntity = {
+      title: specMetadata.testNameToken,
+      fullTitle: specMetadata.testNameToken,
+      file: specMetadata.fileToken,
+    } as Frameworks.Test
+
+    await this._startRecordingForEntity(
+      specEntity,
+      { uri: this._specPaths[0] },
+      retryCount,
+    )
+  }
+
+  private _buildSpecLevelSlugMetadata(retryCount: number): SlugMetadata {
+    const firstSpecPath = this._specPaths[0] || 'spec'
+    const parsedSpecName = path.parse(firstSpecPath).name
+    const specToken = this._sanitizeFileToken(parsedSpecName, 120) || 'spec'
+    const specNameToken = specToken.endsWith('_spec')
+      ? specToken
+      : `${specToken}_spec`
+    const allSpecsToken =
+      this._specPaths.length > 0 ? this._specPaths.join('|') : firstSpecPath
+
+    return {
+      fileToken: specToken,
+      testNameToken: specNameToken,
+      retryToken: retryCount > 0 ? `_retry${retryCount}` : '',
+      hashInput: `spec|${allSpecsToken}|${retryCount}`,
+    }
+  }
+
+  private _resolveRetryCountForEntity(
+    test: Frameworks.Test,
+    context: unknown,
+  ): number {
+    const explicitRetryCount = this._extractExplicitRetryCount(test, context)
+    if (explicitRetryCount !== undefined) {
+      return explicitRetryCount
+    }
+
+    if (!this._options.recordOnRetries) {
+      return 0
+    }
+
+    const metadata = this._collectSlugMetadata(test, context)
+    const retryTrackingKey = `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
+    const attemptCount = this._entityAttemptCount.get(retryTrackingKey) ?? 0
+    this._entityAttemptCount.set(retryTrackingKey, attemptCount + 1)
+    return attemptCount
+  }
+
+  private _extractExplicitRetryCount(
+    test: Frameworks.Test,
+    context: unknown,
+  ): number | undefined {
+    const testRetryCount = this._extractRetryValue(
+      (test as Frameworks.Test & { _currentRetry?: unknown })._currentRetry,
+    )
+    if (testRetryCount !== undefined) {
+      return testRetryCount
+    }
+
+    const contextRecord =
+      context && typeof context === 'object'
+        ? (context as Record<string, unknown>)
+        : undefined
+    const contextRetryCount = this._extractRetryValue(
+      contextRecord?._currentRetry,
+    )
+    if (contextRetryCount !== undefined) {
+      return contextRetryCount
+    }
+
+    const currentTestRecord =
+      contextRecord &&
+      typeof contextRecord.currentTest === 'object' &&
+      contextRecord.currentTest
+        ? (contextRecord.currentTest as Record<string, unknown>)
+        : undefined
+    return this._extractRetryValue(currentTestRecord?._currentRetry)
+  }
+
+  private _extractRetryValue(value: unknown): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return undefined
+    }
+
+    return Math.floor(value)
+  }
+
+  private _applyRetryCountToMetadata(
+    metadata: SlugMetadata,
+    retryCount: number,
+  ): SlugMetadata {
+    if (retryCount <= 0) {
+      return {
+        ...metadata,
+        retryToken: '',
+      }
+    }
+
+    const retryToken = `_retry${retryCount}`
+    return {
+      ...metadata,
+      retryToken,
+      hashInput: `${metadata.hashInput}|retry=${retryCount}`,
+    }
+  }
+
+  private _shouldRecordForRetryCount(retryCount: number): boolean {
+    if (!this._options.recordOnRetries) {
+      return true
+    }
+
+    return retryCount > 0
+  }
+
+  private _shouldRecordForFilters(
+    test: Frameworks.Test,
+    context: unknown,
+  ): boolean {
+    const includeSpecPatterns = this._options.includeSpecPatterns ?? []
+    const excludeSpecPatterns = this._options.excludeSpecPatterns ?? []
+    const includeTagPatterns = this._options.includeTagPatterns ?? []
+    const excludeTagPatterns = this._options.excludeTagPatterns ?? []
+
+    if (
+      includeSpecPatterns.length === 0 &&
+      excludeSpecPatterns.length === 0 &&
+      includeTagPatterns.length === 0 &&
+      excludeTagPatterns.length === 0
+    ) {
+      return true
+    }
+
+    const specPath = this._resolveEntitySpecPath(test, context)
+    if (
+      includeSpecPatterns.length > 0 &&
+      !this._matchesAnyPattern(specPath, includeSpecPatterns)
+    ) {
+      return false
+    }
+
+    if (
+      excludeSpecPatterns.length > 0 &&
+      this._matchesAnyPattern(specPath, excludeSpecPatterns)
+    ) {
+      return false
+    }
+
+    const entityTags = this._extractEntityTagTokens(test, context)
+    if (includeTagPatterns.length > 0) {
+      const includesAnyTag = entityTags.some((tagToken) =>
+        this._matchesAnyPattern(tagToken, includeTagPatterns),
+      )
+      if (!includesAnyTag) {
+        return false
+      }
+    }
+
+    if (excludeTagPatterns.length > 0) {
+      const hasExcludedTag = entityTags.some((tagToken) =>
+        this._matchesAnyPattern(tagToken, excludeTagPatterns),
+      )
+      if (hasExcludedTag) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  private _resolveEntitySpecPath(
+    test: Frameworks.Test,
+    context: unknown,
+  ): string {
+    const testRecord = test as Frameworks.Test & {
+      uri?: string
+      scenario?: {
+        uri?: string
+      }
+    }
+    const contextRecord =
+      context && typeof context === 'object'
+        ? (context as Record<string, unknown>)
+        : undefined
+    const contextCurrentTest =
+      contextRecord &&
+      typeof contextRecord.currentTest === 'object' &&
+      contextRecord.currentTest
+        ? (contextRecord.currentTest as Record<string, unknown>)
+        : undefined
+    const contextFeature =
+      contextRecord &&
+      typeof contextRecord.feature === 'object' &&
+      contextRecord.feature
+        ? (contextRecord.feature as Record<string, unknown>)
+        : undefined
+    const contextScenario =
+      contextRecord &&
+      typeof contextRecord.scenario === 'object' &&
+      contextRecord.scenario
+        ? (contextRecord.scenario as Record<string, unknown>)
+        : undefined
+
+    const candidates = [
+      testRecord.file,
+      testRecord.uri,
+      testRecord.scenario?.uri,
+      this._toNonEmptyString(contextCurrentTest?.file),
+      this._toNonEmptyString(contextCurrentTest?.uri),
+      this._toNonEmptyString(contextRecord?.uri),
+      this._toNonEmptyString(contextFeature?.uri),
+      this._toNonEmptyString(contextScenario?.uri),
+    ]
+
+    for (const candidate of candidates) {
+      const normalizedCandidate = this._normalizeCandidateValue(candidate)
+      if (normalizedCandidate) {
+        return normalizedCandidate
+      }
+    }
+
+    return ''
+  }
+
+  private _extractEntityTagTokens(
+    test: Frameworks.Test,
+    context: unknown,
+  ): string[] {
+    const testRecord = test as Frameworks.Test & {
+      tags?: unknown
+      pickle?: {
+        tags?: unknown
+      }
+      scenario?: {
+        tags?: unknown
+      }
+    }
+    const contextRecord =
+      context && typeof context === 'object'
+        ? (context as Record<string, unknown>)
+        : undefined
+    const contextCurrentTest =
+      contextRecord &&
+      typeof contextRecord.currentTest === 'object' &&
+      contextRecord.currentTest
+        ? (contextRecord.currentTest as Record<string, unknown>)
+        : undefined
+    const contextPickle =
+      contextRecord &&
+      typeof contextRecord.pickle === 'object' &&
+      contextRecord.pickle
+        ? (contextRecord.pickle as Record<string, unknown>)
+        : undefined
+    const contextScenario =
+      contextRecord &&
+      typeof contextRecord.scenario === 'object' &&
+      contextRecord.scenario
+        ? (contextRecord.scenario as Record<string, unknown>)
+        : undefined
+
+    const rawTagSources: unknown[] = [
+      testRecord.tags,
+      testRecord.pickle?.tags,
+      testRecord.scenario?.tags,
+      contextCurrentTest?.tags,
+      contextPickle?.tags,
+      contextScenario?.tags,
+      contextRecord?.tags,
+    ]
+
+    const normalizedTagTokens: string[] = []
+    const seen = new Set<string>()
+    for (const source of rawTagSources) {
+      const extracted = this._collectTagStrings(source)
+      for (const tagValue of extracted) {
+        const normalizedTag = this._normalizeCandidateValue(tagValue)
+        if (!normalizedTag || seen.has(normalizedTag)) {
+          continue
+        }
+        seen.add(normalizedTag)
+        normalizedTagTokens.push(normalizedTag)
+      }
+    }
+
+    return normalizedTagTokens
+  }
+
+  private _collectTagStrings(source: unknown): string[] {
+    if (!source) {
+      return []
+    }
+
+    if (typeof source === 'string') {
+      return [source]
+    }
+
+    if (Array.isArray(source)) {
+      return source.flatMap((entry) => this._collectTagStrings(entry))
+    }
+
+    if (typeof source === 'object') {
+      const sourceRecord = source as Record<string, unknown>
+      const namedTag = this._toNonEmptyString(sourceRecord.name)
+      if (namedTag) {
+        return [namedTag]
+      }
+
+      return []
+    }
+
+    return []
+  }
+
+  private _matchesAnyPattern(
+    value: string,
+    patterns: string[] | undefined,
+  ): boolean {
+    if (!value || !patterns || patterns.length === 0) {
+      return false
+    }
+
+    const normalizedValue = value.toLowerCase()
+    for (const pattern of patterns) {
+      if (this._matchesPattern(normalizedValue, pattern)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  private _matchesPattern(value: string, pattern: string): boolean {
+    if (!pattern) {
+      return false
+    }
+
+    if (!pattern.includes('*')) {
+      return value.includes(pattern)
+    }
+
+    let cachedRegex = this._wildcardPatternRegexCache.get(pattern)
+    if (!cachedRegex) {
+      const escapedPattern = pattern.replaceAll(
+        /[.+?^${}()|[\]\\]/g,
+        String.raw`\$&`,
+      )
+      const regexSource = `^${escapedPattern.replaceAll('*', '.*')}$`
+      cachedRegex = new RegExp(regexSource)
+      this._wildcardPatternRegexCache.set(pattern, cachedRegex)
+    }
+
+    return cachedRegex.test(value)
   }
 
   private async _finalizeIfRecording(passed: boolean): Promise<void> {
@@ -554,7 +1110,10 @@ export default class WdioPuppeteerVideoService
 
     await this._stopRecording()
 
-    const shouldKeepArtifacts = !passed || !!this._options.saveAllVideos
+    const shouldKeepRetryRecording =
+      !!this._options.recordOnRetries && this._currentRecordingRetryCount > 0
+    const shouldKeepArtifacts =
+      !passed || !!this._options.saveAllVideos || shouldKeepRetryRecording
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
@@ -566,7 +1125,11 @@ export default class WdioPuppeteerVideoService
     }
 
     if (this._options.mergeSegments?.enabled) {
-      await this._mergeSegmentsForCurrentTest()
+      if (this._shouldDeferPostProcessing()) {
+        await this._queueDeferredMergeForCurrentTest()
+      } else {
+        await this._mergeSegmentsForCurrentTest()
+      }
     }
 
     this._resetTestState()
@@ -579,6 +1142,7 @@ export default class WdioPuppeteerVideoService
     this._activeSegment = undefined
 
     if (!recorder || !activeSegment) {
+      this._releaseRecordingSlot()
       return
     }
     try {
@@ -611,18 +1175,68 @@ export default class WdioPuppeteerVideoService
     } finally {
       recorder.off('error', activeSegment.onRecorderError)
       activeSegment.writeStream.off('error', activeSegment.onWriteStreamError)
+      this._releaseRecordingSlot()
     }
   }
 
   private async _deleteSegments(): Promise<void> {
-    for (const file of this._recordedSegments) {
+    const filesToDelete = [...this._recordedSegments]
+    for (const file of filesToDelete) {
       try {
         await fs.unlink(file)
       } catch {
         // Ignore if file doesn't exist
       }
     }
+    this._dropDeferredPostProcessTasksForPaths(filesToDelete)
     this._recordedSegments.clear()
+  }
+
+  private async _queueDeferredMergeForCurrentTest(): Promise<void> {
+    if (!this._currentTestSlug) {
+      return
+    }
+
+    const segmentPaths = this._collectCurrentTestSegmentPaths()
+    if (segmentPaths.length === 0) {
+      return
+    }
+
+    const deleteSegments = this._options.mergeSegments?.deleteSegments ?? true
+    const mergedFormat = this._resolveMergeFormat(
+      segmentPaths,
+      'deferred merge',
+    )
+    if (!mergedFormat) {
+      return
+    }
+
+    const transcodeAfterMerge =
+      mergedFormat === 'webm' &&
+      this._options.outputFormat === 'mp4' &&
+      this._shouldTranscode('mp4')
+        ? {
+            outputPath: this._getMergedOutputPath('mp4'),
+            deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
+            ffmpegArgs: this._options.transcode?.ffmpegArgs,
+          }
+        : undefined
+    const mergedPath = transcodeAfterMerge
+      ? this._getMergedOutputPath('webm')
+      : this._getMergedOutputPath(mergedFormat)
+
+    this._dropDeferredPostProcessTasksForPaths(segmentPaths)
+    this._deferredPostProcessTasks.push({
+      kind: 'merge',
+      segmentPaths,
+      mergedPath,
+      deleteSegments,
+      transcodeToMp4: transcodeAfterMerge,
+    })
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Queued deferred merge for ${segmentPaths.length} segments into ${mergedPath}.`,
+    )
   }
 
   private async _mergeSegmentsForCurrentTest(): Promise<void> {
@@ -630,43 +1244,15 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const segmentPrefix = `${this._currentTestSlug}_part`
-    const segmentPaths = [...this._recordedSegments]
-      .filter((filePath) => path.basename(filePath).startsWith(segmentPrefix))
-      .sort(
-        (leftPath, rightPath) =>
-          this._extractPartNumber(leftPath) -
-          this._extractPartNumber(rightPath),
-      )
+    const segmentPaths = this._collectCurrentTestSegmentPaths()
 
     if (segmentPaths.length === 0) {
       return
     }
 
     const deleteSegments = this._options.mergeSegments?.deleteSegments ?? true
-    const extension = path.extname(segmentPaths[0]).toLowerCase()
-    const extensionToFormat: Record<string, OutputFormat> = {
-      '.mp4': 'mp4',
-      '.webm': 'webm',
-    }
-    const mergedFormat: OutputFormat | undefined = extensionToFormat[extension]
-
+    const mergedFormat = this._resolveMergeFormat(segmentPaths, 'merge')
     if (!mergedFormat) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Unsupported segment format for merge: ${extension}`,
-      )
-      return
-    }
-
-    const mixedFormats = segmentPaths.some(
-      (filePath) => path.extname(filePath).toLowerCase() !== extension,
-    )
-    if (mixedFormats) {
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] Skipping merge because segment formats are mixed.',
-      )
       return
     }
 
@@ -676,11 +1262,72 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Attempting merge for ${segmentPaths.length} segments into ${mergedPath}`,
     )
 
-    if (segmentPaths.length === 1) {
-      await fs.unlink(mergedPath).catch(() => {
-        /* may not exist yet */
-      })
+    const merged = await this._mergeSegmentPathsToOutput({
+      segmentPaths,
+      mergedPath,
+      deleteSegments,
+      writeFailureContext: 'merge',
+      ffmpegOperation: 'segment merge',
+    })
+    if (!merged) {
+      return
+    }
 
+    this._recordedSegments.add(mergedPath)
+    if (deleteSegments) {
+      for (const segmentPath of segmentPaths) {
+        this._recordedSegments.delete(segmentPath)
+      }
+    }
+  }
+
+  private _resolveMergeFormat(
+    segmentPaths: string[],
+    operationName: string,
+  ): OutputFormat | undefined {
+    const extension = path.extname(segmentPaths[0]).toLowerCase()
+    const mergedFormat = SEGMENT_EXTENSION_TO_FORMAT[extension]
+    if (!mergedFormat) {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Unsupported segment format for ${operationName}: ${extension}`,
+      )
+      return undefined
+    }
+
+    const hasMixedFormats = segmentPaths.some(
+      (filePath) => path.extname(filePath).toLowerCase() !== extension,
+    )
+    if (hasMixedFormats) {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Skipping ${operationName} because segment formats are mixed.`,
+      )
+      return undefined
+    }
+
+    return mergedFormat
+  }
+
+  private async _mergeSegmentPathsToOutput(
+    options: MergeExecutionOptions,
+  ): Promise<boolean> {
+    const {
+      segmentPaths,
+      mergedPath,
+      deleteSegments,
+      writeFailureContext,
+      ffmpegOperation,
+    } = options
+    if (segmentPaths.length === 0) {
+      return false
+    }
+
+    await fs.unlink(mergedPath).catch(() => {
+      /* may not exist yet */
+    })
+
+    if (segmentPaths.length === 1) {
       if (deleteSegments) {
         await fs.rename(segmentPaths[0], mergedPath).catch(async () => {
           await fs.copyFile(segmentPaths[0], mergedPath)
@@ -688,40 +1335,30 @@ export default class WdioPuppeteerVideoService
             /* best-effort cleanup */
           })
         })
-        this._recordedSegments.clear()
       } else {
         await fs.copyFile(segmentPaths[0], mergedPath)
       }
-
-      this._recordedSegments.add(mergedPath)
-      return
+      return true
     }
 
     const concatListPath = path.join(
       this._options.outputDir || DEFAULT_OUTPUT_DIR,
-      `${this._currentTestSlug}_concat_${Date.now().toString(36)}.txt`,
+      `${path.parse(mergedPath).name}_concat_${Date.now().toString(36)}.txt`,
     )
 
-    await fs
+    const wroteConcatList = await fs
       .writeFile(concatListPath, this._buildConcatList(segmentPaths), 'utf8')
+      .then(() => true)
       .catch((error: unknown) => {
         this._log(
           'warn',
-          `[WdioPuppeteerVideoService] Failed to write merge input list: ${String(error)}`,
+          `[WdioPuppeteerVideoService] Failed to write ${writeFailureContext} input list: ${String(error)}`,
         )
+        return false
       })
-
-    const hasConcatList = await fs
-      .stat(concatListPath)
-      .then(() => true)
-      .catch(() => false)
-    if (!hasConcatList) {
-      return
+    if (!wroteConcatList) {
+      return false
     }
-
-    await fs.unlink(mergedPath).catch(() => {
-      /* may not exist yet */
-    })
 
     const merged = await this._runFfmpeg(
       [
@@ -736,29 +1373,40 @@ export default class WdioPuppeteerVideoService
         'copy',
         mergedPath,
       ],
-      'segment merge',
+      ffmpegOperation,
     )
 
     await fs.unlink(concatListPath).catch(() => {
       /* best-effort cleanup */
     })
-
     if (!merged) {
-      return
+      return false
     }
 
-    this._recordedSegments.add(mergedPath)
-
-    if (!deleteSegments) {
-      return
+    if (deleteSegments) {
+      for (const segmentPath of segmentPaths) {
+        await fs.unlink(segmentPath).catch(() => {
+          /* best-effort cleanup */
+        })
+      }
     }
 
-    for (const filePath of segmentPaths) {
-      await fs.unlink(filePath).catch(() => {
-        /* best-effort cleanup */
-      })
-      this._recordedSegments.delete(filePath)
+    return true
+  }
+
+  private _collectCurrentTestSegmentPaths(): string[] {
+    if (!this._currentTestSlug) {
+      return []
     }
+
+    const segmentPrefix = `${this._currentTestSlug}_part`
+    return [...this._recordedSegments]
+      .filter((filePath) => path.basename(filePath).startsWith(segmentPrefix))
+      .sort(
+        (leftPath, rightPath) =>
+          this._extractPartNumber(leftPath) -
+          this._extractPartNumber(rightPath),
+      )
   }
 
   private _getSegmentPath(format?: OutputFormat): string {
@@ -900,6 +1548,14 @@ export default class WdioPuppeteerVideoService
       })
   }
 
+  private async _kickOffScreencastFramesIfEnabled(page: Page): Promise<void> {
+    if (this._options.skipViewPortKickoff) {
+      return
+    }
+
+    await this._kickOffScreencastFrames(page)
+  }
+
   private async _waitForWriteStream(segment: ActiveSegment): Promise<boolean> {
     if (segment.writeStreamErrored) {
       await segment.writeStreamDone.catch(() => {
@@ -946,6 +1602,27 @@ export default class WdioPuppeteerVideoService
       return
     }
 
+    if (this._shouldDeferPostProcessing()) {
+      this._recordedSegments.add(segment.recordingPath)
+
+      if (this._options.mergeSegments?.enabled) {
+        return
+      }
+
+      this._deferredPostProcessTasks.push({
+        kind: 'transcode',
+        inputPath: segment.recordingPath,
+        outputPath: segment.outputPath,
+        deleteOriginal: segment.transcodeOptions.deleteOriginal,
+        ffmpegArgs: segment.transcodeOptions.ffmpegArgs,
+      })
+      this._log(
+        'debug',
+        `[WdioPuppeteerVideoService] Queued deferred transcode: ${segment.recordingPath} -> ${segment.outputPath}`,
+      )
+      return
+    }
+
     const ok = await this._transcodeToH264Mp4(
       segment.recordingPath,
       segment.outputPath,
@@ -976,6 +1653,18 @@ export default class WdioPuppeteerVideoService
     outputPath: string,
     segment: ActiveSegment,
   ): Promise<boolean> {
+    return this._transcodeToH264Mp4WithArgs(
+      inputPath,
+      outputPath,
+      segment.transcodeOptions.ffmpegArgs,
+    )
+  }
+
+  private async _transcodeToH264Mp4WithArgs(
+    inputPath: string,
+    outputPath: string,
+    ffmpegArgs: string[] | undefined,
+  ): Promise<boolean> {
     const args = [
       '-y',
       '-i',
@@ -988,7 +1677,7 @@ export default class WdioPuppeteerVideoService
       'yuv420p',
       '-vf',
       'pad=ceil(iw/2)*2:ceil(ih/2)*2',
-      ...(segment.transcodeOptions.ffmpegArgs ?? []),
+      ...(ffmpegArgs ?? []),
       outputPath,
     ]
 
@@ -1263,6 +1952,340 @@ export default class WdioPuppeteerVideoService
     await this._recordingTask
   }
 
+  private _hasDeferredPostProcessTasks(): boolean {
+    return this._deferredPostProcessTasks.length > 0
+  }
+
+  private _shouldDeferPostProcessing(): boolean {
+    return (this._options.postProcessMode ?? 'immediate') === 'deferred'
+  }
+
+  private async _flushDeferredPostProcessTasks(): Promise<void> {
+    if (!this._hasDeferredPostProcessTasks()) {
+      return
+    }
+
+    this._log(
+      'info',
+      `[WdioPuppeteerVideoService] Processing ${this._deferredPostProcessTasks.length} deferred post-processing task(s).`,
+    )
+
+    while (this._deferredPostProcessTasks.length > 0) {
+      const nextTask = this._deferredPostProcessTasks.shift()
+      if (!nextTask) {
+        break
+      }
+
+      if (nextTask.kind === 'merge') {
+        await this._executeDeferredMergeTask(nextTask)
+        continue
+      }
+
+      await this._executeDeferredTranscodeTask(nextTask)
+    }
+  }
+
+  private async _executeDeferredTranscodeTask(
+    task: DeferredTranscodeTask,
+  ): Promise<void> {
+    const inputExists = await fs
+      .stat(task.inputPath)
+      .then(() => true)
+      .catch(() => false)
+    if (!inputExists) {
+      return
+    }
+
+    const ok = await this._transcodeToH264Mp4WithArgs(
+      task.inputPath,
+      task.outputPath,
+      task.ffmpegArgs,
+    )
+    if (!ok) {
+      return
+    }
+
+    if (task.deleteOriginal && task.inputPath !== task.outputPath) {
+      await fs.unlink(task.inputPath).catch(() => {
+        /* best-effort cleanup */
+      })
+    }
+  }
+
+  private async _executeDeferredMergeTask(
+    task: DeferredMergeTask,
+  ): Promise<void> {
+    const merged = await this._mergeSegmentPathsToOutput({
+      segmentPaths: task.segmentPaths,
+      mergedPath: task.mergedPath,
+      deleteSegments: task.deleteSegments,
+      writeFailureContext: 'deferred merge',
+      ffmpegOperation: 'deferred segment merge',
+    })
+    if (!merged) {
+      return
+    }
+
+    if (!task.transcodeToMp4) {
+      return
+    }
+
+    await this._executeDeferredTranscodeTask({
+      kind: 'transcode',
+      inputPath: task.mergedPath,
+      outputPath: task.transcodeToMp4.outputPath,
+      deleteOriginal: task.transcodeToMp4.deleteOriginal,
+      ffmpegArgs: task.transcodeToMp4.ffmpegArgs,
+    })
+  }
+
+  private _dropDeferredPostProcessTasksForPaths(paths: string[]): void {
+    if (paths.length === 0 || this._deferredPostProcessTasks.length === 0) {
+      return
+    }
+
+    const blockedPaths = new Set(paths)
+    const filteredTasks = this._deferredPostProcessTasks.filter((task) => {
+      if (task.kind === 'transcode') {
+        return (
+          !blockedPaths.has(task.inputPath) &&
+          !blockedPaths.has(task.outputPath)
+        )
+      }
+
+      if (blockedPaths.has(task.mergedPath)) {
+        return false
+      }
+      if (
+        task.segmentPaths.some((segmentPath) => blockedPaths.has(segmentPath))
+      ) {
+        return false
+      }
+      if (
+        task.transcodeToMp4 &&
+        blockedPaths.has(task.transcodeToMp4.outputPath)
+      ) {
+        return false
+      }
+
+      return true
+    })
+
+    this._deferredPostProcessTasks.length = 0
+    this._deferredPostProcessTasks.push(...filteredTasks)
+  }
+
+  private async _acquireRecordingSlot(): Promise<boolean> {
+    if (
+      this._ownsRecordingSlot &&
+      ((this._options.maxGlobalRecordings ?? 0) <= 0 ||
+        this._ownsGlobalRecordingSlot)
+    ) {
+      return true
+    }
+
+    await this._acquireInProcessRecordingSlot()
+    const globalSlotAcquired = await this._acquireGlobalRecordingSlot()
+    if (globalSlotAcquired) {
+      return true
+    }
+
+    this._releaseInProcessRecordingSlot()
+    return false
+  }
+
+  private async _acquireInProcessRecordingSlot(): Promise<void> {
+    const maxConcurrentRecordings = this._options.maxConcurrentRecordings ?? 0
+    if (maxConcurrentRecordings <= 0 || this._ownsRecordingSlot) {
+      return
+    }
+
+    await new Promise<void>((resolve) => {
+      const tryAcquire = () => {
+        if (
+          WdioPuppeteerVideoService._activeRecordingSlots <
+          maxConcurrentRecordings
+        ) {
+          WdioPuppeteerVideoService._activeRecordingSlots += 1
+          this._ownsRecordingSlot = true
+          resolve()
+          return
+        }
+
+        WdioPuppeteerVideoService._recordingSlotWaiters.push(tryAcquire)
+      }
+
+      tryAcquire()
+    })
+  }
+
+  private async _acquireGlobalRecordingSlot(): Promise<boolean> {
+    const maxGlobalRecordings = this._options.maxGlobalRecordings ?? 0
+    if (maxGlobalRecordings <= 0 || this._ownsGlobalRecordingSlot) {
+      return true
+    }
+
+    const lockDir = this._resolveGlobalRecordingLockDir()
+    await fs.mkdir(lockDir, { recursive: true }).catch(() => {
+      /* best-effort lock-dir creation */
+    })
+
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < GLOBAL_RECORDING_SLOT_TIMEOUT_MS) {
+      const acquired = await this._tryAcquireGlobalRecordingSlot(
+        lockDir,
+        maxGlobalRecordings,
+      )
+      if (acquired) {
+        return true
+      }
+      await delay(GLOBAL_RECORDING_SLOT_POLL_MS)
+    }
+
+    return false
+  }
+
+  private async _tryAcquireGlobalRecordingSlot(
+    lockDir: string,
+    maxGlobalRecordings: number,
+  ): Promise<boolean> {
+    for (let slotIndex = 1; slotIndex <= maxGlobalRecordings; slotIndex += 1) {
+      const slotPath = path.join(lockDir, `slot-${slotIndex}.lock`)
+      try {
+        const fileHandle = await fs.open(slotPath, 'wx')
+        this._ownsGlobalRecordingSlot = true
+        this._globalRecordingSlotPath = slotPath
+        this._globalRecordingSlotFileHandle = fileHandle
+        await fileHandle
+          .writeFile(
+            JSON.stringify({
+              pid: process.pid,
+              startedAt: Date.now(),
+            }),
+            'utf8',
+          )
+          .catch(() => {
+            /* best-effort slot metadata */
+          })
+        return true
+      } catch (error) {
+        const slotError = error as NodeJS.ErrnoException
+        if (slotError.code === 'EEXIST') {
+          await this._cleanupStaleGlobalRecordingSlot(slotPath)
+        }
+      }
+    }
+
+    return false
+  }
+
+  private async _cleanupStaleGlobalRecordingSlot(
+    slotPath: string,
+  ): Promise<void> {
+    const fileContents = await fs.readFile(slotPath, 'utf8').catch(() => '')
+    const parsedPid = this._extractPidFromSlotFile(fileContents)
+    if (!parsedPid || this._isProcessAlive(parsedPid)) {
+      return
+    }
+
+    await fs.unlink(slotPath).catch(() => {
+      /* best-effort stale-slot cleanup */
+    })
+  }
+
+  private _extractPidFromSlotFile(fileContents: string): number | undefined {
+    if (!fileContents.trim()) {
+      return undefined
+    }
+
+    try {
+      const parsed = JSON.parse(fileContents) as { pid?: unknown }
+      if (
+        typeof parsed.pid === 'number' &&
+        Number.isInteger(parsed.pid) &&
+        parsed.pid > 0
+      ) {
+        return parsed.pid
+      }
+    } catch {
+      // malformed slot metadata; ignore cleanup to avoid deleting active slots
+    }
+
+    return undefined
+  }
+
+  private _isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      const processError = error as NodeJS.ErrnoException
+      if (processError.code === 'ESRCH') {
+        return false
+      }
+      return true
+    }
+  }
+
+  private _resolveGlobalRecordingLockDir(): string {
+    const configuredDir = this._options.globalRecordingLockDir?.trim()
+    if (configuredDir) {
+      return configuredDir
+    }
+
+    return path.join(
+      this._options.outputDir || DEFAULT_OUTPUT_DIR,
+      GLOBAL_RECORDING_SLOT_DIR_NAME,
+    )
+  }
+
+  private _releaseRecordingSlot(): void {
+    this._releaseGlobalRecordingSlot()
+    this._releaseInProcessRecordingSlot()
+  }
+
+  private _releaseInProcessRecordingSlot(): void {
+    if (!this._ownsRecordingSlot) {
+      return
+    }
+
+    this._ownsRecordingSlot = false
+    if (WdioPuppeteerVideoService._activeRecordingSlots > 0) {
+      WdioPuppeteerVideoService._activeRecordingSlots -= 1
+    }
+
+    const nextWaiter = WdioPuppeteerVideoService._recordingSlotWaiters.shift()
+    if (nextWaiter) {
+      queueMicrotask(nextWaiter)
+    }
+  }
+
+  private _releaseGlobalRecordingSlot(): void {
+    if (!this._ownsGlobalRecordingSlot) {
+      return
+    }
+
+    const lockPath = this._globalRecordingSlotPath
+    const lockFileHandle = this._globalRecordingSlotFileHandle
+    this._ownsGlobalRecordingSlot = false
+    this._globalRecordingSlotPath = undefined
+    this._globalRecordingSlotFileHandle = undefined
+
+    lockFileHandle
+      ?.close()
+      .catch(() => {
+        /* best-effort slot close */
+      })
+      .finally(async () => {
+        if (!lockPath) {
+          return
+        }
+        await fs.unlink(lockPath).catch(() => {
+          /* best-effort slot cleanup */
+        })
+      })
+  }
+
   private _resolveWdioLogLevel(browser: Browser): string | undefined {
     const browserWithOptions = browser as Browser & {
       options?: { logLevel?: string }
@@ -1323,12 +2346,14 @@ export default class WdioPuppeteerVideoService
     this._activeSegment = undefined
     this._currentSegment = 0
     this._currentTestSlug = ''
+    this._currentRecordingRetryCount = 0
     this._currentWindowHandle = undefined
     this._recordedSegments.clear()
+    this._releaseRecordingSlot()
   }
 
   private _isRecordingActive(): boolean {
-    return this._isChromium && this._ffmpegAvailable
+    return !!this._currentTestSlug || !!this._recorder || !!this._activeSegment
   }
 
   /** @internal Exposed for unit testing only. */
@@ -1411,6 +2436,16 @@ export default class WdioPuppeteerVideoService
     return trimmed
   }
 
+  private _normalizeOptionalDir(
+    dirPath: string | undefined,
+  ): string | undefined {
+    const trimmed = dirPath?.trim()
+    if (!trimmed) {
+      return undefined
+    }
+    return trimmed
+  }
+
   private _normalizePositiveInt(
     value: number | undefined,
     fallback: number,
@@ -1419,6 +2454,76 @@ export default class WdioPuppeteerVideoService
       return fallback
     }
     return Math.floor(value)
+  }
+
+  private _normalizeNonNegativeInt(
+    value: number | undefined,
+    fallback: number,
+  ): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return fallback
+    }
+
+    return Math.floor(value)
+  }
+
+  private _normalizeBoolean(
+    value: boolean | undefined,
+    fallback = false,
+  ): boolean {
+    if (typeof value !== 'boolean') {
+      return fallback
+    }
+
+    return value
+  }
+
+  private _normalizePatternList(patterns: string[] | undefined): string[] {
+    if (!Array.isArray(patterns) || patterns.length === 0) {
+      return []
+    }
+
+    const normalizedPatterns: string[] = []
+    const seen = new Set<string>()
+    for (const pattern of patterns) {
+      if (typeof pattern !== 'string') {
+        continue
+      }
+      const trimmedPattern = pattern.trim().toLowerCase()
+      if (!trimmedPattern || seen.has(trimmedPattern)) {
+        continue
+      }
+      seen.add(trimmedPattern)
+      normalizedPatterns.push(trimmedPattern)
+    }
+
+    return normalizedPatterns
+  }
+
+  private _normalizePostProcessMode(
+    mode: WdioPuppeteerVideoServicePostProcessMode | undefined,
+  ): WdioPuppeteerVideoServicePostProcessMode {
+    if (mode === 'deferred') {
+      return 'deferred'
+    }
+    return 'immediate'
+  }
+
+  private _normalizeCandidateValue(value: string | undefined): string {
+    return (value ?? '').trim().toLowerCase()
+  }
+
+  private _toNonEmptyString(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined
+    }
+
+    const trimmed = value.trim()
+    if (!trimmed) {
+      return undefined
+    }
+
+    return trimmed
   }
 
   private _normalizeFileNameOverflowStrategy(

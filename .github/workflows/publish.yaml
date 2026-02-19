@@ -12,12 +12,11 @@ on:
         default: false
         type: boolean
 
-permissions:
-  contents: read
-
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       package_name: ${{ steps.package_meta.outputs.name }}
       package_version: ${{ steps.package_meta.outputs.version }}
