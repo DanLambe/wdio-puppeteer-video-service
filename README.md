@@ -119,7 +119,7 @@ Service options and defaults:
 - `videoWidth` (default: `1280`): capture width.
 - `videoHeight` (default: `720`): capture height.
 - `fps` (default: `30`): capture frames per second.
-- `recordOnRetries` (default: `false`): start recording only for retry attempts (`attempt > 0`).
+- `recordOnRetries` (default: `false`): start recording only for retry attempts (`attempt > 0`) including WDIO `specFileRetries` worker retries.
 - `specLevelRecording` (default: `false`): record once per spec file and finalize in worker `after`.
 - `skipViewPortKickoff` (default: `false`): skip the viewport warmup resize sequence before capture.
 - `segmentOnWindowSwitch` (default: `true`): split recordings around window/tab switch commands.
@@ -150,7 +150,9 @@ Service options and defaults:
 
 - Default mode: record each test/scenario, keep only failed artifacts unless `saveAllVideos` is `true`.
 - `recordOnRetries: true`: first attempts are not recorded, retry attempts are recorded.
+- WDIO `specFileRetries` are treated as retry attempts for `recordOnRetries`.
 - Retry artifacts are retained even if that retry eventually passes.
+- When `recordOnRetries` is enabled, the service uses temporary retry-state files in `<outputDir>/.wdio-video-retry-state` and cleans them automatically on launcher `onPrepare`/`onComplete`.
 - `specLevelRecording: true`: one recording per spec; pass/fail keep decision is based on aggregate spec outcome.
 
 ### Selective Recording Filters
@@ -235,6 +237,8 @@ Set `logLevel` in service options to control service logs:
 
 When `logLevel` is omitted, the service uses WebdriverIO `logLevel` when available and falls back to `warn`.
 
+With `recordOnRetries: true`, `debug`/`trace` logging includes retry decision context (`frameworkRetry`, `specFileRetry`, inferred entity retry), plus retry-state hydration/cleanup events for worker restarts.
+
 ## Parallel Performance Tuning
 
 For CI agents running multiple WDIO workers in parallel, these settings usually provide the best speed/stability balance:
@@ -270,6 +274,7 @@ The repository includes dedicated scripts to verify both output modes and keep a
 - `npm run test:e2e:frameworks` runs both Jasmine and Cucumber validation sequentially
 - `npm run test:e2e:advanced` runs advanced option coverage in sequence:
   - `recordOnRetries`
+  - `recordOnRetries` + WDIO `specFileRetries`
   - `specLevelRecording`
   - `segmentOnWindowSwitch: false`
   - `fileNameStyle: 'session'`
@@ -278,6 +283,7 @@ The repository includes dedicated scripts to verify both output modes and keep a
   - `includeSpecPatterns` positive-match filtering
   - `excludeSpecPatterns` suppression filtering
 - `npm run test:e2e:advanced:retry` runs only retry-mode validation
+- `npm run test:e2e:advanced:spec-file-retry` runs only WDIO `specFileRetries` retry-mode validation
 - `npm run test:e2e:advanced:spec-level` runs only spec-level validation
 - `npm run test:e2e:advanced:no-segment` runs only no-window-segmentation validation
 - `npm run test:e2e:advanced:session-style` runs only short-session filename-style validation

@@ -4,6 +4,7 @@ import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
 
 type AdvancedMode =
   | 'retry'
+  | 'spec-file-retry'
   | 'spec-level'
   | 'no-segment'
   | 'session-style'
@@ -18,6 +19,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
   if (mode === 'all') {
     return [
       'retry',
+      'spec-file-retry',
       'spec-level',
       'no-segment',
       'session-style',
@@ -30,6 +32,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 
   if (
     mode === 'retry' ||
+    mode === 'spec-file-retry' ||
     mode === 'spec-level' ||
     mode === 'no-segment' ||
     mode === 'session-style' ||
@@ -47,7 +50,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-level, no-segment, session-style, session-full-style, deferred-merge, include-spec, or exclude-spec.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-file-retry, spec-level, no-segment, session-style, session-full-style, deferred-merge, include-spec, or exclude-spec.`,
   )
   process.exit(1)
 }

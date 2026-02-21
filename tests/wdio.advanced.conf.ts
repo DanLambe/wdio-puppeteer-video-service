@@ -8,6 +8,7 @@ import {
 
 type AdvancedMode =
   | 'retry'
+  | 'spec-file-retry'
   | 'spec-level'
   | 'no-segment'
   | 'session-style'
@@ -20,6 +21,9 @@ const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
   if (normalized === 'spec-level') {
     return 'spec-level'
+  }
+  if (normalized === 'spec-file-retry') {
+    return 'spec-file-retry'
   }
   if (normalized === 'no-segment') {
     return 'no-segment'
@@ -53,6 +57,9 @@ const resultsDir = path.resolve(
 
 const modeSpecs: Record<AdvancedMode, string[]> = {
   retry: [path.resolve('tests/advanced/specs/retry-recording.spec.ts')],
+  'spec-file-retry': [
+    path.resolve('tests/advanced/specs/spec-file-retry-recording.spec.ts'),
+  ],
   'spec-level': [
     path.resolve('tests/advanced/specs/spec-level-recording.spec.ts'),
   ],
@@ -76,6 +83,9 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   retry: ['should record only when retry attempt executes'],
+  'spec-file-retry': [
+    'should record only when spec file retry worker executes',
+  ],
   'spec-level': ['spec level recording spec'],
   'no-segment': [
     'should keep one segment when window switching segmentation is disabled',
@@ -132,6 +142,10 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
     saveAllVideos: false,
     recordOnRetries: true,
   }),
+  'spec-file-retry': createServiceOptions({
+    saveAllVideos: false,
+    recordOnRetries: true,
+  }),
   'spec-level': createServiceOptions({
     specLevelRecording: true,
     skipViewPortKickoff: true,
@@ -169,6 +183,19 @@ const assertRetryMode = (artifactNames: string[]): void => {
   if (!artifactNames[0].includes('_retry1')) {
     throw new Error(
       `[wdio:e2e:advanced] retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
+    )
+  }
+}
+
+const assertSpecFileRetryMode = (artifactNames: string[]): void => {
+  if (artifactNames.length !== 1) {
+    throw new Error(
+      `[wdio:e2e:advanced] spec-file-retry mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+    )
+  }
+  if (!artifactNames[0].includes('_retry1')) {
+    throw new Error(
+      `[wdio:e2e:advanced] spec-file-retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
     )
   }
 }
@@ -271,6 +298,7 @@ const assertExcludeSpecMode = (artifactNames: string[]): void => {
 
 const modeAssertions: Record<AdvancedMode, (names: string[]) => void> = {
   retry: assertRetryMode,
+  'spec-file-retry': assertSpecFileRetryMode,
   'spec-level': assertSpecLevelMode,
   'no-segment': assertNoSegmentMode,
   'session-style': assertSessionStyleMode,
@@ -310,6 +338,9 @@ export const config: WebdriverIO.Config = {
   waitforTimeout: 10000,
   connectionRetryTimeout: 120000,
   connectionRetryCount: 3,
+  specFileRetries: mode === 'spec-file-retry' ? 1 : 0,
+  specFileRetriesDelay: 0,
+  specFileRetriesDeferred: false,
   services: [[WdioPuppeteerVideoService, serviceOptionsByMode[mode]]],
   framework: 'mocha',
   reporters: ['spec'],

@@ -52,6 +52,7 @@ export interface WdioPuppeteerVideoServiceOptions {
 
   /**
    * Record only retry attempts (`attempt > 0`) instead of every first run.
+   * WDIO `specFileRetries` worker retries are also treated as retry attempts.
    *
    * This reduces capture overhead for mostly-green suites.
    *
