@@ -87,6 +87,18 @@ interface MergeExecutionOptions {
   ffmpegOperation: string
 }
 
+interface PersistedSpecRetryState {
+  specRetryKey: string
+  specFileRetryAttempt: number
+}
+
+interface ResolvedRetryContext {
+  explicitFrameworkRetry: number | undefined
+  specFileRetryAttempt: number
+  inferredEntityRetry: number | undefined
+  effectiveRetryCount: number
+}
+
 const SEGMENT_EXTENSION_TO_FORMAT: Record<string, OutputFormat> = {
   '.mp4': 'mp4',
   '.webm': 'webm',
@@ -112,6 +124,7 @@ const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
 const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
 const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
+const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
 const require = createRequire(import.meta.url)
 const DEFAULT_OUTPUT_DIR = 'videos'
 const LOG_LEVEL_PRIORITY: Record<WdioPuppeteerVideoServiceLogLevel, number> = {
@@ -146,6 +159,8 @@ export default class WdioPuppeteerVideoService
   private _currentRecordingRetryCount = 0
   private readonly _recordedSegments = new Set<string>()
   private readonly _entityAttemptCount = new Map<string, number>()
+  private _specFileRetryAttempt = 0
+  private readonly _launcherSpecRetryAttemptCount = new Map<string, number>()
   private _isChromium = false
   private _specHadFailure = false
   private _specPaths: string[] = []
@@ -310,6 +325,134 @@ export default class WdioPuppeteerVideoService
     this._maxSlugLength = this._computeMaxSlugLength()
   }
 
+  async onPrepare(): Promise<void> {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    this._launcherSpecRetryAttemptCount.clear()
+    this._specFileRetryAttempt = 0
+
+    const retryStateDir = this._getSpecRetryStateDirPath()
+    await fs
+      .rm(retryStateDir, { recursive: true, force: true })
+      .catch((error) => {
+        this._log(
+          'trace',
+          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onPrepare (${retryStateDir}): ${this._describeError(error)}`,
+        )
+      })
+    await fs.mkdir(retryStateDir, { recursive: true })
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Initialized retry-state tracking at ${retryStateDir}`,
+    )
+  }
+
+  async onWorkerStart(
+    cid: string,
+    capabilities: WebdriverIO.Capabilities,
+    specs: string[],
+  ): Promise<void> {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    const specRetryKey = this._buildSpecRetryKey(specs, capabilities)
+    const specFileRetryAttempt =
+      this._launcherSpecRetryAttemptCount.get(specRetryKey) ?? 0
+    this._launcherSpecRetryAttemptCount.set(
+      specRetryKey,
+      specFileRetryAttempt + 1,
+    )
+
+    const retryState: PersistedSpecRetryState = {
+      specRetryKey,
+      specFileRetryAttempt,
+    }
+    await this._writeSpecRetryState(cid, retryState)
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Worker start retry context cid=${cid} specFileRetryAttempt=${specFileRetryAttempt} specs=${specs.length}`,
+    )
+  }
+
+  async onWorkerEnd(
+    cid: string,
+    exitCode: number,
+    specs: string[],
+    retries: number,
+  ): Promise<void> {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    await this._deleteSpecRetryState(cid)
+    this._log(
+      'trace',
+      `[WdioPuppeteerVideoService] Worker end cleanup cid=${cid} exitCode=${exitCode} retries=${retries} specs=${specs.length}`,
+    )
+  }
+
+  async onComplete(): Promise<void> {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    this._launcherSpecRetryAttemptCount.clear()
+    this._specFileRetryAttempt = 0
+
+    const retryStateDir = this._getSpecRetryStateDirPath()
+    await fs
+      .rm(retryStateDir, { recursive: true, force: true })
+      .catch((error) => {
+        this._log(
+          'trace',
+          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${this._describeError(error)}`,
+        )
+      })
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Cleared retry-state tracking from ${retryStateDir}`,
+    )
+  }
+
+  async beforeSession(
+    _config: unknown,
+    capabilities: WebdriverIO.Capabilities,
+    specs: string[],
+    cid: string,
+  ): Promise<void> {
+    this._specFileRetryAttempt = 0
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    const retryState = await this._readSpecRetryState(cid)
+    if (!retryState) {
+      this._log(
+        'trace',
+        `[WdioPuppeteerVideoService] No persisted retry state found for cid=${cid}; defaulting spec-file retry attempt to 0.`,
+      )
+      return
+    }
+
+    const expectedRetryKey = this._buildSpecRetryKey(specs, capabilities)
+    if (retryState.specRetryKey !== expectedRetryKey) {
+      this._log(
+        'trace',
+        `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} due to spec key mismatch.`,
+      )
+      return
+    }
+
+    this._specFileRetryAttempt = retryState.specFileRetryAttempt
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Hydrated spec-file retry attempt for cid=${cid}: ${this._specFileRetryAttempt}`,
+    )
+  }
+
   async before(
     _capabilities: WebdriverIO.Capabilities,
     specs: string[],
@@ -374,8 +517,16 @@ export default class WdioPuppeteerVideoService
         return
       }
 
-      const retryCount = this._resolveRetryCountForEntity(test, context)
-      if (!this._shouldRecordForRetryCount(retryCount)) {
+      const retryContext = this._resolveRetryContextForEntity(test, context)
+      const retryCount = retryContext.effectiveRetryCount
+      const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
+      this._logRetryDecision(
+        retryContext,
+        test.title || test.fullTitle || 'test',
+        shouldRecordForRetry,
+      )
+      if (!shouldRecordForRetry) {
+        this._logRetrySkip(retryContext, test.title || test.fullTitle || 'test')
         return
       }
 
@@ -418,11 +569,19 @@ export default class WdioPuppeteerVideoService
         return
       }
 
-      const retryCount = this._resolveRetryCountForEntity(
+      const retryContext = this._resolveRetryContextForEntity(
         cucumberEntity,
         scenarioContext,
       )
-      if (!this._shouldRecordForRetryCount(retryCount)) {
+      const retryCount = retryContext.effectiveRetryCount
+      const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
+      this._logRetryDecision(
+        retryContext,
+        cucumberEntity.title,
+        shouldRecordForRetry,
+      )
+      if (!shouldRecordForRetry) {
+        this._logRetrySkip(retryContext, cucumberEntity.title)
         return
       }
 
@@ -768,24 +927,35 @@ export default class WdioPuppeteerVideoService
     }
   }
 
-  private _resolveRetryCountForEntity(
+  private _resolveRetryContextForEntity(
     test: Frameworks.Test,
     context: unknown,
-  ): number {
-    const explicitRetryCount = this._extractExplicitRetryCount(test, context)
-    if (explicitRetryCount !== undefined) {
-      return explicitRetryCount
+  ): ResolvedRetryContext {
+    const explicitFrameworkRetry = this._extractExplicitRetryCount(
+      test,
+      context,
+    )
+    let inferredEntityRetry: number | undefined
+
+    if (this._options.recordOnRetries) {
+      const metadata = this._collectSlugMetadata(test, context)
+      const retryTrackingKey = `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
+      inferredEntityRetry = this._entityAttemptCount.get(retryTrackingKey) ?? 0
+      this._entityAttemptCount.set(retryTrackingKey, inferredEntityRetry + 1)
     }
 
-    if (!this._options.recordOnRetries) {
-      return 0
-    }
+    const effectiveRetryCount = Math.max(
+      explicitFrameworkRetry ?? 0,
+      this._specFileRetryAttempt,
+      inferredEntityRetry ?? 0,
+    )
 
-    const metadata = this._collectSlugMetadata(test, context)
-    const retryTrackingKey = `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
-    const attemptCount = this._entityAttemptCount.get(retryTrackingKey) ?? 0
-    this._entityAttemptCount.set(retryTrackingKey, attemptCount + 1)
-    return attemptCount
+    return {
+      explicitFrameworkRetry,
+      specFileRetryAttempt: this._specFileRetryAttempt,
+      inferredEntityRetry,
+      effectiveRetryCount,
+    }
   }
 
   private _extractExplicitRetryCount(
@@ -852,6 +1022,35 @@ export default class WdioPuppeteerVideoService
     }
 
     return retryCount > 0
+  }
+
+  private _logRetryDecision(
+    retryContext: ResolvedRetryContext,
+    entityLabel: string,
+    shouldRecord: boolean,
+  ): void {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    this._log(
+      'trace',
+      `[WdioPuppeteerVideoService] Retry decision for "${entityLabel}": ${shouldRecord ? 'record' : 'skip'} (effectiveRetry=${retryContext.effectiveRetryCount}, frameworkRetry=${retryContext.explicitFrameworkRetry ?? 0}, specFileRetry=${retryContext.specFileRetryAttempt}, inferredRetry=${retryContext.inferredEntityRetry ?? 0}).`,
+    )
+  }
+
+  private _logRetrySkip(
+    retryContext: ResolvedRetryContext,
+    entityLabel: string,
+  ): void {
+    if (!this._options.recordOnRetries) {
+      return
+    }
+
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Skipping recording for "${entityLabel}" because retryCount=0 (frameworkRetry=${retryContext.explicitFrameworkRetry ?? 0}, specFileRetry=${retryContext.specFileRetryAttempt}, inferredRetry=${retryContext.inferredEntityRetry ?? 0}).`,
+    )
   }
 
   private _shouldRecordForFilters(
@@ -2225,6 +2424,107 @@ export default class WdioPuppeteerVideoService
       }
       return true
     }
+  }
+
+  private _getSpecRetryStateDirPath(): string {
+    return path.join(
+      this._options.outputDir || DEFAULT_OUTPUT_DIR,
+      SPEC_RETRY_STATE_DIR_NAME,
+    )
+  }
+
+  private _getSpecRetryStatePathForCid(cid: string): string {
+    const safeCidToken =
+      cid.trim().replaceAll(/[^a-zA-Z0-9._-]/g, '_') || 'unknown'
+    return path.join(this._getSpecRetryStateDirPath(), `${safeCidToken}.json`)
+  }
+
+  private _buildSpecRetryKey(
+    specs: string[],
+    capabilities: WebdriverIO.Capabilities,
+  ): string {
+    const normalizedSpecs = specs
+      .map((specPath) => path.resolve(specPath))
+      .sort((a, b) => a.localeCompare(b))
+      .join('|')
+    const capabilityFingerprint = this._toNonEmptyString(
+      JSON.stringify(capabilities),
+    )
+
+    return `${capabilityFingerprint || 'capabilities'}|${normalizedSpecs}`
+  }
+
+  private async _writeSpecRetryState(
+    cid: string,
+    retryState: PersistedSpecRetryState,
+  ): Promise<void> {
+    const retryStateDir = this._getSpecRetryStateDirPath()
+    await fs.mkdir(retryStateDir, { recursive: true })
+    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+    await fs.writeFile(retryStatePath, JSON.stringify(retryState), 'utf8')
+    this._log(
+      'trace',
+      `[WdioPuppeteerVideoService] Persisted retry state for cid=${cid} at ${retryStatePath} (specFileRetryAttempt=${retryState.specFileRetryAttempt})`,
+    )
+  }
+
+  private async _readSpecRetryState(
+    cid: string,
+  ): Promise<PersistedSpecRetryState | undefined> {
+    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+    try {
+      const rawValue = await fs.readFile(retryStatePath, 'utf8')
+      const parsedValue = JSON.parse(
+        rawValue,
+      ) as Partial<PersistedSpecRetryState>
+      if (typeof parsedValue.specRetryKey !== 'string') {
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} because specRetryKey is missing or invalid.`,
+        )
+        return undefined
+      }
+
+      const parsedRetryAttempt = this._extractRetryValue(
+        parsedValue.specFileRetryAttempt,
+      )
+      if (parsedRetryAttempt === undefined) {
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} because specFileRetryAttempt is invalid.`,
+        )
+        return undefined
+      }
+
+      return {
+        specRetryKey: parsedValue.specRetryKey,
+        specFileRetryAttempt: parsedRetryAttempt,
+      }
+    } catch (error) {
+      const retryStateError = error as NodeJS.ErrnoException
+      if (retryStateError.code === 'ENOENT') {
+        return undefined
+      }
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to read retry state for cid=${cid}: ${this._describeError(error)}`,
+      )
+      return undefined
+    }
+  }
+
+  private async _deleteSpecRetryState(cid: string): Promise<void> {
+    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+    await fs.unlink(retryStatePath).catch((error) => {
+      const retryStateError = error as NodeJS.ErrnoException
+      if (retryStateError.code === 'ENOENT') {
+        return
+      }
+      this._log(
+        'trace',
+        `[WdioPuppeteerVideoService] Failed to delete retry state for cid=${cid}: ${this._describeError(error)}`,
+      )
+    })
   }
 
   private _resolveGlobalRecordingLockDir(): string {
