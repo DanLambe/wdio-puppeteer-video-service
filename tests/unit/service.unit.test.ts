@@ -73,7 +73,9 @@ const withTempDir = async (
   }
 }
 
-const createRetryLauncherService = (outputDir: string): RetryLauncherService => {
+const createRetryLauncherService = (
+  outputDir: string,
+): RetryLauncherService => {
   return new WdioPuppeteerVideoService({
     outputDir,
     recordOnRetries: true,
@@ -107,7 +109,11 @@ const createRetryWorkerHarness = (
   }
 
   const seenRetryCounts: number[] = []
-  workerService._startRecordingForEntity = async (_test, _context, retryCount) => {
+  workerService._startRecordingForEntity = async (
+    _test,
+    _context,
+    retryCount,
+  ) => {
     seenRetryCounts.push(retryCount)
   }
 
@@ -531,7 +537,8 @@ describe('WdioPuppeteerVideoService unit', () => {
         specs,
       )
 
-      const { workerService, seenRetryCounts } = createRetryWorkerHarness(tempDir)
+      const { workerService, seenRetryCounts } =
+        createRetryWorkerHarness(tempDir)
       await runSpecFileRetryBeforeTest(workerService, workerCapabilities, specs)
 
       expect(seenRetryCounts).toEqual([1])
@@ -556,7 +563,8 @@ describe('WdioPuppeteerVideoService unit', () => {
         specs,
       )
 
-      const { workerService, seenRetryCounts } = createRetryWorkerHarness(tempDir)
+      const { workerService, seenRetryCounts } =
+        createRetryWorkerHarness(tempDir)
       await runSpecFileRetryBeforeTest(workerService, workerCapabilities, specs)
 
       expect(seenRetryCounts).toEqual([])
