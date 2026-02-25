@@ -1,9 +1,7 @@
 import { spawn } from 'node:child_process'
-import type { WriteStream } from 'node:fs'
 import { createWriteStream } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import fs from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -14,6 +12,34 @@ import type {
   ScreenRecorder,
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
+import {
+  ACTIVE_PAGE_POLL_MS,
+  ACTIVE_PAGE_TIMEOUT_MS,
+  type ActiveSegment,
+  DEFAULT_MAX_FILENAME_LENGTH,
+  DEFAULT_OUTPUT_DIR,
+  type DeferredMergeTask,
+  type DeferredPostProcessTask,
+  type DeferredTranscodeTask,
+  FFMPEG_CHECK_TIMEOUT_MS,
+  GLOBAL_RECORDING_SLOT_POLL_MS,
+  GLOBAL_RECORDING_SLOT_TIMEOUT_MS,
+  type MergeExecutionOptions,
+  MP4_DIRECT_PROBE_TIMEOUT_MS,
+  type OutputFormat,
+  type PersistedSpecRetryState,
+  type ResolvedRetryContext,
+  SEGMENT_SWITCH_DELAY_MS,
+  WINDOW_SEGMENT_COMMANDS,
+  WINDOWS_DEFAULT_MAX_FILENAME_LENGTH,
+  WRITE_STREAM_TIMEOUT_MS,
+} from './service/constants.js'
+import * as ffmpeg from './service/ffmpeg.js'
+import * as filtering from './service/filtering.js'
+import * as logging from './service/logging.js'
+import * as normalization from './service/normalization.js'
+import * as artifactPaths from './service/paths.js'
+import * as retryState from './service/retry-state.js'
 import type {
   WdioPuppeteerVideoServiceFileNameOverflowStrategy,
   WdioPuppeteerVideoServiceFileNameStyle,
@@ -35,112 +61,6 @@ import {
   sanitizeFileToken,
 } from './video-name-utils.js'
 
-type OutputFormat = NonNullable<
-  WdioPuppeteerVideoServiceOptions['outputFormat']
->
-
-interface ActiveSegment {
-  recordingPath: string
-  outputPath: string
-  outputFormat: OutputFormat
-  recordingFormat: OutputFormat
-  transcode: boolean
-  transcodeOptions: Required<
-    Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'deleteOriginal'>
-  > &
-    Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
-  writeStream: WriteStream
-  writeStreamDone: Promise<void>
-  writeStreamErrored: boolean
-  writeStreamErrorMessage?: string
-  onWriteStreamError: (error: NodeJS.ErrnoException) => void
-  onRecorderError: (error: unknown) => void
-}
-
-interface DeferredTranscodeTask {
-  kind: 'transcode'
-  inputPath: string
-  outputPath: string
-  deleteOriginal: boolean
-  ffmpegArgs?: string[]
-}
-
-interface DeferredMergeTask {
-  kind: 'merge'
-  segmentPaths: string[]
-  mergedPath: string
-  deleteSegments: boolean
-  transcodeToMp4?: {
-    outputPath: string
-    deleteOriginal: boolean
-    ffmpegArgs?: string[]
-  }
-}
-
-type DeferredPostProcessTask = DeferredTranscodeTask | DeferredMergeTask
-
-interface MergeExecutionOptions {
-  segmentPaths: string[]
-  mergedPath: string
-  deleteSegments: boolean
-  writeFailureContext: string
-  ffmpegOperation: string
-}
-
-interface PersistedSpecRetryState {
-  specRetryKey: string
-  specFileRetryAttempt: number
-}
-
-interface ResolvedRetryContext {
-  explicitFrameworkRetry: number | undefined
-  specFileRetryAttempt: number
-  inferredEntityRetry: number | undefined
-  effectiveRetryCount: number
-}
-
-const SEGMENT_EXTENSION_TO_FORMAT: Record<string, OutputFormat> = {
-  '.mp4': 'mp4',
-  '.webm': 'webm',
-}
-
-const WINDOW_SEGMENT_COMMANDS = new Set([
-  'switchWindow',
-  'switchToWindow',
-  'newWindow',
-  'closeWindow',
-])
-const ACTIVE_PAGE_TIMEOUT_MS = 2_000
-const ACTIVE_PAGE_POLL_MS = 50
-const SEGMENT_SWITCH_DELAY_MS = 50
-const WRITE_STREAM_TIMEOUT_MS = 30_000
-const FFMPEG_CHECK_TIMEOUT_MS = 5_000
-const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
-const DEFAULT_MAX_FILENAME_LENGTH = 255
-const WINDOWS_MAX_PATH_LENGTH = 259
-const SEGMENT_SUFFIX_MAX_LENGTH = '_part9999.webm'.length
-const MIN_SAFE_FILENAME_LENGTH = 40
-const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
-const GLOBAL_RECORDING_SLOT_POLL_MS = 100
-const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
-const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
-const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
-const require = createRequire(import.meta.url)
-const DEFAULT_OUTPUT_DIR = 'videos'
-const LOG_LEVEL_PRIORITY: Record<WdioPuppeteerVideoServiceLogLevel, number> = {
-  silent: 0,
-  error: 1,
-  warn: 2,
-  info: 3,
-  debug: 4,
-  trace: 5,
-}
-const LOG_METHOD_MAP: Record<string, (...args: unknown[]) => void> = {
-  error: console.error,
-  warn: console.warn,
-  info: console.info,
-}
-
 /**
  * WebdriverIO Service to record videos using Puppeteer and FFmpeg
  */
@@ -152,8 +72,8 @@ export default class WdioPuppeteerVideoService
 
   private _browser?: Browser
   private readonly _options: WdioPuppeteerVideoServiceOptions
-  private _recorder?: ScreenRecorder
-  private _activeSegment?: ActiveSegment
+  private _recorder: ScreenRecorder | undefined
+  private _activeSegment: ActiveSegment | undefined
   private _currentSegment = 0
   private _currentTestSlug = ''
   private _currentRecordingRetryCount = 0
@@ -263,6 +183,10 @@ export default class WdioPuppeteerVideoService
       }
     }
 
+    const normalizedGlobalRecordingLockDir = this._normalizeOptionalDir(
+      mergedOptions.globalRecordingLockDir,
+    )
+
     this._options = {
       ...mergedOptions,
       outputDir: this._normalizeOutputDir(mergedOptions.outputDir),
@@ -302,9 +226,9 @@ export default class WdioPuppeteerVideoService
         mergedOptions.maxGlobalRecordings,
         0,
       ),
-      globalRecordingLockDir: this._normalizeOptionalDir(
-        mergedOptions.globalRecordingLockDir,
-      ),
+      ...(normalizedGlobalRecordingLockDir
+        ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
+        : {}),
       postProcessMode: this._normalizePostProcessMode(
         mergedOptions.postProcessMode,
       ),
@@ -826,6 +750,14 @@ export default class WdioPuppeteerVideoService
       recorder.on('error', onRecorderError)
       recorder.pipe(writeStream)
 
+      const transcodeOptions: ActiveSegment['transcodeOptions'] = {
+        deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
+      }
+      const transcodeFfmpegArgs = this._options.transcode?.ffmpegArgs
+      if (transcodeFfmpegArgs !== undefined) {
+        transcodeOptions.ffmpegArgs = transcodeFfmpegArgs
+      }
+
       this._recorder = recorder
       this._activeSegment = {
         recordingPath,
@@ -833,14 +765,10 @@ export default class WdioPuppeteerVideoService
         outputFormat,
         recordingFormat,
         transcode: transcodeEnabled,
-        transcodeOptions: {
-          deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
-          ffmpegArgs: this._options.transcode?.ffmpegArgs,
-        },
+        transcodeOptions,
         writeStream,
         writeStreamDone,
         writeStreamErrored: false,
-        writeStreamErrorMessage: undefined,
         onWriteStreamError,
         onRecorderError,
       }
@@ -1057,239 +985,12 @@ export default class WdioPuppeteerVideoService
     test: Frameworks.Test,
     context: unknown,
   ): boolean {
-    const includeSpecPatterns = this._options.includeSpecPatterns ?? []
-    const excludeSpecPatterns = this._options.excludeSpecPatterns ?? []
-    const includeTagPatterns = this._options.includeTagPatterns ?? []
-    const excludeTagPatterns = this._options.excludeTagPatterns ?? []
-
-    if (
-      includeSpecPatterns.length === 0 &&
-      excludeSpecPatterns.length === 0 &&
-      includeTagPatterns.length === 0 &&
-      excludeTagPatterns.length === 0
-    ) {
-      return true
-    }
-
-    const specPath = this._resolveEntitySpecPath(test, context)
-    if (
-      includeSpecPatterns.length > 0 &&
-      !this._matchesAnyPattern(specPath, includeSpecPatterns)
-    ) {
-      return false
-    }
-
-    if (
-      excludeSpecPatterns.length > 0 &&
-      this._matchesAnyPattern(specPath, excludeSpecPatterns)
-    ) {
-      return false
-    }
-
-    const entityTags = this._extractEntityTagTokens(test, context)
-    if (includeTagPatterns.length > 0) {
-      const includesAnyTag = entityTags.some((tagToken) =>
-        this._matchesAnyPattern(tagToken, includeTagPatterns),
-      )
-      if (!includesAnyTag) {
-        return false
-      }
-    }
-
-    if (excludeTagPatterns.length > 0) {
-      const hasExcludedTag = entityTags.some((tagToken) =>
-        this._matchesAnyPattern(tagToken, excludeTagPatterns),
-      )
-      if (hasExcludedTag) {
-        return false
-      }
-    }
-
-    return true
-  }
-
-  private _resolveEntitySpecPath(
-    test: Frameworks.Test,
-    context: unknown,
-  ): string {
-    const testRecord = test as Frameworks.Test & {
-      uri?: string
-      scenario?: {
-        uri?: string
-      }
-    }
-    const contextRecord =
-      context && typeof context === 'object'
-        ? (context as Record<string, unknown>)
-        : undefined
-    const contextCurrentTest =
-      contextRecord &&
-      typeof contextRecord.currentTest === 'object' &&
-      contextRecord.currentTest
-        ? (contextRecord.currentTest as Record<string, unknown>)
-        : undefined
-    const contextFeature =
-      contextRecord &&
-      typeof contextRecord.feature === 'object' &&
-      contextRecord.feature
-        ? (contextRecord.feature as Record<string, unknown>)
-        : undefined
-    const contextScenario =
-      contextRecord &&
-      typeof contextRecord.scenario === 'object' &&
-      contextRecord.scenario
-        ? (contextRecord.scenario as Record<string, unknown>)
-        : undefined
-
-    const candidates = [
-      testRecord.file,
-      testRecord.uri,
-      testRecord.scenario?.uri,
-      this._toNonEmptyString(contextCurrentTest?.file),
-      this._toNonEmptyString(contextCurrentTest?.uri),
-      this._toNonEmptyString(contextRecord?.uri),
-      this._toNonEmptyString(contextFeature?.uri),
-      this._toNonEmptyString(contextScenario?.uri),
-    ]
-
-    for (const candidate of candidates) {
-      const normalizedCandidate = this._normalizeCandidateValue(candidate)
-      if (normalizedCandidate) {
-        return normalizedCandidate
-      }
-    }
-
-    return ''
-  }
-
-  private _extractEntityTagTokens(
-    test: Frameworks.Test,
-    context: unknown,
-  ): string[] {
-    const testRecord = test as Frameworks.Test & {
-      tags?: unknown
-      pickle?: {
-        tags?: unknown
-      }
-      scenario?: {
-        tags?: unknown
-      }
-    }
-    const contextRecord =
-      context && typeof context === 'object'
-        ? (context as Record<string, unknown>)
-        : undefined
-    const contextCurrentTest =
-      contextRecord &&
-      typeof contextRecord.currentTest === 'object' &&
-      contextRecord.currentTest
-        ? (contextRecord.currentTest as Record<string, unknown>)
-        : undefined
-    const contextPickle =
-      contextRecord &&
-      typeof contextRecord.pickle === 'object' &&
-      contextRecord.pickle
-        ? (contextRecord.pickle as Record<string, unknown>)
-        : undefined
-    const contextScenario =
-      contextRecord &&
-      typeof contextRecord.scenario === 'object' &&
-      contextRecord.scenario
-        ? (contextRecord.scenario as Record<string, unknown>)
-        : undefined
-
-    const rawTagSources: unknown[] = [
-      testRecord.tags,
-      testRecord.pickle?.tags,
-      testRecord.scenario?.tags,
-      contextCurrentTest?.tags,
-      contextPickle?.tags,
-      contextScenario?.tags,
-      contextRecord?.tags,
-    ]
-
-    const normalizedTagTokens: string[] = []
-    const seen = new Set<string>()
-    for (const source of rawTagSources) {
-      const extracted = this._collectTagStrings(source)
-      for (const tagValue of extracted) {
-        const normalizedTag = this._normalizeCandidateValue(tagValue)
-        if (!normalizedTag || seen.has(normalizedTag)) {
-          continue
-        }
-        seen.add(normalizedTag)
-        normalizedTagTokens.push(normalizedTag)
-      }
-    }
-
-    return normalizedTagTokens
-  }
-
-  private _collectTagStrings(source: unknown): string[] {
-    if (!source) {
-      return []
-    }
-
-    if (typeof source === 'string') {
-      return [source]
-    }
-
-    if (Array.isArray(source)) {
-      return source.flatMap((entry) => this._collectTagStrings(entry))
-    }
-
-    if (typeof source === 'object') {
-      const sourceRecord = source as Record<string, unknown>
-      const namedTag = this._toNonEmptyString(sourceRecord.name)
-      if (namedTag) {
-        return [namedTag]
-      }
-
-      return []
-    }
-
-    return []
-  }
-
-  private _matchesAnyPattern(
-    value: string,
-    patterns: string[] | undefined,
-  ): boolean {
-    if (!value || !patterns || patterns.length === 0) {
-      return false
-    }
-
-    const normalizedValue = value.toLowerCase()
-    for (const pattern of patterns) {
-      if (this._matchesPattern(normalizedValue, pattern)) {
-        return true
-      }
-    }
-
-    return false
-  }
-
-  private _matchesPattern(value: string, pattern: string): boolean {
-    if (!pattern) {
-      return false
-    }
-
-    if (!pattern.includes('*')) {
-      return value.includes(pattern)
-    }
-
-    let cachedRegex = this._wildcardPatternRegexCache.get(pattern)
-    if (!cachedRegex) {
-      const escapedPattern = pattern.replaceAll(
-        /[.+?^${}()|[\]\\]/g,
-        String.raw`\$&`,
-      )
-      const regexSource = `^${escapedPattern.replaceAll('*', '.*')}$`
-      cachedRegex = new RegExp(regexSource)
-      this._wildcardPatternRegexCache.set(pattern, cachedRegex)
-    }
-
-    return cachedRegex.test(value)
+    return filtering.shouldRecordForFilters(
+      this._options,
+      test,
+      context,
+      this._wildcardPatternRegexCache,
+    )
   }
 
   private async _finalizeIfRecording(passed: boolean): Promise<void> {
@@ -1410,16 +1111,22 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const transcodeAfterMerge =
+    let transcodeAfterMerge: DeferredMergeTask['transcodeToMp4']
+    if (
       mergedFormat === 'webm' &&
       this._options.outputFormat === 'mp4' &&
       this._shouldTranscode('mp4')
-        ? {
-            outputPath: this._getMergedOutputPath('mp4'),
-            deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
-            ffmpegArgs: this._options.transcode?.ffmpegArgs,
-          }
-        : undefined
+    ) {
+      transcodeAfterMerge = {
+        outputPath: this._getMergedOutputPath('mp4'),
+        deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
+      }
+      const transcodeFfmpegArgs = this._options.transcode?.ffmpegArgs
+      if (transcodeFfmpegArgs !== undefined) {
+        transcodeAfterMerge.ffmpegArgs = transcodeFfmpegArgs
+      }
+    }
+
     const mergedPath = transcodeAfterMerge
       ? this._getMergedOutputPath('webm')
       : this._getMergedOutputPath(mergedFormat)
@@ -1430,7 +1137,7 @@ export default class WdioPuppeteerVideoService
       segmentPaths,
       mergedPath,
       deleteSegments,
-      transcodeToMp4: transcodeAfterMerge,
+      ...(transcodeAfterMerge ? { transcodeToMp4: transcodeAfterMerge } : {}),
     })
     this._log(
       'debug',
@@ -1484,28 +1191,13 @@ export default class WdioPuppeteerVideoService
     segmentPaths: string[],
     operationName: string,
   ): OutputFormat | undefined {
-    const extension = path.extname(segmentPaths[0]).toLowerCase()
-    const mergedFormat = SEGMENT_EXTENSION_TO_FORMAT[extension]
-    if (!mergedFormat) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Unsupported segment format for ${operationName}: ${extension}`,
-      )
-      return undefined
-    }
-
-    const hasMixedFormats = segmentPaths.some(
-      (filePath) => path.extname(filePath).toLowerCase() !== extension,
+    return artifactPaths.resolveMergeFormat(
+      segmentPaths,
+      operationName,
+      (message) => {
+        this._log('warn', message)
+      },
     )
-    if (hasMixedFormats) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Skipping ${operationName} because segment formats are mixed.`,
-      )
-      return undefined
-    }
-
-    return mergedFormat
   }
 
   private async _mergeSegmentPathsToOutput(
@@ -1527,15 +1219,19 @@ export default class WdioPuppeteerVideoService
     })
 
     if (segmentPaths.length === 1) {
+      const singleSegmentPath = segmentPaths[0]
+      if (!singleSegmentPath) {
+        return false
+      }
       if (deleteSegments) {
-        await fs.rename(segmentPaths[0], mergedPath).catch(async () => {
-          await fs.copyFile(segmentPaths[0], mergedPath)
-          await fs.unlink(segmentPaths[0]).catch(() => {
+        await fs.rename(singleSegmentPath, mergedPath).catch(async () => {
+          await fs.copyFile(singleSegmentPath, mergedPath)
+          await fs.unlink(singleSegmentPath).catch(() => {
             /* best-effort cleanup */
           })
         })
       } else {
-        await fs.copyFile(segmentPaths[0], mergedPath)
+        await fs.copyFile(singleSegmentPath, mergedPath)
       }
       return true
     }
@@ -1594,51 +1290,35 @@ export default class WdioPuppeteerVideoService
   }
 
   private _collectCurrentTestSegmentPaths(): string[] {
-    if (!this._currentTestSlug) {
-      return []
-    }
-
-    const segmentPrefix = `${this._currentTestSlug}_part`
-    return [...this._recordedSegments]
-      .filter((filePath) => path.basename(filePath).startsWith(segmentPrefix))
-      .sort(
-        (leftPath, rightPath) =>
-          this._extractPartNumber(leftPath) -
-          this._extractPartNumber(rightPath),
-      )
+    return artifactPaths.collectCurrentTestSegmentPaths(
+      this._currentTestSlug,
+      this._recordedSegments,
+    )
   }
 
   private _getSegmentPath(format?: OutputFormat): string {
-    const resolvedFormat = format ?? this._options.outputFormat ?? 'webm'
-    const fileStem = this._currentTestSlug || 'test'
-    const filename = `${fileStem}_part${this._currentSegment}.${resolvedFormat}`
-    return path.join(this._options.outputDir || DEFAULT_OUTPUT_DIR, filename)
+    return artifactPaths.getSegmentPath(
+      this._options.outputDir,
+      this._currentTestSlug,
+      this._currentSegment,
+      format ?? this._options.outputFormat,
+    )
   }
 
   private _getMergedOutputPath(format?: OutputFormat): string {
-    const resolvedFormat = format ?? this._options.outputFormat ?? 'webm'
-    const fileStem = this._currentTestSlug || 'test'
-    const filename = `${fileStem}.${resolvedFormat}`
-    return path.join(this._options.outputDir || DEFAULT_OUTPUT_DIR, filename)
+    return artifactPaths.getMergedOutputPath(
+      this._options.outputDir,
+      this._currentTestSlug,
+      format ?? this._options.outputFormat,
+    )
   }
 
   private _extractPartNumber(filePath: string): number {
-    const partMatch = new RegExp(/_part(\d+)\./).exec(path.basename(filePath))
-    if (!partMatch) {
-      return Number.MAX_SAFE_INTEGER
-    }
-
-    return Number.parseInt(partMatch[1], 10)
+    return artifactPaths.extractPartNumber(filePath)
   }
 
   private _buildConcatList(segmentPaths: string[]): string {
-    return segmentPaths
-      .map((filePath) => {
-        const normalizedPath = path.resolve(filePath).replaceAll('\\', '/')
-        const escapedPath = normalizedPath.replaceAll("'", String.raw`'\''`)
-        return `file '${escapedPath}'`
-      })
-      .join('\n')
+    return artifactPaths.buildConcatList(segmentPaths)
   }
 
   private _resolveFfmpegPath(): string {
@@ -1808,13 +1488,16 @@ export default class WdioPuppeteerVideoService
         return
       }
 
-      this._deferredPostProcessTasks.push({
+      const transcodeTask: DeferredTranscodeTask = {
         kind: 'transcode',
         inputPath: segment.recordingPath,
         outputPath: segment.outputPath,
         deleteOriginal: segment.transcodeOptions.deleteOriginal,
-        ffmpegArgs: segment.transcodeOptions.ffmpegArgs,
-      })
+      }
+      if (segment.transcodeOptions.ffmpegArgs !== undefined) {
+        transcodeTask.ffmpegArgs = segment.transcodeOptions.ffmpegArgs
+      }
+      this._deferredPostProcessTasks.push(transcodeTask)
       this._log(
         'debug',
         `[WdioPuppeteerVideoService] Queued deferred transcode: ${segment.recordingPath} -> ${segment.outputPath}`,
@@ -1955,41 +1638,10 @@ export default class WdioPuppeteerVideoService
   }
 
   private _getFfmpegCandidates(): string[] {
-    const configuredPath = this._options.ffmpegPath?.trim()
-    const envPath = process.env.FFMPEG_PATH?.trim()
-    const ffmpegStaticPath = this._resolveOptionalFfmpegStaticPath()
-
-    const candidates = [configuredPath, envPath, 'ffmpeg', ffmpegStaticPath]
-    const uniqueCandidates: string[] = []
-    const seen = new Set<string>()
-
-    for (const candidate of candidates) {
-      if (!candidate) {
-        continue
-      }
-
-      const normalizedCandidate = candidate.trim()
-      if (!normalizedCandidate || seen.has(normalizedCandidate)) {
-        continue
-      }
-
-      seen.add(normalizedCandidate)
-      uniqueCandidates.push(normalizedCandidate)
-    }
-
-    return uniqueCandidates
-  }
-
-  private _resolveOptionalFfmpegStaticPath(): string | undefined {
-    try {
-      const resolved = require('ffmpeg-static') as string | null
-      if (typeof resolved === 'string' && resolved.trim().length > 0) {
-        return resolved
-      }
-    } catch {
-      // optional dependency
-    }
-    return undefined
+    return ffmpeg.getFfmpegCandidates(
+      this._options.ffmpegPath?.trim(),
+      process.env.FFMPEG_PATH?.trim(),
+    )
   }
 
   private async _canExecuteFfmpeg(ffmpegPath: string): Promise<boolean> {
@@ -2229,13 +1881,16 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    await this._executeDeferredTranscodeTask({
+    const transcodeTask: DeferredTranscodeTask = {
       kind: 'transcode',
       inputPath: task.mergedPath,
       outputPath: task.transcodeToMp4.outputPath,
       deleteOriginal: task.transcodeToMp4.deleteOriginal,
-      ffmpegArgs: task.transcodeToMp4.ffmpegArgs,
-    })
+    }
+    if (task.transcodeToMp4.ffmpegArgs !== undefined) {
+      transcodeTask.ffmpegArgs = task.transcodeToMp4.ffmpegArgs
+    }
+    await this._executeDeferredTranscodeTask(transcodeTask)
   }
 
   private _dropDeferredPostProcessTasksForPaths(paths: string[]): void {
@@ -2393,65 +2048,26 @@ export default class WdioPuppeteerVideoService
   }
 
   private _extractPidFromSlotFile(fileContents: string): number | undefined {
-    if (!fileContents.trim()) {
-      return undefined
-    }
-
-    try {
-      const parsed = JSON.parse(fileContents) as { pid?: unknown }
-      if (
-        typeof parsed.pid === 'number' &&
-        Number.isInteger(parsed.pid) &&
-        parsed.pid > 0
-      ) {
-        return parsed.pid
-      }
-    } catch {
-      // malformed slot metadata; ignore cleanup to avoid deleting active slots
-    }
-
-    return undefined
+    return retryState.extractPidFromSlotFile(fileContents)
   }
 
   private _isProcessAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch (error) {
-      const processError = error as NodeJS.ErrnoException
-      if (processError.code === 'ESRCH') {
-        return false
-      }
-      return true
-    }
+    return retryState.isProcessAlive(pid)
   }
 
   private _getSpecRetryStateDirPath(): string {
-    return path.join(
-      this._options.outputDir || DEFAULT_OUTPUT_DIR,
-      SPEC_RETRY_STATE_DIR_NAME,
-    )
+    return retryState.getSpecRetryStateDirPath(this._options.outputDir)
   }
 
   private _getSpecRetryStatePathForCid(cid: string): string {
-    const safeCidToken =
-      cid.trim().replaceAll(/[^a-zA-Z0-9._-]/g, '_') || 'unknown'
-    return path.join(this._getSpecRetryStateDirPath(), `${safeCidToken}.json`)
+    return retryState.getSpecRetryStatePathForCid(this._options.outputDir, cid)
   }
 
   private _buildSpecRetryKey(
     specs: string[],
     capabilities: WebdriverIO.Capabilities,
   ): string {
-    const normalizedSpecs = specs
-      .map((specPath) => path.resolve(specPath))
-      .sort((a, b) => a.localeCompare(b))
-      .join('|')
-    const capabilityFingerprint = this._toNonEmptyString(
-      JSON.stringify(capabilities),
-    )
-
-    return `${capabilityFingerprint || 'capabilities'}|${normalizedSpecs}`
+    return retryState.buildSpecRetryKey(specs, capabilities)
   }
 
   private async _writeSpecRetryState(
@@ -2528,14 +2144,9 @@ export default class WdioPuppeteerVideoService
   }
 
   private _resolveGlobalRecordingLockDir(): string {
-    const configuredDir = this._options.globalRecordingLockDir?.trim()
-    if (configuredDir) {
-      return configuredDir
-    }
-
-    return path.join(
-      this._options.outputDir || DEFAULT_OUTPUT_DIR,
-      GLOBAL_RECORDING_SLOT_DIR_NAME,
+    return retryState.resolveGlobalRecordingLockDir(
+      this._options.outputDir,
+      this._options.globalRecordingLockDir,
     )
   }
 
@@ -2587,39 +2198,13 @@ export default class WdioPuppeteerVideoService
   }
 
   private _resolveWdioLogLevel(browser: Browser): string | undefined {
-    const browserWithOptions = browser as Browser & {
-      options?: { logLevel?: string }
-      config?: { logLevel?: string }
-    }
-
-    return (
-      browserWithOptions.options?.logLevel ||
-      browserWithOptions.config?.logLevel ||
-      process.env.WDIO_LOG_LEVEL
-    )
+    return logging.resolveWdioLogLevel(browser)
   }
 
   private _normalizeLogLevel(
     level: string | undefined,
   ): WdioPuppeteerVideoServiceLogLevel {
-    const normalized = (level || '').toLowerCase()
-    if (normalized in LOG_LEVEL_PRIORITY) {
-      return normalized as WdioPuppeteerVideoServiceLogLevel
-    }
-    return 'warn'
-  }
-
-  private _shouldLog(level: WdioPuppeteerVideoServiceLogLevel): boolean {
-    return LOG_LEVEL_PRIORITY[level] <= LOG_LEVEL_PRIORITY[this._logLevel]
-  }
-
-  private _formatLogMessage(message: string): string {
-    const prefix = '[WdioPuppeteerVideoService]'
-    if (message.startsWith(prefix)) {
-      return message
-    }
-
-    return `${prefix} ${message}`
+    return logging.normalizeLogLevel(level)
   }
 
   private _log(
@@ -2627,18 +2212,7 @@ export default class WdioPuppeteerVideoService
     message: string,
     details?: unknown,
   ): void {
-    if (!this._shouldLog(level)) {
-      return
-    }
-
-    const formattedMessage = this._formatLogMessage(message)
-    const logMethod = LOG_METHOD_MAP[level] ?? console.debug
-
-    if (details === undefined) {
-      logMethod(formattedMessage)
-    } else {
-      logMethod(formattedMessage, details)
-    }
+    logging.writeLog(this._logLevel, level, message, details)
   }
 
   private _resetTestState(): void {
@@ -2693,32 +2267,11 @@ export default class WdioPuppeteerVideoService
   }
 
   private _computeMaxSlugLength(): number {
-    const effectiveMaxFilenameLength = this._getEffectiveMaxFilenameLength()
-    return Math.max(16, effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH)
+    return normalization.computeMaxSlugLength(this._options)
   }
 
   private _getEffectiveMaxFilenameLength(): number {
-    const platformDefault =
-      process.platform === 'win32'
-        ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
-        : DEFAULT_MAX_FILENAME_LENGTH
-    const configuredMax = this._options.maxFileNameLength
-      ? Math.floor(this._options.maxFileNameLength)
-      : platformDefault
-
-    let effectiveMax = configuredMax
-    if (process.platform === 'win32') {
-      const absoluteOutputDir = path.resolve(
-        this._options.outputDir || 'videos',
-      )
-      const remainingPathBudget =
-        WINDOWS_MAX_PATH_LENGTH - absoluteOutputDir.length - 1
-      if (remainingPathBudget > 0) {
-        effectiveMax = Math.min(effectiveMax, remainingPathBudget)
-      }
-    }
-
-    return Math.max(MIN_SAFE_FILENAME_LENGTH, effectiveMax)
+    return normalization.getEffectiveMaxFilenameLength(this._options)
   }
 
   private _sanitizeFileToken(
@@ -2729,165 +2282,76 @@ export default class WdioPuppeteerVideoService
   }
 
   private _normalizeOutputDir(outputDir: string | undefined): string {
-    const trimmed = outputDir?.trim()
-    if (!trimmed) {
-      return 'videos'
-    }
-    return trimmed
+    return normalization.normalizeOutputDir(outputDir)
   }
 
   private _normalizeOptionalDir(
     dirPath: string | undefined,
   ): string | undefined {
-    const trimmed = dirPath?.trim()
-    if (!trimmed) {
-      return undefined
-    }
-    return trimmed
+    return normalization.normalizeOptionalDir(dirPath)
   }
 
   private _normalizePositiveInt(
     value: number | undefined,
     fallback: number,
   ): number {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-      return fallback
-    }
-    return Math.floor(value)
+    return normalization.normalizePositiveInt(value, fallback)
   }
 
   private _normalizeNonNegativeInt(
     value: number | undefined,
     fallback: number,
   ): number {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-      return fallback
-    }
-
-    return Math.floor(value)
+    return normalization.normalizeNonNegativeInt(value, fallback)
   }
 
   private _normalizeBoolean(
     value: boolean | undefined,
     fallback = false,
   ): boolean {
-    if (typeof value !== 'boolean') {
-      return fallback
-    }
-
-    return value
+    return normalization.normalizeBoolean(value, fallback)
   }
 
   private _normalizePatternList(patterns: string[] | undefined): string[] {
-    if (!Array.isArray(patterns) || patterns.length === 0) {
-      return []
-    }
-
-    const normalizedPatterns: string[] = []
-    const seen = new Set<string>()
-    for (const pattern of patterns) {
-      if (typeof pattern !== 'string') {
-        continue
-      }
-      const trimmedPattern = pattern.trim().toLowerCase()
-      if (!trimmedPattern || seen.has(trimmedPattern)) {
-        continue
-      }
-      seen.add(trimmedPattern)
-      normalizedPatterns.push(trimmedPattern)
-    }
-
-    return normalizedPatterns
+    return normalization.normalizePatternList(patterns)
   }
 
   private _normalizePostProcessMode(
     mode: WdioPuppeteerVideoServicePostProcessMode | undefined,
   ): WdioPuppeteerVideoServicePostProcessMode {
-    if (mode === 'deferred') {
-      return 'deferred'
-    }
-    return 'immediate'
-  }
-
-  private _normalizeCandidateValue(value: string | undefined): string {
-    return (value ?? '').trim().toLowerCase()
-  }
-
-  private _toNonEmptyString(value: unknown): string | undefined {
-    if (typeof value !== 'string') {
-      return undefined
-    }
-
-    const trimmed = value.trim()
-    if (!trimmed) {
-      return undefined
-    }
-
-    return trimmed
+    return normalization.normalizePostProcessMode(mode)
   }
 
   private _normalizeFileNameOverflowStrategy(
     strategy: WdioPuppeteerVideoServiceFileNameOverflowStrategy | undefined,
   ): WdioPuppeteerVideoServiceFileNameOverflowStrategy {
-    if (strategy === 'session') {
-      return 'session'
-    }
-    return 'truncate'
+    return normalization.normalizeFileNameOverflowStrategy(strategy)
   }
 
   private _normalizeFileNameStyle(
     style: WdioPuppeteerVideoServiceFileNameStyle | undefined,
   ): WdioPuppeteerVideoServiceFileNameStyle {
-    if (style === 'session') {
-      return 'session'
-    }
-    if (style === 'sessionFull') {
-      return 'sessionFull'
-    }
-    return 'test'
+    return normalization.normalizeFileNameStyle(style)
   }
 
   private _normalizeMp4Mode(
     mode: WdioPuppeteerVideoServiceMp4Mode | undefined,
   ): WdioPuppeteerVideoServiceMp4Mode {
-    if (mode === 'direct') {
-      return 'direct'
-    }
-    if (mode === 'transcode') {
-      return 'transcode'
-    }
-    return 'auto'
+    return normalization.normalizeMp4Mode(mode)
   }
 
   private _normalizePerformanceProfile(
     profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
   ): WdioPuppeteerVideoServicePerformanceProfile {
-    if (profile === 'parallel') {
-      return 'parallel'
-    }
-    return 'default'
+    return normalization.normalizePerformanceProfile(profile)
   }
 
   private _isBenignStreamWriteError(error: NodeJS.ErrnoException): boolean {
-    if (error.code === 'EPIPE') {
-      return true
-    }
-
-    const message = error.message.toLowerCase()
-    return (
-      message.includes('cannot call write after a stream was destroyed') ||
-      message.includes('write after end')
-    )
+    return normalization.isBenignStreamWriteError(error)
   }
 
   private _describeError(error: unknown): string {
-    if (error instanceof Error) {
-      return error.message
-    }
-    if (typeof error === 'string') {
-      return error
-    }
-    return String(error)
+    return normalization.describeError(error)
   }
 
   private _nextPageMarkerId(): string {

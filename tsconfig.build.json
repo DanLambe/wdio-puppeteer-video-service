@@ -1,7 +1,12 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "outDir": "./build"
+    "outDir": "./build",
+    "types": ["node"],
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "isolatedDeclarations": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "tests"]
