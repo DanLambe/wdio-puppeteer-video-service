@@ -391,8 +391,29 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     try {
       const specs = ['tests/advanced/specs/retry-recording.spec.ts']
-      const capabilities = {
+      const launcherCapabilities = {
         browserName: 'chrome',
+        platformName: 'Windows',
+        'goog:chromeOptions': {
+          prefs: {
+            'download.default_directory': 'C:/tmp/downloads-attempt-1',
+          },
+        },
+        'wdio:chromedriverOptions': {
+          port: 9515,
+        },
+      } as unknown as WebdriverIO.Capabilities
+      const workerCapabilities = {
+        browserName: 'chrome',
+        platformName: 'Windows',
+        'goog:chromeOptions': {
+          prefs: {
+            'download.default_directory': 'C:/tmp/downloads-attempt-2',
+          },
+        },
+        'wdio:chromedriverOptions': {
+          port: 9516,
+        },
       } as unknown as WebdriverIO.Capabilities
 
       const launcherService = new WdioPuppeteerVideoService({
@@ -414,9 +435,9 @@ describe('WdioPuppeteerVideoService unit', () => {
         onComplete: () => Promise<void>
       }
       await launcherService.onPrepare()
-      await launcherService.onWorkerStart('0-0', capabilities, specs)
+      await launcherService.onWorkerStart('0-0', launcherCapabilities, specs)
       await launcherService.onWorkerEnd('0-0', 1, specs, 0)
-      await launcherService.onWorkerStart('0-1', capabilities, specs)
+      await launcherService.onWorkerStart('0-1', launcherCapabilities, specs)
 
       const workerService = new WdioPuppeteerVideoService({
         outputDir: tempDir,
@@ -458,7 +479,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         seenRetryCounts.push(retryCount)
       }
 
-      await workerService.beforeSession({}, capabilities, specs, '0-1')
+      await workerService.beforeSession({}, workerCapabilities, specs, '0-1')
       await workerService.beforeTest(
         createTest({
           title: 'spec file retry candidate',
@@ -468,6 +489,99 @@ describe('WdioPuppeteerVideoService unit', () => {
       )
 
       expect(seenRetryCounts).toEqual([1])
+      await launcherService.onComplete()
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('recordOnRetries does not hydrate spec-file retry attempt for different browsers', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'wdio-video-service-unit-'),
+    )
+
+    try {
+      const specs = ['tests/advanced/specs/retry-recording.spec.ts']
+      const launcherCapabilities = {
+        browserName: 'chrome',
+      } as unknown as WebdriverIO.Capabilities
+      const workerCapabilities = {
+        browserName: 'firefox',
+      } as unknown as WebdriverIO.Capabilities
+
+      const launcherService = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+        recordOnRetries: true,
+      }) as unknown as {
+        onPrepare: () => Promise<void>
+        onWorkerStart: (
+          cid: string,
+          capabilities: WebdriverIO.Capabilities,
+          specs: string[],
+        ) => Promise<void>
+        onWorkerEnd: (
+          cid: string,
+          exitCode: number,
+          specs: string[],
+          retries: number,
+        ) => Promise<void>
+        onComplete: () => Promise<void>
+      }
+      await launcherService.onPrepare()
+      await launcherService.onWorkerStart('0-0', launcherCapabilities, specs)
+      await launcherService.onWorkerEnd('0-0', 1, specs, 0)
+      await launcherService.onWorkerStart('0-1', launcherCapabilities, specs)
+
+      const workerService = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+        recordOnRetries: true,
+      }) as unknown as {
+        _isChromium: boolean
+        _ffmpegAvailable: boolean
+        _browser: unknown
+        _runSerializedRecordingTask: (
+          task: () => Promise<void>,
+        ) => Promise<void>
+        _startRecordingForEntity: (
+          test: Frameworks.Test,
+          context: unknown,
+          retryCount: number,
+        ) => Promise<void>
+        beforeSession: (
+          config: unknown,
+          capabilities: WebdriverIO.Capabilities,
+          specs: string[],
+          cid: string,
+        ) => Promise<void>
+        beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
+      }
+
+      workerService._isChromium = true
+      workerService._ffmpegAvailable = true
+      workerService._browser = {}
+      workerService._runSerializedRecordingTask = async (task) => {
+        await task()
+      }
+
+      const seenRetryCounts: number[] = []
+      workerService._startRecordingForEntity = async (
+        _test,
+        _context,
+        retryCount,
+      ) => {
+        seenRetryCounts.push(retryCount)
+      }
+
+      await workerService.beforeSession({}, workerCapabilities, specs, '0-1')
+      await workerService.beforeTest(
+        createTest({
+          title: 'spec file retry candidate',
+          file: specs[0],
+        }),
+        {},
+      )
+
+      expect(seenRetryCounts).toEqual([])
       await launcherService.onComplete()
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true })

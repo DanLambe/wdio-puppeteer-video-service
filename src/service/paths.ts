@@ -30,9 +30,8 @@ export const getSegmentPath = (
   outputDir: string | undefined,
   currentTestSlug: string,
   currentSegment: number,
-  format: OutputFormat | undefined,
+  resolvedFormat = 'webm',
 ): string => {
-  const resolvedFormat = format ?? 'webm'
   const fileStem = currentTestSlug || 'test'
   const filename = `${fileStem}_part${currentSegment}.${resolvedFormat}`
   return path.join(outputDir || DEFAULT_OUTPUT_DIR, filename)
@@ -41,9 +40,8 @@ export const getSegmentPath = (
 export const getMergedOutputPath = (
   outputDir: string | undefined,
   currentTestSlug: string,
-  format: OutputFormat | undefined,
+  resolvedFormat = 'webm',
 ): string => {
-  const resolvedFormat = format ?? 'webm'
   const fileStem = currentTestSlug || 'test'
   const filename = `${fileStem}.${resolvedFormat}`
   return path.join(outputDir || DEFAULT_OUTPUT_DIR, filename)
@@ -51,11 +49,12 @@ export const getMergedOutputPath = (
 
 export const extractPartNumber = (filePath: string): number => {
   const partMatch = new RegExp(/_part(\d+)\./).exec(path.basename(filePath))
-  if (!partMatch) {
+  const partValue = partMatch?.[1]
+  if (!partValue) {
     return Number.MAX_SAFE_INTEGER
   }
 
-  return Number.parseInt(partMatch[1], 10)
+  return Number.parseInt(partValue, 10)
 }
 
 export const buildConcatList = (segmentPaths: string[]): string => {
@@ -73,7 +72,12 @@ export const resolveMergeFormat = (
   operationName: string,
   onWarn: (message: string) => void,
 ): OutputFormat | undefined => {
-  const extension = path.extname(segmentPaths[0]).toLowerCase()
+  const firstSegmentPath = segmentPaths[0]
+  if (!firstSegmentPath) {
+    return undefined
+  }
+
+  const extension = path.extname(firstSegmentPath).toLowerCase()
   const mergedFormat = SEGMENT_EXTENSION_TO_FORMAT[extension]
   if (!mergedFormat) {
     onWarn(

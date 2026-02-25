@@ -74,7 +74,7 @@ export const SEGMENT_EXTENSION_TO_FORMAT: Record<string, OutputFormat> = {
   '.webm': 'webm',
 }
 
-export const WINDOW_SEGMENT_COMMANDS = new Set<string>([
+export const WINDOW_SEGMENT_COMMANDS: Set<string> = new Set<string>([
   'switchWindow',
   'switchToWindow',
   'newWindow',
@@ -89,7 +89,7 @@ export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 export const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
 export const DEFAULT_MAX_FILENAME_LENGTH = 255
 export const WINDOWS_MAX_PATH_LENGTH = 259
-export const SEGMENT_SUFFIX_MAX_LENGTH = '_part9999.webm'.length
+export const SEGMENT_SUFFIX_MAX_LENGTH: number = '_part9999.webm'.length
 export const MIN_SAFE_FILENAME_LENGTH = 40
 export const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_POLL_MS = 100

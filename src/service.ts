@@ -72,8 +72,8 @@ export default class WdioPuppeteerVideoService
 
   private _browser?: Browser
   private readonly _options: WdioPuppeteerVideoServiceOptions
-  private _recorder?: ScreenRecorder
-  private _activeSegment?: ActiveSegment
+  private _recorder: ScreenRecorder | undefined
+  private _activeSegment: ActiveSegment | undefined
   private _currentSegment = 0
   private _currentTestSlug = ''
   private _currentRecordingRetryCount = 0
@@ -183,6 +183,10 @@ export default class WdioPuppeteerVideoService
       }
     }
 
+    const normalizedGlobalRecordingLockDir = this._normalizeOptionalDir(
+      mergedOptions.globalRecordingLockDir,
+    )
+
     this._options = {
       ...mergedOptions,
       outputDir: this._normalizeOutputDir(mergedOptions.outputDir),
@@ -222,9 +226,9 @@ export default class WdioPuppeteerVideoService
         mergedOptions.maxGlobalRecordings,
         0,
       ),
-      globalRecordingLockDir: this._normalizeOptionalDir(
-        mergedOptions.globalRecordingLockDir,
-      ),
+      ...(normalizedGlobalRecordingLockDir
+        ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
+        : {}),
       postProcessMode: this._normalizePostProcessMode(
         mergedOptions.postProcessMode,
       ),
@@ -746,6 +750,14 @@ export default class WdioPuppeteerVideoService
       recorder.on('error', onRecorderError)
       recorder.pipe(writeStream)
 
+      const transcodeOptions: ActiveSegment['transcodeOptions'] = {
+        deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
+      }
+      const transcodeFfmpegArgs = this._options.transcode?.ffmpegArgs
+      if (transcodeFfmpegArgs !== undefined) {
+        transcodeOptions.ffmpegArgs = transcodeFfmpegArgs
+      }
+
       this._recorder = recorder
       this._activeSegment = {
         recordingPath,
@@ -753,14 +765,10 @@ export default class WdioPuppeteerVideoService
         outputFormat,
         recordingFormat,
         transcode: transcodeEnabled,
-        transcodeOptions: {
-          deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
-          ffmpegArgs: this._options.transcode?.ffmpegArgs,
-        },
+        transcodeOptions,
         writeStream,
         writeStreamDone,
         writeStreamErrored: false,
-        writeStreamErrorMessage: undefined,
         onWriteStreamError,
         onRecorderError,
       }
@@ -1103,16 +1111,22 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const transcodeAfterMerge =
+    let transcodeAfterMerge: DeferredMergeTask['transcodeToMp4']
+    if (
       mergedFormat === 'webm' &&
       this._options.outputFormat === 'mp4' &&
       this._shouldTranscode('mp4')
-        ? {
-            outputPath: this._getMergedOutputPath('mp4'),
-            deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
-            ffmpegArgs: this._options.transcode?.ffmpegArgs,
-          }
-        : undefined
+    ) {
+      transcodeAfterMerge = {
+        outputPath: this._getMergedOutputPath('mp4'),
+        deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
+      }
+      const transcodeFfmpegArgs = this._options.transcode?.ffmpegArgs
+      if (transcodeFfmpegArgs !== undefined) {
+        transcodeAfterMerge.ffmpegArgs = transcodeFfmpegArgs
+      }
+    }
+
     const mergedPath = transcodeAfterMerge
       ? this._getMergedOutputPath('webm')
       : this._getMergedOutputPath(mergedFormat)
@@ -1123,7 +1137,7 @@ export default class WdioPuppeteerVideoService
       segmentPaths,
       mergedPath,
       deleteSegments,
-      transcodeToMp4: transcodeAfterMerge,
+      ...(transcodeAfterMerge ? { transcodeToMp4: transcodeAfterMerge } : {}),
     })
     this._log(
       'debug',
@@ -1205,15 +1219,19 @@ export default class WdioPuppeteerVideoService
     })
 
     if (segmentPaths.length === 1) {
+      const singleSegmentPath = segmentPaths[0]
+      if (!singleSegmentPath) {
+        return false
+      }
       if (deleteSegments) {
-        await fs.rename(segmentPaths[0], mergedPath).catch(async () => {
-          await fs.copyFile(segmentPaths[0], mergedPath)
-          await fs.unlink(segmentPaths[0]).catch(() => {
+        await fs.rename(singleSegmentPath, mergedPath).catch(async () => {
+          await fs.copyFile(singleSegmentPath, mergedPath)
+          await fs.unlink(singleSegmentPath).catch(() => {
             /* best-effort cleanup */
           })
         })
       } else {
-        await fs.copyFile(segmentPaths[0], mergedPath)
+        await fs.copyFile(singleSegmentPath, mergedPath)
       }
       return true
     }
@@ -1470,13 +1488,16 @@ export default class WdioPuppeteerVideoService
         return
       }
 
-      this._deferredPostProcessTasks.push({
+      const transcodeTask: DeferredTranscodeTask = {
         kind: 'transcode',
         inputPath: segment.recordingPath,
         outputPath: segment.outputPath,
         deleteOriginal: segment.transcodeOptions.deleteOriginal,
-        ffmpegArgs: segment.transcodeOptions.ffmpegArgs,
-      })
+      }
+      if (segment.transcodeOptions.ffmpegArgs !== undefined) {
+        transcodeTask.ffmpegArgs = segment.transcodeOptions.ffmpegArgs
+      }
+      this._deferredPostProcessTasks.push(transcodeTask)
       this._log(
         'debug',
         `[WdioPuppeteerVideoService] Queued deferred transcode: ${segment.recordingPath} -> ${segment.outputPath}`,
@@ -1860,13 +1881,16 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    await this._executeDeferredTranscodeTask({
+    const transcodeTask: DeferredTranscodeTask = {
       kind: 'transcode',
       inputPath: task.mergedPath,
       outputPath: task.transcodeToMp4.outputPath,
       deleteOriginal: task.transcodeToMp4.deleteOriginal,
-      ffmpegArgs: task.transcodeToMp4.ffmpegArgs,
-    })
+    }
+    if (task.transcodeToMp4.ffmpegArgs !== undefined) {
+      transcodeTask.ffmpegArgs = task.transcodeToMp4.ffmpegArgs
+    }
+    await this._executeDeferredTranscodeTask(transcodeTask)
   }
 
   private _dropDeferredPostProcessTasksForPaths(paths: string[]): void {

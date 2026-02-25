@@ -25,11 +25,11 @@ interface TestLikeRecord {
 }
 
 interface ContextRecords {
-  contextRecord?: Record<string, unknown>
-  contextTestRecord?: TestLikeRecord
-  contextPickleRecord?: Record<string, unknown>
-  contextScenarioRecord?: Record<string, unknown>
-  contextFeatureRecord?: Record<string, unknown>
+  contextRecord: Record<string, unknown> | undefined
+  contextTestRecord: TestLikeRecord | undefined
+  contextPickleRecord: Record<string, unknown> | undefined
+  contextScenarioRecord: Record<string, unknown> | undefined
+  contextFeatureRecord: Record<string, unknown> | undefined
 }
 
 export interface SlugMetadata {
@@ -428,7 +428,8 @@ const extractFileToken = (candidates: Array<string | undefined>): string => {
       continue
     }
 
-    const candidateWithoutQuery = normalizedCandidate.split('?')[0]
+    const candidateWithoutQuery =
+      normalizedCandidate.split('?')[0] ?? normalizedCandidate
     const candidatePath = candidateWithoutQuery.startsWith('file://')
       ? candidateWithoutQuery.slice('file://'.length)
       : candidateWithoutQuery
