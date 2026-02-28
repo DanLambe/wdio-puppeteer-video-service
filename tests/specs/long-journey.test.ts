@@ -16,18 +16,20 @@ describe('Video Recording Service E2E Verification - Long Journey', () => {
     await expect(browser).toHaveTitle('The Internet')
     await pauseForRecording(1500)
 
-    const dynamicLoadingLink = await $('=Dynamic Loading')
+    const dynamicLoadingLink = await $('=Dynamic Loading').getElement()
     await dynamicLoadingLink.scrollIntoView()
     await dynamicLoadingLink.click()
     await pauseForRecording()
 
-    const exampleOneLink = await $('=Example 1: Element on page that is hidden')
+    const exampleOneLink = await $(
+      '=Example 1: Element on page that is hidden',
+    ).getElement()
     await exampleOneLink.click()
     await pauseForRecording()
 
-    const startButton = await $('#start button')
+    const startButton = await $('#start button').getElement()
     await startButton.click()
-    const finishMessage = await $('#finish')
+    const finishMessage = await $('#finish').getElement()
     await finishMessage.waitForExist({ timeout: 15_000 })
     await expect(finishMessage).toHaveText(
       expect.stringContaining('Hello World!'),
@@ -39,9 +41,11 @@ describe('Video Recording Service E2E Verification - Long Journey', () => {
     await browser.back()
     await pauseForRecording(1000)
 
-    const checkboxesLink = await $('=Checkboxes')
+    const checkboxesLink = await $('=Checkboxes').getElement()
     await checkboxesLink.click()
-    const secondCheckbox = await $('#checkboxes input:nth-of-type(2)')
+    const secondCheckbox = await $(
+      '#checkboxes input:nth-of-type(2)',
+    ).getElement()
     await secondCheckbox.click()
     await expect(secondCheckbox).not.toBeSelected()
     await pauseForRecording(1800)

@@ -11,5 +11,6 @@ export type {
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
   WdioPuppeteerVideoServicePostProcessMode,
+  WdioPuppeteerVideoServiceRecordingStartMode,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'

@@ -174,6 +174,8 @@ describe('WdioPuppeteerVideoService unit', () => {
         segmentOnWindowSwitch?: boolean
         maxConcurrentRecordings?: number
         maxGlobalRecordings?: number
+        recordingStartMode?: string
+        recordingStartTimeoutMs?: number
         globalRecordingLockDir?: string
         postProcessMode?: string
         includeSpecPatterns?: string[]
@@ -201,6 +203,8 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.segmentOnWindowSwitch).toBe(true)
     expect(service._options.maxConcurrentRecordings).toBe(0)
     expect(service._options.maxGlobalRecordings).toBe(0)
+    expect(service._options.recordingStartMode).toBe('blocking')
+    expect(service._options.recordingStartTimeoutMs).toBe(2500)
     expect(service._options.globalRecordingLockDir).toBeUndefined()
     expect(service._options.postProcessMode).toBe('immediate')
     expect(service._options.includeSpecPatterns).toEqual([])
@@ -269,6 +273,87 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.mergeSegments?.deleteSegments).toBe(false)
   })
 
+  it('ci performance profile applies conservative defaults', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'ci',
+    }) as unknown as {
+      _options: {
+        videoWidth: number
+        videoHeight: number
+        fps: number
+        outputFormat?: 'webm' | 'mp4'
+        performanceProfile?: string
+        skipViewPortKickoff?: boolean
+        segmentOnWindowSwitch?: boolean
+        postProcessMode?: string
+        recordingStartMode?: string
+        recordingStartTimeoutMs?: number
+        mergeSegments?: { enabled?: boolean; deleteSegments?: boolean }
+      }
+      _logLevel: string
+      _hasExplicitLogLevel: boolean
+    }
+
+    expect(service._options.performanceProfile).toBe('ci')
+    expect(service._options.videoWidth).toBe(1280)
+    expect(service._options.videoHeight).toBe(720)
+    expect(service._options.fps).toBe(24)
+    expect(service._options.outputFormat).toBe('webm')
+    expect(service._options.skipViewPortKickoff).toBe(true)
+    expect(service._options.segmentOnWindowSwitch).toBe(false)
+    expect(service._options.postProcessMode).toBe('deferred')
+    expect(service._options.recordingStartMode).toBe('fastFail')
+    expect(service._options.recordingStartTimeoutMs).toBe(2500)
+    expect(service._options.mergeSegments?.enabled).toBe(false)
+    expect(service._logLevel).toBe('warn')
+    expect(service._hasExplicitLogLevel).toBe(true)
+  })
+
+  it('ci performance profile does not override explicit values', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'ci',
+      outputFormat: 'mp4',
+      videoWidth: 1920,
+      videoHeight: 1080,
+      fps: 30,
+      skipViewPortKickoff: false,
+      segmentOnWindowSwitch: true,
+      postProcessMode: 'immediate',
+      recordingStartMode: 'blocking',
+      recordingStartTimeoutMs: 5000,
+      mergeSegments: {
+        enabled: true,
+      },
+      logLevel: 'error',
+    }) as unknown as {
+      _options: {
+        videoWidth: number
+        videoHeight: number
+        fps: number
+        outputFormat?: 'webm' | 'mp4'
+        skipViewPortKickoff?: boolean
+        segmentOnWindowSwitch?: boolean
+        postProcessMode?: string
+        recordingStartMode?: string
+        recordingStartTimeoutMs?: number
+        mergeSegments?: { enabled?: boolean }
+      }
+      _logLevel: string
+    }
+
+    expect(service._options.videoWidth).toBe(1920)
+    expect(service._options.videoHeight).toBe(1080)
+    expect(service._options.fps).toBe(30)
+    expect(service._options.outputFormat).toBe('mp4')
+    expect(service._options.skipViewPortKickoff).toBe(false)
+    expect(service._options.segmentOnWindowSwitch).toBe(true)
+    expect(service._options.postProcessMode).toBe('immediate')
+    expect(service._options.recordingStartMode).toBe('blocking')
+    expect(service._options.recordingStartTimeoutMs).toBe(5000)
+    expect(service._options.mergeSegments?.enabled).toBe(true)
+    expect(service._logLevel).toBe('error')
+  })
+
   it('constructor honors explicit service logLevel', () => {
     const service = new WdioPuppeteerVideoService({
       logLevel: 'silent',
@@ -301,6 +386,17 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._normalizeFileNameStyle('sessionFull')).toBe('sessionFull')
     expect(service._normalizeFileNameStyle('invalid')).toBe('test')
     expect(service._normalizeFileNameStyle(undefined)).toBe('test')
+  })
+
+  it('normalizeRecordingStartMode supports known values and falls back to blocking', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _normalizeRecordingStartMode: (mode: string | undefined) => string
+    }
+
+    expect(service._normalizeRecordingStartMode('blocking')).toBe('blocking')
+    expect(service._normalizeRecordingStartMode('fastFail')).toBe('fastFail')
+    expect(service._normalizeRecordingStartMode('invalid')).toBe('blocking')
+    expect(service._normalizeRecordingStartMode(undefined)).toBe('blocking')
   })
 
   it('normalizes deferred post processing mode and filter pattern lists', () => {
@@ -417,6 +513,118 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._forceMp4Transcode = false
     await service._configureMp4RecordingMode()
     expect(service._forceMp4Transcode).toBe(false)
+  })
+
+  it('before hook does not probe ffmpeg eagerly', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _resolveAvailableFfmpegPath: (
+        candidates: string[],
+      ) => Promise<string | undefined>
+      _ffmpegInitializationCompleted: boolean
+      before: (
+        capabilities: WebdriverIO.Capabilities,
+        specs: string[],
+        browser: unknown,
+      ) => Promise<void>
+    }
+
+    let resolveCalls = 0
+    service._resolveAvailableFfmpegPath = async () => {
+      resolveCalls += 1
+      return '/tmp/ffmpeg'
+    }
+
+    await service.before(
+      {} as WebdriverIO.Capabilities,
+      ['tests/specs/e2e.test.ts'],
+      {
+        sessionId: 'abc123',
+        capabilities: {
+          browserName: 'chrome',
+        },
+      },
+    )
+
+    expect(resolveCalls).toBe(0)
+    expect(service._ffmpegInitializationCompleted).toBe(false)
+  })
+
+  it('lazy ffmpeg probe runs only when retry recording actually starts', async () => {
+    const service = new WdioPuppeteerVideoService({
+      recordOnRetries: true,
+    }) as unknown as {
+      _isChromium: boolean
+      _browser: unknown
+      _currentTestSlug: string
+      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
+      _resolveAvailableFfmpegPath: (
+        candidates: string[],
+      ) => Promise<string | undefined>
+      _supportsDirectMp4: (ffmpegPath: string) => Promise<boolean>
+      beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
+      _startRecording: () => Promise<boolean>
+      _ensureFfmpegReady: () => Promise<boolean>
+    }
+
+    service._isChromium = true
+    service._browser = {}
+    service._runSerializedRecordingTask = async (task) => {
+      await task()
+    }
+
+    let resolveCalls = 0
+    service._resolveAvailableFfmpegPath = async () => {
+      resolveCalls += 1
+      return '/tmp/ffmpeg'
+    }
+    service._supportsDirectMp4 = async () => true
+    service._startRecording = async () => service._ensureFfmpegReady()
+
+    await service.beforeTest(createTest({ title: 'retry lazy probe' }), {})
+    expect(resolveCalls).toBe(0)
+
+    await service.beforeTest(
+      createTest({
+        title: 'retry lazy probe',
+        _currentRetry: 1,
+      }),
+      {},
+    )
+    expect(resolveCalls).toBe(1)
+
+    service._currentTestSlug = ''
+    await service.beforeTest(
+      createTest({
+        title: 'retry lazy probe',
+        _currentRetry: 2,
+      }),
+      {},
+    )
+    expect(resolveCalls).toBe(1)
+  })
+
+  it('startRecordingForEntity clears active state when recording start fails', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _currentTestSlug: string
+      _currentSegment: number
+      _startRecording: () => Promise<boolean>
+      _startRecordingForEntity: (
+        test: Frameworks.Test,
+        context: unknown,
+        retryCount: number,
+      ) => Promise<void>
+    }
+
+    service._startRecording = async () => false
+
+    await service._startRecordingForEntity(
+      createTest({ title: 'failed start reset' }),
+      {},
+      0,
+    )
+
+    expect(service._currentTestSlug).toBe('')
+    expect(service._currentSegment).toBe(0)
   })
 
   it('recordOnRetries starts test recording only on retry attempts', async () => {
@@ -570,6 +778,58 @@ describe('WdioPuppeteerVideoService unit', () => {
       expect(seenRetryCounts).toEqual([])
       await launcherService.onComplete()
     })
+  })
+
+  it('retry decision logging builds messages only when level is enabled', () => {
+    const service = new WdioPuppeteerVideoService({
+      recordOnRetries: true,
+      logLevel: 'warn',
+    }) as unknown as {
+      _logLevel: string
+      _log: (level: string, message: string, details?: unknown) => void
+      _logRetryDecision: (
+        retryContext: {
+          explicitFrameworkRetry: number | undefined
+          specFileRetryAttempt: number
+          inferredEntityRetry: number | undefined
+          effectiveRetryCount: number
+        },
+        entityLabel: string,
+        shouldRecord: boolean,
+      ) => void
+      _logRetrySkip: (
+        retryContext: {
+          explicitFrameworkRetry: number | undefined
+          specFileRetryAttempt: number
+          inferredEntityRetry: number | undefined
+          effectiveRetryCount: number
+        },
+        entityLabel: string,
+      ) => void
+    }
+
+    let logCalls = 0
+    service._log = () => {
+      logCalls += 1
+    }
+
+    const retryContext = {
+      explicitFrameworkRetry: 0,
+      specFileRetryAttempt: 0,
+      inferredEntityRetry: 0,
+      effectiveRetryCount: 0,
+    }
+    service._logRetryDecision(retryContext, 'entity', false)
+    service._logRetrySkip(retryContext, 'entity')
+    expect(logCalls).toBe(0)
+
+    service._logLevel = 'trace'
+    service._logRetryDecision(retryContext, 'entity', true)
+    expect(logCalls).toBe(1)
+
+    service._logLevel = 'debug'
+    service._logRetrySkip(retryContext, 'entity')
+    expect(logCalls).toBe(2)
   })
 
   it('shouldRecordForFilters supports spec and tag include/exclude rules', () => {
@@ -873,23 +1133,56 @@ describe('WdioPuppeteerVideoService unit', () => {
     secondService._releaseRecordingSlot()
   })
 
+  it('recordingStartMode fastFail bounds slot wait under in-process contention', async () => {
+    const firstService = new WdioPuppeteerVideoService({
+      maxConcurrentRecordings: 1,
+    }) as unknown as {
+      _acquireRecordingSlot: () => Promise<boolean>
+      _releaseRecordingSlot: () => void
+    }
+    const fastFailService = new WdioPuppeteerVideoService({
+      maxConcurrentRecordings: 1,
+      recordingStartMode: 'fastFail',
+      recordingStartTimeoutMs: 50,
+    }) as unknown as {
+      _acquireRecordingSlot: () => Promise<boolean>
+      _releaseRecordingSlot: () => void
+    }
+
+    await firstService._acquireRecordingSlot()
+    const startedAt = Date.now()
+    const acquired = await fastFailService._acquireRecordingSlot()
+    const elapsedMs = Date.now() - startedAt
+
+    expect(acquired).toBe(false)
+    expect(elapsedMs).toBeLessThan(500)
+
+    firstService._releaseRecordingSlot()
+    fastFailService._releaseRecordingSlot()
+  })
+
   it('releases in-process slot when global recording slot cannot be acquired', async () => {
     const service = new WdioPuppeteerVideoService({
       maxConcurrentRecordings: 1,
       maxGlobalRecordings: 1,
     }) as unknown as {
       _ownsRecordingSlot: boolean
-      _acquireInProcessRecordingSlot: () => Promise<void>
-      _acquireGlobalRecordingSlot: () => Promise<boolean>
+      _acquireInProcessRecordingSlot: (
+        timeoutMs: number | undefined,
+      ) => Promise<boolean>
+      _acquireGlobalRecordingSlot: (
+        timeoutMs: number | undefined,
+      ) => Promise<boolean>
       _releaseInProcessRecordingSlot: () => void
       _acquireRecordingSlot: () => Promise<boolean>
     }
 
     let releaseCount = 0
-    service._acquireInProcessRecordingSlot = async () => {
+    service._acquireInProcessRecordingSlot = async (_timeoutMs) => {
       service._ownsRecordingSlot = true
+      return true
     }
-    service._acquireGlobalRecordingSlot = async () => false
+    service._acquireGlobalRecordingSlot = async (_timeoutMs) => false
     service._releaseInProcessRecordingSlot = () => {
       if (service._ownsRecordingSlot) {
         service._ownsRecordingSlot = false

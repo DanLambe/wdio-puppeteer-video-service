@@ -55,6 +55,10 @@ export const config = {
             // maxConcurrentRecordings: 0,
             // Cross-worker limiter for active recorders on same host (0 = unlimited)
             // maxGlobalRecordings: 0,
+            // Recording start mode under slot contention
+            // recordingStartMode: 'blocking', // 'blocking' | 'fastFail'
+            // Max wait for fastFail mode before skipping a segment
+            // recordingStartTimeoutMs: 2500,
             // Optional custom lock directory for cross-worker limiter
             // globalRecordingLockDir: './tmp/wdio-video-locks',
             // Run ffmpeg-heavy merge/transcode in worker `after` hook
@@ -68,7 +72,7 @@ export const config = {
             // If omitted, the service inherits WebdriverIO logLevel when available.
             // logLevel: 'info',
             // Optional manual profile for parallel workers:
-            // performanceProfile: 'parallel', // 'default' | 'parallel'
+            // performanceProfile: 'parallel', // 'default' | 'parallel' | 'ci'
             // Optional filename safety controls for long test titles:
             // maxFileNameLength: 180, // defaults: 180 on Windows, 255 elsewhere
             // fileNameStyle: 'test', // 'test' | 'session' | 'sessionFull'
@@ -125,13 +129,15 @@ Service options and defaults:
 - `segmentOnWindowSwitch` (default: `true`): split recordings around window/tab switch commands.
 - `maxConcurrentRecordings` (default: `0`): in-process recorder slot limit (`0` means unlimited).
 - `maxGlobalRecordings` (default: `0`): cross-worker recorder slot limit on the same host (`0` means unlimited).
+- `recordingStartMode` (default: `'blocking'`): recorder-slot wait behavior (`'blocking' | 'fastFail'`).
+- `recordingStartTimeoutMs` (default: `2500`): max wait in milliseconds for `recordingStartMode: 'fastFail'`.
 - `globalRecordingLockDir` (default: `<outputDir>/.wdio-video-global-slots` when `maxGlobalRecordings > 0`): optional lock-file directory for `maxGlobalRecordings`.
 - `postProcessMode` (default: `'immediate'`): ffmpeg post-processing timing (`'immediate' | 'deferred'`).
 - `includeSpecPatterns` (default: `[]`): include-only spec path patterns for recording decisions (`*` wildcard).
 - `excludeSpecPatterns` (default: `[]`): spec path patterns to suppress recording (`*` wildcard).
 - `includeTagPatterns` (default: `[]`): include-only tag patterns for recording decisions (`*` wildcard).
 - `excludeTagPatterns` (default: `[]`): tag patterns to suppress recording (`*` wildcard).
-- `performanceProfile` (default: `'default'`): optional preset (`'parallel'` lowers defaults when unset).
+- `performanceProfile` (default: `'default'`): optional preset (`'parallel'` or `'ci'` lowers defaults when unset).
 - `logLevel` (default: inherits WDIO log level, fallback `'warn'`): service log verbosity.
 - `maxFileNameLength` (default: `180` on Windows, `255` elsewhere): max artifact basename length.
 - `fileNameOverflowStrategy` (default: `'truncate'`): overflow handling (`'truncate' | 'session'`).
@@ -220,7 +226,7 @@ The service is designed to work across WebdriverIO frameworks (Mocha, Jasmine, a
 If FFmpeg is missing or not executable, the service logs a warning once and skips recording for that worker.
 Your WDIO run continues, but no video artifacts are created for that worker until FFmpeg is fixed.
 
-When `outputFormat: 'mp4'` and `mp4Mode: 'auto'`, the service runs a one-time ffmpeg capability probe.
+When `outputFormat: 'mp4'` and `mp4Mode: 'auto'`, the service runs a one-time ffmpeg capability probe on the first eligible recording attempt in each worker.
 If direct MP4 is not compatible, it automatically falls back to transcode mode to keep recording stable in CI/headless runs.
 
 If a recorder stream closes during teardown (for example, aborted worker shutdown), the service now handles expected write errors (like `EPIPE`) gracefully and prevents repeated stream-failure log spam.
@@ -249,9 +255,11 @@ For CI agents running multiple WDIO workers in parallel, these settings usually 
 - Set `segmentOnWindowSwitch: false` to reduce stop/start overhead around window/tab commands when strict multi-window coverage is not required.
 - Use `maxConcurrentRecordings` to cap active recorders in the same Node.js process (`0` means unlimited).
 - Use `maxGlobalRecordings` to cap active recorders across WDIO workers on the same host (`0` means unlimited).
+- Use `recordingStartMode: 'fastFail'` with `recordingStartTimeoutMs` to skip segments quickly under heavy contention.
 - Optionally set `globalRecordingLockDir` when workers do not share a stable `outputDir` path.
 - Use `postProcessMode: 'deferred'` to move merge/transcode CPU cost out of per-test hooks and into worker teardown.
 - Use `performanceProfile: 'parallel'` for a manual opt-in baseline (`fps: 24`, `videoWidth: 1280`, `videoHeight: 720`, `outputFormat: webm` when unset).
+- Use `performanceProfile: 'ci'` for an opt-in conservative CI baseline (`fps: 24`, `webm`, `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`, `postProcessMode: 'deferred'`, `recordingStartMode: 'fastFail'`, `mergeSegments.enabled: false` when unset, and service `logLevel` pinned to `warn` unless explicitly set).
 - Use spec/tag filters (`include*Patterns` / `exclude*Patterns`) to record only critical paths in large suites.
 - On low-tier/shared runners, start with fewer workers (for example `maxInstances: 1-2`) and increase only after artifacts stay stable.
 - Prefer `outputFormat: 'webm'` when MP4 output is not strictly required.

@@ -18,12 +18,14 @@ import {
   type ActiveSegment,
   DEFAULT_MAX_FILENAME_LENGTH,
   DEFAULT_OUTPUT_DIR,
+  DEFAULT_RECORDING_START_TIMEOUT_MS,
   type DeferredMergeTask,
   type DeferredPostProcessTask,
   type DeferredTranscodeTask,
   FFMPEG_CHECK_TIMEOUT_MS,
   GLOBAL_RECORDING_SLOT_POLL_MS,
   GLOBAL_RECORDING_SLOT_TIMEOUT_MS,
+  IN_PROCESS_RECORDING_SLOT_POLL_MS,
   type MergeExecutionOptions,
   MP4_DIRECT_PROBE_TIMEOUT_MS,
   type OutputFormat,
@@ -49,6 +51,7 @@ import type {
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
   WdioPuppeteerVideoServicePostProcessMode,
+  WdioPuppeteerVideoServiceRecordingStartMode,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'
 import {
@@ -92,6 +95,8 @@ export default class WdioPuppeteerVideoService
   private _ffmpegAvailable = false
   private _resolvedFfmpegPath: string | undefined
   private _ffmpegCandidates: string[] = []
+  private _ffmpegInitializationTask: Promise<boolean> | undefined
+  private _ffmpegInitializationCompleted = false
   private _recordingTask: Promise<void> = Promise.resolve()
   private readonly _deferredPostProcessTasks: DeferredPostProcessTask[] = []
   private _warnedAboutMp4Compatibility = false
@@ -108,11 +113,16 @@ export default class WdioPuppeteerVideoService
   private _pageMarkerCounter = 0
 
   constructor(options: WdioPuppeteerVideoServiceOptions) {
-    this._hasExplicitLogLevel = typeof options.logLevel === 'string'
-    this._logLevel = this._normalizeLogLevel(options.logLevel)
     const performanceProfile = this._normalizePerformanceProfile(
       options.performanceProfile,
     )
+    const ciPinnedWarnLogLevel =
+      performanceProfile === 'ci' && options.logLevel === undefined
+    this._hasExplicitLogLevel =
+      typeof options.logLevel === 'string' || ciPinnedWarnLogLevel
+    this._logLevel = ciPinnedWarnLogLevel
+      ? 'warn'
+      : this._normalizeLogLevel(options.logLevel)
 
     const transcodeOptions = options.transcode ?? {}
     const mergedTranscode: WdioPuppeteerVideoServiceTranscodeOptions = {
@@ -147,6 +157,8 @@ export default class WdioPuppeteerVideoService
       segmentOnWindowSwitch: true,
       maxConcurrentRecordings: 0,
       maxGlobalRecordings: 0,
+      recordingStartMode: 'blocking',
+      recordingStartTimeoutMs: DEFAULT_RECORDING_START_TIMEOUT_MS,
       postProcessMode: 'immediate',
       includeSpecPatterns: [],
       excludeSpecPatterns: [],
@@ -173,6 +185,29 @@ export default class WdioPuppeteerVideoService
         videoHeight: options.videoHeight ?? 720,
         fps: options.fps ?? 24,
         outputFormat: options.outputFormat ?? 'webm',
+      }
+
+      if (options.mergeSegments?.enabled === undefined) {
+        mergedOptions.mergeSegments = {
+          ...mergedMergeSegments,
+          enabled: false,
+        }
+      }
+    }
+
+    if (performanceProfile === 'ci') {
+      mergedOptions = {
+        ...mergedOptions,
+        videoWidth: options.videoWidth ?? 1280,
+        videoHeight: options.videoHeight ?? 720,
+        fps: options.fps ?? 24,
+        outputFormat: options.outputFormat ?? 'webm',
+        skipViewPortKickoff: options.skipViewPortKickoff ?? true,
+        segmentOnWindowSwitch: options.segmentOnWindowSwitch ?? false,
+        postProcessMode: options.postProcessMode ?? 'deferred',
+        recordingStartMode: options.recordingStartMode ?? 'fastFail',
+        recordingStartTimeoutMs:
+          options.recordingStartTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
       }
 
       if (options.mergeSegments?.enabled === undefined) {
@@ -225,6 +260,13 @@ export default class WdioPuppeteerVideoService
       maxGlobalRecordings: this._normalizeNonNegativeInt(
         mergedOptions.maxGlobalRecordings,
         0,
+      ),
+      recordingStartMode: this._normalizeRecordingStartMode(
+        mergedOptions.recordingStartMode,
+      ),
+      recordingStartTimeoutMs: this._normalizePositiveInt(
+        mergedOptions.recordingStartTimeoutMs,
+        DEFAULT_RECORDING_START_TIMEOUT_MS,
       ),
       ...(normalizedGlobalRecordingLockDir
         ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
@@ -410,21 +452,11 @@ export default class WdioPuppeteerVideoService
       )
       return
     }
-
-    this._ffmpegCandidates = this._getFfmpegCandidates()
-    this._resolvedFfmpegPath = await this._resolveAvailableFfmpegPath(
-      this._ffmpegCandidates,
-    )
-    this._ffmpegAvailable = !!this._resolvedFfmpegPath
-    if (this._ffmpegAvailable) {
-      this._log(
-        'info',
-        `[WdioPuppeteerVideoService] Using ffmpeg binary: ${this._resolvedFfmpegPath}`,
-      )
-      await this._configureMp4RecordingMode()
-    } else {
-      this._warnMissingFfmpeg('Video recording is disabled for this worker.')
-    }
+    this._ffmpegAvailable = false
+    this._resolvedFfmpegPath = undefined
+    this._ffmpegCandidates = []
+    this._ffmpegInitializationTask = undefined
+    this._ffmpegInitializationCompleted = false
 
     await fs.mkdir(this._options.outputDir ?? DEFAULT_OUTPUT_DIR, {
       recursive: true,
@@ -432,7 +464,7 @@ export default class WdioPuppeteerVideoService
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
-    if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
+    if (!this._isChromium || !this._browser) {
       return
     }
 
@@ -479,7 +511,7 @@ export default class WdioPuppeteerVideoService
     world: Frameworks.World,
     context: unknown,
   ): Promise<void> {
-    if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
+    if (!this._isChromium || !this._browser) {
       return
     }
 
@@ -566,7 +598,7 @@ export default class WdioPuppeteerVideoService
   }
 
   async beforeCommand(commandName: string): Promise<void> {
-    if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
+    if (!this._isChromium || !this._browser) {
       return
     }
 
@@ -586,7 +618,7 @@ export default class WdioPuppeteerVideoService
   }
 
   async afterCommand(commandName: string): Promise<void> {
-    if (!this._isChromium || !this._browser || !this._ffmpegAvailable) {
+    if (!this._isChromium || !this._browser) {
       return
     }
 
@@ -636,14 +668,14 @@ export default class WdioPuppeteerVideoService
     })
   }
 
-  private async _startRecording(): Promise<void> {
-    if (
-      !this._browser ||
-      !this._currentTestSlug ||
-      this._recorder ||
-      !this._ffmpegAvailable
-    ) {
-      return
+  private async _startRecording(): Promise<boolean> {
+    if (!this._browser || !this._currentTestSlug || this._recorder) {
+      return false
+    }
+
+    const ffmpegReady = await this._ensureFfmpegReady()
+    if (!ffmpegReady) {
+      return false
     }
 
     let acquiredRecordingSlot = false
@@ -666,7 +698,7 @@ export default class WdioPuppeteerVideoService
           'warn',
           '[WdioPuppeteerVideoService] Could not find puppeteer page match. Recording skipped.',
         )
-        return
+        return false
       }
 
       await page.bringToFront().catch(() => {
@@ -696,11 +728,17 @@ export default class WdioPuppeteerVideoService
 
       const acquiredSlot = await this._acquireRecordingSlot()
       if (!acquiredSlot) {
+        const recordingStartMode =
+          this._options.recordingStartMode ?? 'blocking'
+        const timeoutSuffix =
+          recordingStartMode === 'fastFail'
+            ? ` within ${(this._options.recordingStartTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS).toString()}ms`
+            : ''
         this._log(
           'warn',
-          '[WdioPuppeteerVideoService] Recording slot acquisition timed out. Recording skipped for this segment.',
+          `[WdioPuppeteerVideoService] Recording slot acquisition failed${timeoutSuffix}. Recording skipped for this segment.`,
         )
-        return
+        return false
       }
       acquiredRecordingSlot = true
 
@@ -781,6 +819,7 @@ export default class WdioPuppeteerVideoService
       )
 
       await this._kickOffScreencastFramesIfEnabled(page)
+      return true
     } catch (e) {
       if (acquiredRecordingSlot && !this._recorder) {
         this._releaseRecordingSlot()
@@ -790,6 +829,7 @@ export default class WdioPuppeteerVideoService
         '[WdioPuppeteerVideoService] Failed to start recording:',
         e,
       )
+      return false
     }
   }
 
@@ -819,7 +859,10 @@ export default class WdioPuppeteerVideoService
     this._currentWindowHandle = undefined
     this._activeSegment = undefined
 
-    await this._startRecording()
+    const started = await this._startRecording()
+    if (!started) {
+      this._resetTestState()
+    }
   }
 
   private async _startSpecLevelRecording(retryCount: number): Promise<void> {
@@ -957,7 +1000,7 @@ export default class WdioPuppeteerVideoService
     entityLabel: string,
     shouldRecord: boolean,
   ): void {
-    if (!this._options.recordOnRetries) {
+    if (!this._options.recordOnRetries || !this._isLogLevelEnabled('trace')) {
       return
     }
 
@@ -971,7 +1014,7 @@ export default class WdioPuppeteerVideoService
     retryContext: ResolvedRetryContext,
     entityLabel: string,
   ): void {
-    if (!this._options.recordOnRetries) {
+    if (!this._options.recordOnRetries || !this._isLogLevelEnabled('debug')) {
       return
     }
 
@@ -1325,6 +1368,42 @@ export default class WdioPuppeteerVideoService
     const configuredPath = this._options.ffmpegPath?.trim()
     const envPath = process.env.FFMPEG_PATH?.trim()
     return this._resolvedFfmpegPath || configuredPath || envPath || 'ffmpeg'
+  }
+
+  private async _ensureFfmpegReady(): Promise<boolean> {
+    if (this._ffmpegAvailable) {
+      return true
+    }
+
+    if (this._ffmpegInitializationCompleted) {
+      return false
+    }
+
+    this._ffmpegInitializationTask ??= this._initializeFfmpeg().finally(() => {
+      this._ffmpegInitializationCompleted = true
+      this._ffmpegInitializationTask = undefined
+    })
+
+    return this._ffmpegInitializationTask
+  }
+
+  private async _initializeFfmpeg(): Promise<boolean> {
+    this._ffmpegCandidates = this._getFfmpegCandidates()
+    this._resolvedFfmpegPath = await this._resolveAvailableFfmpegPath(
+      this._ffmpegCandidates,
+    )
+    this._ffmpegAvailable = !!this._resolvedFfmpegPath
+    if (!this._ffmpegAvailable) {
+      this._warnMissingFfmpeg('Video recording is disabled for this worker.')
+      return false
+    }
+
+    this._log(
+      'info',
+      `[WdioPuppeteerVideoService] Using ffmpeg binary: ${this._resolvedFfmpegPath}`,
+    )
+    await this._configureMp4RecordingMode()
+    return true
   }
 
   private _shouldTranscode(outputFormat: OutputFormat): boolean {
@@ -1938,8 +2017,15 @@ export default class WdioPuppeteerVideoService
       return true
     }
 
-    await this._acquireInProcessRecordingSlot()
-    const globalSlotAcquired = await this._acquireGlobalRecordingSlot()
+    const startTimeoutMs = this._getRecordingStartTimeoutMs()
+    const inProcessSlotAcquired =
+      await this._acquireInProcessRecordingSlot(startTimeoutMs)
+    if (!inProcessSlotAcquired) {
+      return false
+    }
+
+    const globalSlotAcquired =
+      await this._acquireGlobalRecordingSlot(startTimeoutMs)
     if (globalSlotAcquired) {
       return true
     }
@@ -1948,10 +2034,29 @@ export default class WdioPuppeteerVideoService
     return false
   }
 
-  private async _acquireInProcessRecordingSlot(): Promise<void> {
+  private async _acquireInProcessRecordingSlot(
+    timeoutMs: number | undefined,
+  ): Promise<boolean> {
     const maxConcurrentRecordings = this._options.maxConcurrentRecordings ?? 0
     if (maxConcurrentRecordings <= 0 || this._ownsRecordingSlot) {
-      return
+      return true
+    }
+
+    if (timeoutMs !== undefined) {
+      const deadline = Date.now() + Math.max(0, timeoutMs)
+      while (Date.now() <= deadline) {
+        if (
+          WdioPuppeteerVideoService._activeRecordingSlots <
+          maxConcurrentRecordings
+        ) {
+          WdioPuppeteerVideoService._activeRecordingSlots += 1
+          this._ownsRecordingSlot = true
+          return true
+        }
+        await delay(IN_PROCESS_RECORDING_SLOT_POLL_MS)
+      }
+
+      return false
     }
 
     await new Promise<void>((resolve) => {
@@ -1971,9 +2076,13 @@ export default class WdioPuppeteerVideoService
 
       tryAcquire()
     })
+
+    return true
   }
 
-  private async _acquireGlobalRecordingSlot(): Promise<boolean> {
+  private async _acquireGlobalRecordingSlot(
+    timeoutMs: number | undefined,
+  ): Promise<boolean> {
     const maxGlobalRecordings = this._options.maxGlobalRecordings ?? 0
     if (maxGlobalRecordings <= 0 || this._ownsGlobalRecordingSlot) {
       return true
@@ -1984,8 +2093,9 @@ export default class WdioPuppeteerVideoService
       /* best-effort lock-dir creation */
     })
 
-    const startedAt = Date.now()
-    while (Date.now() - startedAt < GLOBAL_RECORDING_SLOT_TIMEOUT_MS) {
+    const timeout = timeoutMs ?? GLOBAL_RECORDING_SLOT_TIMEOUT_MS
+    const deadline = Date.now() + Math.max(0, timeout)
+    while (Date.now() <= deadline) {
       const acquired = await this._tryAcquireGlobalRecordingSlot(
         lockDir,
         maxGlobalRecordings,
@@ -1993,10 +2103,23 @@ export default class WdioPuppeteerVideoService
       if (acquired) {
         return true
       }
+
+      if (Date.now() >= deadline) {
+        break
+      }
+
       await delay(GLOBAL_RECORDING_SLOT_POLL_MS)
     }
 
     return false
+  }
+
+  private _getRecordingStartTimeoutMs(): number | undefined {
+    if ((this._options.recordingStartMode ?? 'blocking') !== 'fastFail') {
+      return undefined
+    }
+
+    return this._options.recordingStartTimeoutMs
   }
 
   private async _tryAcquireGlobalRecordingSlot(
@@ -2215,6 +2338,12 @@ export default class WdioPuppeteerVideoService
     logging.writeLog(this._logLevel, level, message, details)
   }
 
+  private _isLogLevelEnabled(
+    level: WdioPuppeteerVideoServiceLogLevel,
+  ): boolean {
+    return logging.shouldLog(level, this._logLevel)
+  }
+
   private _resetTestState(): void {
     this._recorder = undefined
     this._activeSegment = undefined
@@ -2344,6 +2473,12 @@ export default class WdioPuppeteerVideoService
     profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
   ): WdioPuppeteerVideoServicePerformanceProfile {
     return normalization.normalizePerformanceProfile(profile)
+  }
+
+  private _normalizeRecordingStartMode(
+    mode: WdioPuppeteerVideoServiceRecordingStartMode | undefined,
+  ): WdioPuppeteerVideoServiceRecordingStartMode {
+    return normalization.normalizeRecordingStartMode(mode)
   }
 
   private _isBenignStreamWriteError(error: NodeJS.ErrnoException): boolean {

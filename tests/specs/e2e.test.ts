@@ -12,19 +12,19 @@ describe('Video Recording Service E2E Verification - Core Navigation', () => {
   it('should handle iframe switching', async () => {
     await browser.url('https://the-internet.herokuapp.com/nested_frames')
 
-    const topFrame = await $('[name="frame-top"]')
+    const topFrame = await $('[name="frame-top"]').getElement()
     await browser.switchFrame(topFrame)
     await pauseForRecording()
 
-    const middleFrame = await $('[name="frame-middle"]')
+    const middleFrame = await $('[name="frame-middle"]').getElement()
     await browser.switchFrame(middleFrame)
-    const content = await $('#content')
+    const content = await $('#content').getElement()
     await expect(content).toHaveText('MIDDLE')
 
     await browser.switchFrame(null)
-    const bottomFrame = await $('[name="frame-bottom"]')
+    const bottomFrame = await $('[name="frame-bottom"]').getElement()
     await browser.switchFrame(bottomFrame)
-    const body = await $('body')
+    const body = await $('body').getElement()
     await expect(body).toHaveText(expect.stringContaining('BOTTOM'))
 
     await browser.switchFrame(null)
