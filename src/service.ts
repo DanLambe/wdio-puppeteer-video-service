@@ -85,6 +85,8 @@ export default class WdioPuppeteerVideoService
   private _specFileRetryAttempt = 0
   private readonly _launcherSpecRetryAttemptCount = new Map<string, number>()
   private _isChromium = false
+  private _recordingDisabledReason: string | undefined
+  private _retryStatePersistenceUnavailable = false
   private _specHadFailure = false
   private _specPaths: string[] = []
   private _currentWindowHandle: string | undefined
@@ -239,9 +241,7 @@ export default class WdioPuppeteerVideoService
       ),
       fileNameStyle: this._normalizeFileNameStyle(mergedOptions.fileNameStyle),
       mp4Mode: this._normalizeMp4Mode(mergedOptions.mp4Mode),
-      performanceProfile: this._normalizePerformanceProfile(
-        mergedOptions.performanceProfile,
-      ),
+      performanceProfile,
       recordOnRetries: this._normalizeBoolean(mergedOptions.recordOnRetries),
       specLevelRecording: this._normalizeBoolean(
         mergedOptions.specLevelRecording,
@@ -296,6 +296,7 @@ export default class WdioPuppeteerVideoService
       return
     }
 
+    this._retryStatePersistenceUnavailable = false
     this._launcherSpecRetryAttemptCount.clear()
     this._specFileRetryAttempt = 0
 
@@ -308,7 +309,20 @@ export default class WdioPuppeteerVideoService
           `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onPrepare (${retryStateDir}): ${this._describeError(error)}`,
         )
       })
-    await fs.mkdir(retryStateDir, { recursive: true })
+    const retryStateDirReady = await fs
+      .mkdir(retryStateDir, { recursive: true })
+      .then(() => true)
+      .catch((error) => {
+        this._retryStatePersistenceUnavailable = true
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Failed to initialize retry-state tracking at ${retryStateDir}: ${this._describeError(error)}. Falling back to framework and inferred retry detection only.`,
+        )
+        return false
+      })
+    if (!retryStateDirReady) {
+      return
+    }
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Initialized retry-state tracking at ${retryStateDir}`,
@@ -321,6 +335,9 @@ export default class WdioPuppeteerVideoService
     specs: string[],
   ): Promise<void> {
     if (!this._options.recordOnRetries) {
+      return
+    }
+    if (this._retryStatePersistenceUnavailable) {
       return
     }
 
@@ -377,6 +394,7 @@ export default class WdioPuppeteerVideoService
           `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${this._describeError(error)}`,
         )
       })
+    this._retryStatePersistenceUnavailable = false
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Cleared retry-state tracking from ${retryStateDir}`,
@@ -427,6 +445,7 @@ export default class WdioPuppeteerVideoService
     this._browser = browser
     this._specPaths = specs
     this._specHadFailure = false
+    this._recordingDisabledReason = undefined
     this._entityAttemptCount.clear()
 
     if (!this._hasExplicitLogLevel) {
@@ -458,13 +477,19 @@ export default class WdioPuppeteerVideoService
     this._ffmpegInitializationTask = undefined
     this._ffmpegInitializationCompleted = false
 
-    await fs.mkdir(this._options.outputDir ?? DEFAULT_OUTPUT_DIR, {
-      recursive: true,
-    })
+    await fs
+      .mkdir(this._options.outputDir ?? DEFAULT_OUTPUT_DIR, { recursive: true })
+      .catch((error) => {
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Failed to create output directory (${this._options.outputDir ?? DEFAULT_OUTPUT_DIR}): ${this._describeError(error)}`,
+        )
+        this._disableRecordingForWorker('output directory is unavailable')
+      })
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
-    if (!this._isChromium || !this._browser) {
+    if (!this._canUseRecordingHooks()) {
       return
     }
 
@@ -511,7 +536,7 @@ export default class WdioPuppeteerVideoService
     world: Frameworks.World,
     context: unknown,
   ): Promise<void> {
-    if (!this._isChromium || !this._browser) {
+    if (!this._canUseRecordingHooks()) {
       return
     }
 
@@ -587,7 +612,7 @@ export default class WdioPuppeteerVideoService
           await this._finalizeCurrentTestRecording(!this._specHadFailure)
         } else {
           await this._stopRecording()
-          this._resetTestState()
+          await this._resetTestState()
         }
       }
 
@@ -598,7 +623,7 @@ export default class WdioPuppeteerVideoService
   }
 
   async beforeCommand(commandName: string): Promise<void> {
-    if (!this._isChromium || !this._browser) {
+    if (!this._canUseRecordingHooks()) {
       return
     }
 
@@ -618,7 +643,7 @@ export default class WdioPuppeteerVideoService
   }
 
   async afterCommand(commandName: string): Promise<void> {
-    if (!this._isChromium || !this._browser) {
+    if (!this._canUseRecordingHooks()) {
       return
     }
 
@@ -822,7 +847,7 @@ export default class WdioPuppeteerVideoService
       return true
     } catch (e) {
       if (acquiredRecordingSlot && !this._recorder) {
-        this._releaseRecordingSlot()
+        await this._releaseRecordingSlot()
       }
       this._log(
         'error',
@@ -861,7 +886,7 @@ export default class WdioPuppeteerVideoService
 
     const started = await this._startRecording()
     if (!started) {
-      this._resetTestState()
+      await this._resetTestState()
     }
   }
 
@@ -1063,7 +1088,7 @@ export default class WdioPuppeteerVideoService
     )
     if (!shouldKeepArtifacts) {
       await this._deleteSegments()
-      this._resetTestState()
+      await this._resetTestState()
       return
     }
 
@@ -1075,7 +1100,7 @@ export default class WdioPuppeteerVideoService
       }
     }
 
-    this._resetTestState()
+    await this._resetTestState()
   }
 
   private async _stopRecording(): Promise<void> {
@@ -1085,7 +1110,7 @@ export default class WdioPuppeteerVideoService
     this._activeSegment = undefined
 
     if (!recorder || !activeSegment) {
-      this._releaseRecordingSlot()
+      await this._releaseRecordingSlot()
       return
     }
     try {
@@ -1118,19 +1143,19 @@ export default class WdioPuppeteerVideoService
     } finally {
       recorder.off('error', activeSegment.onRecorderError)
       activeSegment.writeStream.off('error', activeSegment.onWriteStreamError)
-      this._releaseRecordingSlot()
+      await this._releaseRecordingSlot()
     }
   }
 
   private async _deleteSegments(): Promise<void> {
     const filesToDelete = [...this._recordedSegments]
-    for (const file of filesToDelete) {
-      try {
-        await fs.unlink(file)
-      } catch {
-        // Ignore if file doesn't exist
-      }
-    }
+    await Promise.all(
+      filesToDelete.map((file) =>
+        fs.unlink(file).catch(() => {
+          /* ignore if file does not exist */
+        }),
+      ),
+    )
     this._dropDeferredPostProcessTasksForPaths(filesToDelete)
     this._recordedSegments.clear()
   }
@@ -1322,11 +1347,13 @@ export default class WdioPuppeteerVideoService
     }
 
     if (deleteSegments) {
-      for (const segmentPath of segmentPaths) {
-        await fs.unlink(segmentPath).catch(() => {
-          /* best-effort cleanup */
-        })
-      }
+      await Promise.all(
+        segmentPaths.map((segmentPath) =>
+          fs.unlink(segmentPath).catch(() => {
+            /* best-effort cleanup */
+          }),
+        ),
+      )
     }
 
     return true
@@ -2197,14 +2224,26 @@ export default class WdioPuppeteerVideoService
     cid: string,
     retryState: PersistedSpecRetryState,
   ): Promise<void> {
+    if (this._retryStatePersistenceUnavailable) {
+      return
+    }
+
     const retryStateDir = this._getSpecRetryStateDirPath()
-    await fs.mkdir(retryStateDir, { recursive: true })
-    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
-    await fs.writeFile(retryStatePath, JSON.stringify(retryState), 'utf8')
-    this._log(
-      'trace',
-      `[WdioPuppeteerVideoService] Persisted retry state for cid=${cid} at ${retryStatePath} (specFileRetryAttempt=${retryState.specFileRetryAttempt})`,
-    )
+    try {
+      await fs.mkdir(retryStateDir, { recursive: true })
+      const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+      await fs.writeFile(retryStatePath, JSON.stringify(retryState), 'utf8')
+      this._log(
+        'trace',
+        `[WdioPuppeteerVideoService] Persisted retry state for cid=${cid} at ${retryStatePath} (specFileRetryAttempt=${retryState.specFileRetryAttempt})`,
+      )
+    } catch (error) {
+      this._retryStatePersistenceUnavailable = true
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to persist retry state for cid=${cid}: ${this._describeError(error)}. Falling back to framework and inferred retry detection only.`,
+      )
+    }
   }
 
   private async _readSpecRetryState(
@@ -2273,8 +2312,8 @@ export default class WdioPuppeteerVideoService
     )
   }
 
-  private _releaseRecordingSlot(): void {
-    this._releaseGlobalRecordingSlot()
+  private async _releaseRecordingSlot(): Promise<void> {
+    await this._releaseGlobalRecordingSlot()
     this._releaseInProcessRecordingSlot()
   }
 
@@ -2294,7 +2333,7 @@ export default class WdioPuppeteerVideoService
     }
   }
 
-  private _releaseGlobalRecordingSlot(): void {
+  private async _releaseGlobalRecordingSlot(): Promise<void> {
     if (!this._ownsGlobalRecordingSlot) {
       return
     }
@@ -2305,19 +2344,17 @@ export default class WdioPuppeteerVideoService
     this._globalRecordingSlotPath = undefined
     this._globalRecordingSlotFileHandle = undefined
 
-    lockFileHandle
-      ?.close()
-      .catch(() => {
-        /* best-effort slot close */
+    if (!lockFileHandle) {
+      return
+    }
+    await lockFileHandle.close().catch(() => {
+      /* best-effort slot close */
+    })
+    if (lockPath) {
+      await fs.unlink(lockPath).catch(() => {
+        /* best-effort slot cleanup */
       })
-      .finally(async () => {
-        if (!lockPath) {
-          return
-        }
-        await fs.unlink(lockPath).catch(() => {
-          /* best-effort slot cleanup */
-        })
-      })
+    }
   }
 
   private _resolveWdioLogLevel(browser: Browser): string | undefined {
@@ -2344,7 +2381,26 @@ export default class WdioPuppeteerVideoService
     return logging.shouldLog(level, this._logLevel)
   }
 
-  private _resetTestState(): void {
+  private _canUseRecordingHooks(): boolean {
+    return (
+      this._isChromium &&
+      !!this._browser &&
+      this._recordingDisabledReason === undefined
+    )
+  }
+
+  private _disableRecordingForWorker(reason: string): void {
+    if (this._recordingDisabledReason !== undefined) {
+      return
+    }
+    this._recordingDisabledReason = reason
+    this._log(
+      'warn',
+      `[WdioPuppeteerVideoService] Recording disabled for this worker: ${reason}.`,
+    )
+  }
+
+  private async _resetTestState(): Promise<void> {
     this._recorder = undefined
     this._activeSegment = undefined
     this._currentSegment = 0
@@ -2352,7 +2408,7 @@ export default class WdioPuppeteerVideoService
     this._currentRecordingRetryCount = 0
     this._currentWindowHandle = undefined
     this._recordedSegments.clear()
-    this._releaseRecordingSlot()
+    await this._releaseRecordingSlot()
   }
 
   private _isRecordingActive(): boolean {

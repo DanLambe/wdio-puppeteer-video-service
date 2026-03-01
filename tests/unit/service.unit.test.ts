@@ -1024,7 +1024,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       _currentRecordingRetryCount: number
       _stopRecording: () => Promise<void>
       _deleteSegments: () => Promise<void>
-      _resetTestState: () => void
+      _resetTestState: () => Promise<void>
       _finalizeCurrentTestRecording: (passed: boolean) => Promise<void>
     }
 
@@ -1035,7 +1035,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._deleteSegments = async () => {
       deleted = true
     }
-    service._resetTestState = () => {}
+    service._resetTestState = async () => {}
 
     await service._finalizeCurrentTestRecording(true)
     expect(deleted).toBe(false)
@@ -1103,13 +1103,13 @@ describe('WdioPuppeteerVideoService unit', () => {
       maxConcurrentRecordings: 1,
     }) as unknown as {
       _acquireRecordingSlot: () => Promise<boolean>
-      _releaseRecordingSlot: () => void
+      _releaseRecordingSlot: () => Promise<void>
     }
     const secondService = new WdioPuppeteerVideoService({
       maxConcurrentRecordings: 1,
     }) as unknown as {
       _acquireRecordingSlot: () => Promise<boolean>
-      _releaseRecordingSlot: () => void
+      _releaseRecordingSlot: () => Promise<void>
     }
 
     await firstService._acquireRecordingSlot()
@@ -1126,11 +1126,11 @@ describe('WdioPuppeteerVideoService unit', () => {
     })
     expect(secondAcquired).toBe(false)
 
-    firstService._releaseRecordingSlot()
+    await firstService._releaseRecordingSlot()
     await secondAcquirePromise
     expect(secondAcquired).toBe(true)
 
-    secondService._releaseRecordingSlot()
+    await secondService._releaseRecordingSlot()
   })
 
   it('recordingStartMode fastFail bounds slot wait under in-process contention', async () => {
@@ -1138,7 +1138,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       maxConcurrentRecordings: 1,
     }) as unknown as {
       _acquireRecordingSlot: () => Promise<boolean>
-      _releaseRecordingSlot: () => void
+      _releaseRecordingSlot: () => Promise<void>
     }
     const fastFailService = new WdioPuppeteerVideoService({
       maxConcurrentRecordings: 1,
@@ -1146,7 +1146,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       recordingStartTimeoutMs: 50,
     }) as unknown as {
       _acquireRecordingSlot: () => Promise<boolean>
-      _releaseRecordingSlot: () => void
+      _releaseRecordingSlot: () => Promise<void>
     }
 
     await firstService._acquireRecordingSlot()
@@ -1157,8 +1157,8 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(acquired).toBe(false)
     expect(elapsedMs).toBeLessThan(500)
 
-    firstService._releaseRecordingSlot()
-    fastFailService._releaseRecordingSlot()
+    await firstService._releaseRecordingSlot()
+    await fastFailService._releaseRecordingSlot()
   })
 
   it('releases in-process slot when global recording slot cannot be acquired', async () => {
@@ -1715,5 +1715,189 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._resolveWdioLogLevel(browserStub)).toBe('debug')
+  })
+
+  it('before() logs a warning and continues when outputDir mkdir fails', async () => {
+    await withTempDir(async (tempDir) => {
+      // Block dir creation by placing a file where the dir should be
+      const blockedOutputDir = path.join(tempDir, 'blocked-output')
+      await fs.writeFile(blockedOutputDir, 'blocker')
+
+      const service = new WdioPuppeteerVideoService({
+        outputDir: blockedOutputDir,
+      }) as unknown as {
+        _log: (level: string, message: string) => void
+        _recordingDisabledReason?: string
+        _runSerializedRecordingTask: (
+          task: () => Promise<void>,
+        ) => Promise<void>
+        before: (
+          capabilities: WebdriverIO.Capabilities,
+          specs: string[],
+          browser: unknown,
+        ) => Promise<void>
+        beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
+      }
+
+      const warnMessages: string[] = []
+      service._log = (level, message) => {
+        if (level === 'warn') {
+          warnMessages.push(message)
+        }
+      }
+      let serializedTaskRuns = 0
+      service._runSerializedRecordingTask = async () => {
+        serializedTaskRuns += 1
+      }
+
+      // The before() hook must resolve — never throw — even when mkdir rejects
+      await expect(
+        service.before(
+          { browserName: 'chrome' } as WebdriverIO.Capabilities,
+          ['tests/specs/e2e.test.ts'],
+          {
+            sessionId: 'abc123',
+            capabilities: { browserName: 'chrome' },
+          },
+        ),
+      ).resolves.toBeUndefined()
+
+      expect(
+        warnMessages.some((m) =>
+          m.includes('Failed to create output directory'),
+        ),
+      ).toBe(true)
+      expect(service._recordingDisabledReason).toBe(
+        'output directory is unavailable',
+      )
+
+      await service.beforeTest(createTest({ title: 'should skip' }), {})
+      expect(serializedTaskRuns).toBe(0)
+    })
+  })
+
+  it('onPrepare disables persisted retry-state tracking when init fails', async () => {
+    await withTempDir(async (tempDir) => {
+      const blockedOutputDir = path.join(tempDir, 'blocked-output')
+      await fs.writeFile(blockedOutputDir, 'blocker')
+
+      const service = new WdioPuppeteerVideoService({
+        outputDir: blockedOutputDir,
+        recordOnRetries: true,
+      }) as unknown as {
+        onPrepare: () => Promise<void>
+        onWorkerStart: (
+          cid: string,
+          capabilities: WebdriverIO.Capabilities,
+          specs: string[],
+        ) => Promise<void>
+        _writeSpecRetryState: (
+          cid: string,
+          state: { specRetryKey: string; specFileRetryAttempt: number },
+        ) => Promise<void>
+        _log: (level: string, message: string) => void
+      }
+
+      const warnMessages: string[] = []
+      let writeCalls = 0
+      service._writeSpecRetryState = async () => {
+        writeCalls += 1
+      }
+      service._log = (level, message) => {
+        if (level === 'warn') {
+          warnMessages.push(message)
+        }
+      }
+
+      await expect(service.onPrepare()).resolves.toBeUndefined()
+      await expect(
+        service.onWorkerStart(
+          '0-0',
+          { browserName: 'chrome' } as WebdriverIO.Capabilities,
+          ['tests/specs/e2e.test.ts'],
+        ),
+      ).resolves.toBeUndefined()
+
+      expect(writeCalls).toBe(0)
+      expect(
+        warnMessages.some((m) =>
+          m.includes('Failed to initialize retry-state tracking'),
+        ),
+      ).toBe(true)
+    })
+  })
+
+  it('_writeSpecRetryState does not propagate errors when write fails', async () => {
+    await withTempDir(async (tempDir) => {
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+        recordOnRetries: true,
+      }) as unknown as {
+        _writeSpecRetryState: (
+          cid: string,
+          state: { specRetryKey: string; specFileRetryAttempt: number },
+        ) => Promise<void>
+        _log: (level: string, message: string) => void
+      }
+
+      const warnMessages: string[] = []
+      const originalLog = service._log.bind(service)
+      service._log = (level, message, ...rest) => {
+        if (level === 'warn') {
+          warnMessages.push(message)
+        }
+        originalLog(level, message, ...rest)
+      }
+
+      // Make the method fail by writing to a path that cannot exist (file as dir)
+      const blockerFile = path.join(tempDir, '.wdio-video-retry-state')
+      await fs.writeFile(blockerFile, 'blocker')
+
+      // _writeSpecRetryState must resolve (not reject) even when I/O fails
+      await expect(
+        service._writeSpecRetryState('0-0', {
+          specRetryKey: 'key',
+          specFileRetryAttempt: 1,
+        }),
+      ).resolves.toBeUndefined()
+
+      expect(warnMessages.some((m) => m.includes('Failed to persist'))).toBe(
+        true,
+      )
+    })
+  })
+
+  it('_deleteSegments removes all recorded segment files and clears the set', async () => {
+    await withTempDir(async (tempDir) => {
+      const seg1 = path.join(tempDir, 'slug_part1.webm')
+      const seg2 = path.join(tempDir, 'slug_part2.webm')
+      await fs.writeFile(seg1, 'data')
+      await fs.writeFile(seg2, 'data')
+
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _recordedSegments: Set<string>
+        _deleteSegments: () => Promise<void>
+      }
+
+      service._recordedSegments.add(seg1)
+      service._recordedSegments.add(seg2)
+
+      await service._deleteSegments()
+
+      expect(service._recordedSegments.size).toBe(0)
+
+      const seg1Exists = await fs
+        .stat(seg1)
+        .then(() => true)
+        .catch(() => false)
+      const seg2Exists = await fs
+        .stat(seg2)
+        .then(() => true)
+        .catch(() => false)
+      expect(seg1Exists).toBe(false)
+      expect(seg2Exists).toBe(false)
+    })
   })
 })

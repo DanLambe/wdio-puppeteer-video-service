@@ -47,8 +47,10 @@ export const getMergedOutputPath = (
   return path.join(outputDir || DEFAULT_OUTPUT_DIR, filename)
 }
 
+const PART_NUMBER_RE = /_part(\d+)\./
+
 export const extractPartNumber = (filePath: string): number => {
-  const partMatch = new RegExp(/_part(\d+)\./).exec(path.basename(filePath))
+  const partMatch = PART_NUMBER_RE.exec(path.basename(filePath))
   const partValue = partMatch?.[1]
   if (!partValue) {
     return Number.MAX_SAFE_INTEGER
@@ -61,6 +63,7 @@ export const buildConcatList = (segmentPaths: string[]): string => {
   return segmentPaths
     .map((filePath) => {
       const normalizedPath = path.resolve(filePath).replaceAll('\\', '/')
+      // ffmpeg concat demuxer: escape ' by closing the quote, adding \', then reopening
       const escapedPath = normalizedPath.replaceAll("'", String.raw`'\''`)
       return `file '${escapedPath}'`
     })
