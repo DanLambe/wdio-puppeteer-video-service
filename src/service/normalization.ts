@@ -6,6 +6,7 @@ import type {
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
   WdioPuppeteerVideoServicePostProcessMode,
+  WdioPuppeteerVideoServiceRecordingStartMode,
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
@@ -155,10 +156,22 @@ export const normalizeMp4Mode = (
 export const normalizePerformanceProfile = (
   profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
 ): WdioPuppeteerVideoServicePerformanceProfile => {
+  if (profile === 'ci') {
+    return 'ci'
+  }
   if (profile === 'parallel') {
     return 'parallel'
   }
   return 'default'
+}
+
+export const normalizeRecordingStartMode = (
+  mode: WdioPuppeteerVideoServiceRecordingStartMode | undefined,
+): WdioPuppeteerVideoServiceRecordingStartMode => {
+  if (mode === 'fastFail') {
+    return 'fastFail'
+  }
+  return 'blocking'
 }
 
 export const isBenignStreamWriteError = (

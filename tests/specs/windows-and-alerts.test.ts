@@ -5,7 +5,7 @@ const pauseForRecording = async (ms = 1200) => {
 describe('Video Recording Service E2E Verification - Windows And Alerts', () => {
   it('should handle multiple tabs and closing tabs', async () => {
     await browser.url('https://the-internet.herokuapp.com/windows')
-    const link = await $('=Click Here')
+    const link = await $('=Click Here').getElement()
     await link.click()
 
     await browser.waitUntil(
@@ -25,7 +25,7 @@ describe('Video Recording Service E2E Verification - Windows And Alerts', () => 
 
   it('should handle javascript alerts', async () => {
     await browser.url('https://the-internet.herokuapp.com/javascript_alerts')
-    const button = await $('button=Click for JS Alert')
+    const button = await $('button=Click for JS Alert').getElement()
     await button.click()
     await browser.acceptAlert()
     await expect($('#result')).toHaveText('You successfully clicked an alert')

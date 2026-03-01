@@ -10,6 +10,7 @@ Version X.X.X
 ```
 
 The publish workflow uses `scripts/generate-release-notes.ts` to:
+
 - Prefer `- ...` lines from commit messages
 - Fall back to commit subject lines when bullets are not present
 - Emit a final release body in this format:

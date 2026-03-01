@@ -1,6 +1,6 @@
 export const runWindowSwitchingJourney = async (): Promise<void> => {
   await browser.url('https://the-internet.herokuapp.com/windows')
-  const link = await $('=Click Here')
+  const link = await $('=Click Here').getElement()
   await link.click()
 
   await browser.waitUntil(

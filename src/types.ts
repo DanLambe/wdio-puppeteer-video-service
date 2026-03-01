@@ -16,8 +16,14 @@ export type WdioPuppeteerVideoServiceFileNameStyle =
   | 'sessionFull'
 
 export type WdioPuppeteerVideoServiceMp4Mode = 'auto' | 'direct' | 'transcode'
-export type WdioPuppeteerVideoServicePerformanceProfile = 'default' | 'parallel'
+export type WdioPuppeteerVideoServicePerformanceProfile =
+  | 'default'
+  | 'parallel'
+  | 'ci'
 export type WdioPuppeteerVideoServicePostProcessMode = 'immediate' | 'deferred'
+export type WdioPuppeteerVideoServiceRecordingStartMode =
+  | 'blocking'
+  | 'fastFail'
 
 export interface WdioPuppeteerVideoServiceOptions {
   /**
@@ -110,6 +116,23 @@ export interface WdioPuppeteerVideoServiceOptions {
   maxGlobalRecordings?: number
 
   /**
+   * Recording start behavior when recorder slots are saturated.
+   *
+   * - `blocking` (default): wait for slot availability.
+   * - `fastFail`: wait up to `recordingStartTimeoutMs`, then skip this segment.
+   *
+   * @default 'blocking'
+   */
+  recordingStartMode?: WdioPuppeteerVideoServiceRecordingStartMode
+
+  /**
+   * Maximum wait time (milliseconds) used by `recordingStartMode: 'fastFail'`.
+   *
+   * @default 2500
+   */
+  recordingStartTimeoutMs?: number
+
+  /**
    * Optional directory used for global recording lock files.
    *
    * If omitted, a `.wdio-video-global-slots` directory inside `outputDir` is used.
@@ -164,6 +187,12 @@ export interface WdioPuppeteerVideoServiceOptions {
    * - `default`: keeps standard defaults
    * - `parallel`: when corresponding options are unset, uses lower-overhead defaults
    *   (`videoWidth: 1280`, `videoHeight: 720`, `fps: 24`, `outputFormat: webm`)
+   * - `ci`: opt-in CI baseline focused on stability and throughput under contention
+   *   (`videoWidth: 1280`, `videoHeight: 720`, `fps: 24`, `outputFormat: webm`,
+   *   `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`,
+   *   `postProcessMode: deferred`, `recordingStartMode: fastFail`,
+   *   `recordingStartTimeoutMs: 2500`, `mergeSegments.enabled: false` when unset,
+   *   and service `logLevel` pinned to `warn` unless explicitly set)
    *
    * Explicit user options always take precedence over profile defaults.
    *
