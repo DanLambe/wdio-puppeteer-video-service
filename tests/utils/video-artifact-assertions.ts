@@ -1,7 +1,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 
-type VideoFileNameStyle = 'test' | 'session' | 'sessionFull'
+type VideoFileNameStyle = 'test' | 'testFull' | 'session' | 'sessionFull'
 
 interface VideoArtifactAssertionOptions {
   resultsDir: string

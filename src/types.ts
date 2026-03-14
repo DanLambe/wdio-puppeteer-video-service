@@ -12,6 +12,7 @@ export type WdioPuppeteerVideoServiceFileNameOverflowStrategy =
 
 export type WdioPuppeteerVideoServiceFileNameStyle =
   | 'test'
+  | 'testFull'
   | 'session'
   | 'sessionFull'
 
@@ -233,6 +234,7 @@ export interface WdioPuppeteerVideoServiceOptions {
    * Base naming style used for generated video files.
    *
    * - `test` (default): test/scenario-oriented slug with session + hash suffix
+   * - `testFull`: prefers full test/scenario names (for example suite + test)
    * - `session`: session-id-only slug using a short session token
    * - `sessionFull`: session-id-only slug using the full session id token
    *
@@ -284,11 +286,6 @@ export interface WdioPuppeteerVideoServiceOptions {
    * Optional post-processing step to merge per-window recording parts into one continuous file per test.
    */
   mergeSegments?: WdioPuppeteerVideoServiceMergeOptions
-
-  /**
-   * @deprecated Use `transcode.ffmpegArgs` instead.
-   */
-  ffmpegArgs?: string[]
 }
 
 export interface WdioPuppeteerVideoServiceTranscodeOptions {

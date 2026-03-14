@@ -7,6 +7,7 @@ type AdvancedMode =
   | 'spec-file-retry'
   | 'spec-level'
   | 'no-segment'
+  | 'test-full-style'
   | 'session-style'
   | 'session-full-style'
   | 'deferred-merge'
@@ -22,6 +23,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'spec-file-retry',
       'spec-level',
       'no-segment',
+      'test-full-style',
       'session-style',
       'session-full-style',
       'deferred-merge',
@@ -35,6 +37,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
     mode === 'spec-file-retry' ||
     mode === 'spec-level' ||
     mode === 'no-segment' ||
+    mode === 'test-full-style' ||
     mode === 'session-style' ||
     mode === 'session-full-style' ||
     mode === 'deferred-merge' ||
@@ -50,7 +53,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-file-retry, spec-level, no-segment, session-style, session-full-style, deferred-merge, include-spec, or exclude-spec.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, or exclude-spec.`,
   )
   process.exit(1)
 }

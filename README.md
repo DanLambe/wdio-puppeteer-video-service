@@ -75,7 +75,7 @@ export const config = {
             // performanceProfile: 'parallel', // 'default' | 'parallel' | 'ci'
             // Optional filename safety controls for long test titles:
             // maxFileNameLength: 180, // defaults: 180 on Windows, 255 elsewhere
-            // fileNameStyle: 'test', // 'test' | 'session' | 'sessionFull'
+            // fileNameStyle: 'test', // 'test' | 'testFull' | 'session' | 'sessionFull'
             // fileNameOverflowStrategy: 'truncate', // 'truncate' | 'session'
             outputFormat: 'webm', // or 'mp4'
             // MP4 strategy:
@@ -141,7 +141,7 @@ Service options and defaults:
 - `logLevel` (default: inherits WDIO log level, fallback `'warn'`): service log verbosity.
 - `maxFileNameLength` (default: `180` on Windows, `255` elsewhere): max artifact basename length.
 - `fileNameOverflowStrategy` (default: `'truncate'`): overflow handling (`'truncate' | 'session'`).
-- `fileNameStyle` (default: `'test'`): naming style (`'test' | 'session' | 'sessionFull'`).
+- `fileNameStyle` (default: `'test'`): naming style (`'test' | 'testFull' | 'session' | 'sessionFull'`).
 - `ffmpegPath` (default: unset): explicit ffmpeg binary path override.
 - `outputFormat` (default: `'webm'`): artifact container format (`'webm' | 'mp4'`).
 - `mp4Mode` (default: `'auto'`): MP4 capture strategy (`'auto' | 'direct' | 'transcode'`).
@@ -150,7 +150,6 @@ Service options and defaults:
 - `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output.
 - `mergeSegments.enabled` (default: `false`): merge `_partN` artifacts to one output per entity.
 - `mergeSegments.deleteSegments` (default: `true`): delete part files after successful merge.
-- `ffmpegArgs` (deprecated): alias for `transcode.ffmpegArgs`.
 
 ### Retry and Keep Rules
 
@@ -193,6 +192,8 @@ Pattern behavior:
 Videos are saved in the `outputDir`.
 Default naming convention: `test_title_<session>_<hash>_partN.<webm|mp4>`.
 The `<session>` token uses the first WebDriver session GUID segment when present and is capped to 12 characters.
+
+For suite-aware naming, set `fileNameStyle: 'testFull'`. This prefers full test/scenario names such as `checkout_suite_adds_item_<hash>_partN.webm`.
 
 For session-id-only naming, set:
 

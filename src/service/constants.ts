@@ -9,16 +9,18 @@ export type OutputFormat = NonNullable<
   WdioPuppeteerVideoServiceOptions['outputFormat']
 >
 
+export type ResolvedTranscodeOptions = Required<
+  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'deleteOriginal'>
+> &
+  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
+
 export interface ActiveSegment {
   recordingPath: string
   outputPath: string
   outputFormat: OutputFormat
   recordingFormat: OutputFormat
   transcode: boolean
-  transcodeOptions: Required<
-    Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'deleteOriginal'>
-  > &
-    Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
+  transcodeOptions: ResolvedTranscodeOptions
   writeStream: WriteStream
   writeStreamDone: Promise<void>
   writeStreamErrored: boolean
@@ -96,6 +98,7 @@ export const IN_PROCESS_RECORDING_SLOT_POLL_MS = 25
 export const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 export const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
 export const DEFAULT_RECORDING_START_TIMEOUT_MS = 2_500
+export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 export const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
 export const DEFAULT_OUTPUT_DIR = 'videos'
