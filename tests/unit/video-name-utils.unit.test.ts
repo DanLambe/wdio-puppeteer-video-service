@@ -20,9 +20,9 @@ describe('video-name-utils helpers', () => {
     expect(buildSessionIdToken('ABCDEF12-3456-7890-abcd-ef1234567890')).toBe(
       'abcdef12',
     )
-    expect(buildFullSessionIdToken('ABCDEF12-3456-7890-abcd-ef1234567890')).toBe(
-      'abcdef12_3456_7890_abcd_ef1234567890',
-    )
+    expect(
+      buildFullSessionIdToken('ABCDEF12-3456-7890-abcd-ef1234567890'),
+    ).toBe('abcdef12_3456_7890_abcd_ef1234567890')
   })
 
   it('extracts the file token and picks retry metadata from context when present', () => {

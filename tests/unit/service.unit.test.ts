@@ -1076,7 +1076,10 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._specFileRetryAttempt = 0
 
     const firstAttempt = service._resolveRetryContextForEntity(createTest(), {})
-    const secondAttempt = service._resolveRetryContextForEntity(createTest(), {})
+    const secondAttempt = service._resolveRetryContextForEntity(
+      createTest(),
+      {},
+    )
 
     expect(firstAttempt.inferredEntityRetry).toBe(0)
     expect(firstAttempt.effectiveRetryCount).toBe(0)
@@ -1085,7 +1088,9 @@ describe('WdioPuppeteerVideoService unit', () => {
   })
 
   it('applyRetryCountToMetadata and shouldRecordForRetryCount respect retry-only mode', () => {
-    const alwaysRecordService = new WdioPuppeteerVideoService({}) as unknown as {
+    const alwaysRecordService = new WdioPuppeteerVideoService(
+      {},
+    ) as unknown as {
       _applyRetryCountToMetadata: (
         metadata: {
           fileToken: string
@@ -1858,7 +1863,9 @@ describe('WdioPuppeteerVideoService unit', () => {
         deleteSegments?: boolean
       }>
       _executeDeferredMergeTask: (task: { kind: 'merge' }) => Promise<void>
-      _executeDeferredTranscodeTask: (task: { kind: 'transcode' }) => Promise<void>
+      _executeDeferredTranscodeTask: (task: {
+        kind: 'transcode'
+      }) => Promise<void>
       _flushDeferredPostProcessTasks: () => Promise<void>
       _log: (level: string, message: string) => void
     }
@@ -2734,7 +2741,13 @@ describe('WdioPuppeteerVideoService unit', () => {
         execute: (script: unknown, markerId: string) => Promise<void>
         getPuppeteer: () => Promise<unknown>
         getWindowHandle: () => Promise<string>
-      }) => Promise<{ page: { bringToFront: () => Promise<void> }; windowHandle: string | undefined } | undefined>
+      }) => Promise<
+        | {
+            page: { bringToFront: () => Promise<void> }
+            windowHandle: string | undefined
+          }
+        | undefined
+      >
       _findActivePage: (
         puppeteerBrowser: unknown,
         markerId: string,
@@ -2887,9 +2900,9 @@ describe('WdioPuppeteerVideoService unit', () => {
         _releaseGlobalRecordingSlot: () => Promise<void>
       }
 
-      await expect(service._openOwnedGlobalRecordingSlot(slotPath)).resolves.toBe(
-        true,
-      )
+      await expect(
+        service._openOwnedGlobalRecordingSlot(slotPath),
+      ).resolves.toBe(true)
       expect(service._ownsGlobalRecordingSlot).toBe(true)
       expect(service._globalRecordingSlotPath).toBe(slotPath)
       await expect(
@@ -2962,10 +2975,13 @@ describe('WdioPuppeteerVideoService unit', () => {
         outputDir: tempDir,
       }) as unknown as {
         _getSpecRetryStatePathForCid: (cid: string) => string
-        _readSpecRetryState: (cid: string) => Promise<{
-          specRetryKey: string
-          specFileRetryAttempt: number
-        } | undefined>
+        _readSpecRetryState: (cid: string) => Promise<
+          | {
+              specRetryKey: string
+              specFileRetryAttempt: number
+            }
+          | undefined
+        >
       }
 
       const retryStatePath = service._getSpecRetryStatePathForCid('0-0')
@@ -3106,9 +3122,9 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     ownedService._ownsRecordingSlot = true
 
-    await expect(unlimitedService._acquireInProcessRecordingSlot(10)).resolves.toBe(
-      true,
-    )
+    await expect(
+      unlimitedService._acquireInProcessRecordingSlot(10),
+    ).resolves.toBe(true)
     await expect(ownedService._acquireInProcessRecordingSlot(10)).resolves.toBe(
       true,
     )
@@ -3141,9 +3157,9 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._disableRecordingForWorker('worker disabled again')
 
     expect(service._canUseRecordingHooks()).toBe(false)
-    expect(warnMessages.filter((message) => message.includes('ffmpeg'))).toHaveLength(
-      1,
-    )
+    expect(
+      warnMessages.filter((message) => message.includes('ffmpeg')),
+    ).toHaveLength(1)
     expect(
       warnMessages.filter((message) =>
         message.includes('Recording disabled for this worker'),
