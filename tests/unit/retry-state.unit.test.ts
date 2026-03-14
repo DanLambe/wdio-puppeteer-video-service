@@ -127,35 +127,32 @@ describe('retry-state buildSpecRetryKey', () => {
   })
 
   it('collects static tokens from nested capability sources without overriding the first value', () => {
-    const key = buildSpecRetryKey(
-      ['tests/specs/retry.test.ts'],
-      {
-        alwaysMatch: {
-          browserName: 'Chrome',
+    const key = buildSpecRetryKey(['tests/specs/retry.test.ts'], {
+      alwaysMatch: {
+        browserName: 'Chrome',
+      },
+      firstMatch: [
+        {
+          platformName: 'LINUX',
         },
+        {
+          'appium:options': {
+            automationName: 'UiAutomator2',
+            deviceName: 'Pixel 8',
+            platformVersion: 15,
+          },
+        },
+      ],
+      capabilities: {
+        browserVersion: '131',
         firstMatch: [
           {
-            platformName: 'LINUX',
-          },
-          {
-            'appium:options': {
-              automationName: 'UiAutomator2',
-              deviceName: 'Pixel 8',
-              platformVersion: 15,
-            },
+            browserName: 'Edge',
+            platform: true,
           },
         ],
-        capabilities: {
-          browserVersion: '131',
-          firstMatch: [
-            {
-              browserName: 'Edge',
-              platform: true,
-            },
-          ],
-        },
-      } as unknown as WebdriverIO.Capabilities,
-    )
+      },
+    } as unknown as WebdriverIO.Capabilities)
 
     expect(key).toContain('browserName:chrome')
     expect(key).toContain('browserVersion:131')
@@ -200,9 +197,13 @@ describe('retry-state helper utilities', () => {
   it('extracts only valid positive integer pids from slot metadata', () => {
     expect(extractPidFromSlotFile('')).toBeUndefined()
     expect(extractPidFromSlotFile('not-json')).toBeUndefined()
-    expect(extractPidFromSlotFile(JSON.stringify({ pid: '123' }))).toBeUndefined()
+    expect(
+      extractPidFromSlotFile(JSON.stringify({ pid: '123' })),
+    ).toBeUndefined()
     expect(extractPidFromSlotFile(JSON.stringify({ pid: 0 }))).toBeUndefined()
-    expect(extractPidFromSlotFile(JSON.stringify({ pid: 12.5 }))).toBeUndefined()
+    expect(
+      extractPidFromSlotFile(JSON.stringify({ pid: 12.5 })),
+    ).toBeUndefined()
     expect(extractPidFromSlotFile(JSON.stringify({ pid: 123 }))).toBe(123)
   })
 

@@ -151,10 +151,14 @@ describe('paths artifact path helpers', () => {
     ).toBe('webm')
 
     expect(
-      warnMessages.some((message) => message.includes('Unsupported segment format')),
+      warnMessages.some((message) =>
+        message.includes('Unsupported segment format'),
+      ),
     ).toBe(true)
     expect(
-      warnMessages.some((message) => message.includes('segment formats are mixed')),
+      warnMessages.some((message) =>
+        message.includes('segment formats are mixed'),
+      ),
     ).toBe(true)
   })
 })

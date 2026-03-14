@@ -1,7 +1,5 @@
 import WdioPuppeteerVideoService from './service.js'
 
-export default WdioPuppeteerVideoService
-export { WdioPuppeteerVideoService }
 export type {
   WdioPuppeteerVideoServiceFileNameOverflowStrategy,
   WdioPuppeteerVideoServiceFileNameStyle,
@@ -14,3 +12,5 @@ export type {
   WdioPuppeteerVideoServiceRecordingStartMode,
   WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'
+export { WdioPuppeteerVideoService }
+export default WdioPuppeteerVideoService
