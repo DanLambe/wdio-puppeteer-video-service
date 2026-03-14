@@ -213,16 +213,16 @@ describe('retry-state helper utilities', () => {
     expect(isProcessAlive(123)).toBe(true)
 
     killSpy.mockImplementationOnce(() => {
-      throw Object.assign(new Error('missing'), {
-        code: 'ESRCH',
-      }) as NodeJS.ErrnoException
+      const error = new Error('missing') as NodeJS.ErrnoException
+      error.code = 'ESRCH'
+      throw error
     })
     expect(isProcessAlive(456)).toBe(false)
 
     killSpy.mockImplementationOnce(() => {
-      throw Object.assign(new Error('denied'), {
-        code: 'EPERM',
-      }) as NodeJS.ErrnoException
+      const error = new Error('denied') as NodeJS.ErrnoException
+      error.code = 'EPERM'
+      throw error
     })
     expect(isProcessAlive(789)).toBe(true)
   })
