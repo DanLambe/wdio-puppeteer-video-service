@@ -11,6 +11,7 @@ type AdvancedMode =
   | 'spec-file-retry'
   | 'spec-level'
   | 'no-segment'
+  | 'test-full-style'
   | 'session-style'
   | 'session-full-style'
   | 'deferred-merge'
@@ -27,6 +28,9 @@ const toMode = (value: string | undefined): AdvancedMode => {
   }
   if (normalized === 'no-segment') {
     return 'no-segment'
+  }
+  if (normalized === 'test-full-style') {
+    return 'test-full-style'
   }
   if (normalized === 'session-style') {
     return 'session-style'
@@ -66,6 +70,7 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
   'no-segment': [
     path.resolve('tests/advanced/specs/no-window-segment.spec.ts'),
   ],
+  'test-full-style': [path.resolve('tests/advanced/specs/file-style.spec.ts')],
   'session-style': [path.resolve('tests/advanced/specs/file-style.spec.ts')],
   'session-full-style': [
     path.resolve('tests/advanced/specs/file-style.spec.ts'),
@@ -89,6 +94,9 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   'spec-level': ['spec level recording spec'],
   'no-segment': [
     'should keep one segment when window switching segmentation is disabled',
+  ],
+  'test-full-style': [
+    'Advanced E2E - Filename Style unique title token should not appear for session style modes',
   ],
   'session-style': ['session style placeholder'],
   'session-full-style': ['session full style placeholder'],
@@ -152,6 +160,9 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   }),
   'no-segment': createServiceOptions({
     segmentOnWindowSwitch: false,
+  }),
+  'test-full-style': createServiceOptions({
+    fileNameStyle: 'testFull',
   }),
   'session-style': createServiceOptions({
     fileNameStyle: 'session',
@@ -251,6 +262,20 @@ const assertSessionStyleMode = (artifactNames: string[]): void => {
   assertNoLeakedTitleToken('session-style', artifactNames)
 }
 
+const assertTestFullStyleMode = (artifactNames: string[]): void => {
+  const hasMissingSuitePrefix = artifactNames.some(
+    (fileName) =>
+      !fileName.startsWith(
+        'advanced_e2e_filename_style_unique_title_token_should_not_appear_for_session_style_modes_',
+      ),
+  )
+  if (hasMissingSuitePrefix) {
+    throw new Error(
+      `[wdio:e2e:advanced] test-full-style mode found artifact without the expected suite-aware name: ${artifactNames.join(', ')}`,
+    )
+  }
+}
+
 const assertSessionFullStyleMode = (artifactNames: string[]): void => {
   const hasInvalidFullSessionName = artifactNames.some(
     (fileName) =>
@@ -301,6 +326,7 @@ const modeAssertions: Record<AdvancedMode, (names: string[]) => void> = {
   'spec-file-retry': assertSpecFileRetryMode,
   'spec-level': assertSpecLevelMode,
   'no-segment': assertNoSegmentMode,
+  'test-full-style': assertTestFullStyleMode,
   'session-style': assertSessionStyleMode,
   'session-full-style': assertSessionFullStyleMode,
   'deferred-merge': assertDeferredMergeMode,
@@ -352,8 +378,10 @@ export const config: WebdriverIO.Config = {
     await emptyDir(resultsDir)
   },
   onComplete: async () => {
-    let fileNameStyle: 'test' | 'session' | 'sessionFull' = 'test'
-    if (mode === 'session-full-style') {
+    let fileNameStyle: 'test' | 'testFull' | 'session' | 'sessionFull' = 'test'
+    if (mode === 'test-full-style') {
+      fileNameStyle = 'testFull'
+    } else if (mode === 'session-full-style') {
       fileNameStyle = 'sessionFull'
     } else if (mode === 'session-style') {
       fileNameStyle = 'session'

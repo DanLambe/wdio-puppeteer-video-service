@@ -132,6 +132,9 @@ export const normalizeFileNameOverflowStrategy = (
 export const normalizeFileNameStyle = (
   style: WdioPuppeteerVideoServiceFileNameStyle | undefined,
 ): WdioPuppeteerVideoServiceFileNameStyle => {
+  if (style === 'testFull') {
+    return 'testFull'
+  }
   if (style === 'session') {
     return 'session'
   }

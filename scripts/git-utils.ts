@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { accessSync, constants } from 'node:fs'
 import path from 'node:path'
 
@@ -47,6 +47,16 @@ const isExecutableFile = (filePath: string): boolean => {
   }
 }
 
+const canExecuteBinary = (command: string): boolean => {
+  const result = spawnSync(command, ['--version'], {
+    encoding: 'utf8',
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+
+  return !result.error && result.status === 0
+}
+
 export const resolveGitBinaryPath = (): string => {
   const configuredGitPath = process.env.GIT_PATH?.trim()
   if (configuredGitPath) {
@@ -70,6 +80,10 @@ export const resolveGitBinaryPath = (): string => {
     if (isExecutableFile(candidate)) {
       return candidate
     }
+  }
+
+  if (canExecuteBinary('git')) {
+    return 'git'
   }
 
   throw new Error(

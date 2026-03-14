@@ -12,6 +12,7 @@ interface TestLikeRecord {
   fullTitle?: string
   fullName?: string
   name?: string
+  parent?: string
   file?: string
   uri?: string
   _currentRetry?: number
@@ -62,7 +63,10 @@ export const buildTestSlugFromMetadata = (
   metadata: SlugMetadata,
   options: BuildTestSlugOptions,
 ): string => {
-  if (options.fileNameStyle !== 'test') {
+  if (
+    options.fileNameStyle === 'session' ||
+    options.fileNameStyle === 'sessionFull'
+  ) {
     return buildSessionOnlySlug(
       options.fileNameStyle,
       metadata.retryToken,
@@ -115,6 +119,7 @@ export const buildTestSlugFromMetadata = (
 export const collectSlugMetadata = (
   test: Frameworks.Test,
   context: unknown,
+  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle = 'test',
 ): SlugMetadata => {
   const testRecord = test as unknown as TestLikeRecord
   const contextRecords = collectContextRecords(context)
@@ -123,7 +128,7 @@ export const collectSlugMetadata = (
     buildFileCandidates(testRecord, contextRecords),
   )
   const testNameToken = pickBestNameToken(
-    buildNameCandidates(testRecord, contextRecords),
+    buildNameCandidates(testRecord, contextRecords, fileNameStyle),
     fileToken,
   )
   const retryCount = extractRetryCount(
@@ -327,25 +332,64 @@ const buildFileCandidates = (
 const buildNameCandidates = (
   testRecord: TestLikeRecord,
   contextRecords: ContextRecords,
+  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle,
 ): Array<string | undefined> => {
+  const preferFullTestName = fileNameStyle === 'testFull'
+
   return [
-    testRecord.title,
-    testRecord.description,
-    testRecord.fullTitle,
-    testRecord.fullName,
-    testRecord.name,
-    testRecord.pickle?.name,
-    testRecord.scenario?.name,
-    contextRecords.contextTestRecord?.title,
-    contextRecords.contextTestRecord?.description,
-    contextRecords.contextTestRecord?.fullTitle,
-    contextRecords.contextTestRecord?.fullName,
-    contextRecords.contextTestRecord?.name,
-    contextRecords.contextTestRecord?.pickle?.name,
-    contextRecords.contextTestRecord?.scenario?.name,
+    ...buildRecordNameCandidates(testRecord, preferFullTestName),
+    ...buildRecordNameCandidates(
+      contextRecords.contextTestRecord,
+      preferFullTestName,
+    ),
     toNonEmptyString(contextRecords.contextPickleRecord?.name),
     toNonEmptyString(contextRecords.contextScenarioRecord?.name),
   ]
+}
+
+const buildRecordNameCandidates = (
+  record: TestLikeRecord | undefined,
+  preferFullTestName: boolean,
+): Array<string | undefined> => {
+  if (!record) {
+    return []
+  }
+
+  const explicitFullNameCandidates = buildExplicitFullNameCandidates(record)
+
+  if (preferFullTestName) {
+    return [
+      ...buildPreferredFullNameCandidates(record),
+      record.title,
+      record.description,
+      record.name,
+      record.pickle?.name,
+      record.scenario?.name,
+    ]
+  }
+
+  return [
+    record.title,
+    record.description,
+    ...explicitFullNameCandidates,
+    record.name,
+    record.pickle?.name,
+    record.scenario?.name,
+  ]
+}
+
+const buildPreferredFullNameCandidates = (record: TestLikeRecord): string[] => {
+  return uniqueDefinedValues([
+    ...buildExplicitFullNameCandidates(record),
+    buildParentQualifiedName(record),
+  ])
+}
+
+const buildExplicitFullNameCandidates = (record: TestLikeRecord): string[] => {
+  return uniqueDefinedValues([
+    toDistinctFullNameCandidate(record.fullTitle, record.title),
+    toDistinctFullNameCandidate(record.fullName, record.title),
+  ])
 }
 
 const buildHashInputParts = (
@@ -354,29 +398,35 @@ const buildHashInputParts = (
   retryCount: number,
 ): string[] => {
   return [
-    testRecord.file,
-    testRecord.uri,
-    testRecord.title,
-    testRecord.description,
-    testRecord.fullTitle,
-    testRecord.fullName,
-    testRecord.name,
-    testRecord.pickle?.name,
-    testRecord.scenario?.name,
-    contextRecords.contextTestRecord?.file,
-    contextRecords.contextTestRecord?.uri,
-    contextRecords.contextTestRecord?.title,
-    contextRecords.contextTestRecord?.description,
-    contextRecords.contextTestRecord?.fullTitle,
-    contextRecords.contextTestRecord?.fullName,
-    contextRecords.contextTestRecord?.name,
-    contextRecords.contextTestRecord?.pickle?.name,
-    contextRecords.contextTestRecord?.scenario?.name,
+    ...buildRecordHashInputParts(testRecord),
+    ...buildRecordHashInputParts(contextRecords.contextTestRecord),
     toNonEmptyString(contextRecords.contextPickleRecord?.name),
     toNonEmptyString(contextRecords.contextScenarioRecord?.name),
     toNonEmptyString(contextRecords.contextFeatureRecord?.name),
     String(retryCount),
   ].filter((value): value is string => typeof value === 'string')
+}
+
+const buildRecordHashInputParts = (
+  record: TestLikeRecord | undefined,
+): Array<string | undefined> => {
+  if (!record) {
+    return []
+  }
+
+  return [
+    record.file,
+    record.uri,
+    record.parent,
+    buildParentQualifiedName(record),
+    record.title,
+    record.description,
+    record.fullTitle,
+    record.fullName,
+    record.name,
+    record.pickle?.name,
+    record.scenario?.name,
+  ]
 }
 
 const pickBestNameToken = (
@@ -471,6 +521,64 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined => {
   }
 
   return value as Record<string, unknown>
+}
+
+const buildParentQualifiedName = (
+  record: TestLikeRecord | undefined,
+): string | undefined => {
+  if (!record) {
+    return undefined
+  }
+
+  const parent = toNonEmptyString(record.parent)
+  const child =
+    toNonEmptyString(record.title) ??
+    toNonEmptyString(record.description) ??
+    toNonEmptyString(record.name) ??
+    toNonEmptyString(record.pickle?.name) ??
+    toNonEmptyString(record.scenario?.name)
+
+  if (!parent || !child) {
+    return undefined
+  }
+
+  if (child === parent || child.startsWith(`${parent} `)) {
+    return child
+  }
+
+  return `${parent} ${child}`
+}
+
+const toDistinctFullNameCandidate = (
+  candidate: string | undefined,
+  title: string | undefined,
+): string | undefined => {
+  const normalizedCandidate = toNonEmptyString(candidate)
+  if (!normalizedCandidate) {
+    return undefined
+  }
+
+  if (normalizedCandidate === toNonEmptyString(title)) {
+    return undefined
+  }
+
+  return normalizedCandidate
+}
+
+const uniqueDefinedValues = (values: Array<string | undefined>): string[] => {
+  const uniqueValues: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue
+    }
+
+    uniqueValues.push(value)
+    seen.add(value)
+  }
+
+  return uniqueValues
 }
 
 const toNonEmptyString = (value: unknown): string | undefined => {

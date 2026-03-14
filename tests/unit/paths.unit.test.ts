@@ -1,6 +1,13 @@
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { buildConcatList, extractPartNumber } from '../../src/service/paths.js'
+import {
+  buildConcatList,
+  collectCurrentTestSegmentPaths,
+  extractPartNumber,
+  getMergedOutputPath,
+  getSegmentPath,
+  resolveMergeFormat,
+} from '../../src/service/paths.js'
 
 describe('paths buildConcatList', () => {
   it('formats a path as a concat file entry with forward slashes', () => {
@@ -83,5 +90,71 @@ describe('paths extractPartNumber', () => {
       path.join(base, 'slug_part3.webm'),
       path.join(base, 'slug_part10.webm'),
     ])
+  })
+})
+
+describe('paths artifact path helpers', () => {
+  it('collects and sorts only segments for the current test slug', () => {
+    const segments = new Set([
+      path.join('videos', 'checkout_part10.webm'),
+      path.join('videos', 'other_part1.webm'),
+      path.join('videos', 'checkout_part2.webm'),
+      path.join('videos', 'checkout_part1.webm'),
+    ])
+
+    expect(collectCurrentTestSegmentPaths('checkout', segments)).toEqual([
+      path.join('videos', 'checkout_part1.webm'),
+      path.join('videos', 'checkout_part2.webm'),
+      path.join('videos', 'checkout_part10.webm'),
+    ])
+    expect(collectCurrentTestSegmentPaths('', segments)).toEqual([])
+  })
+
+  it('builds segment and merged output paths with defaults and explicit formats', () => {
+    expect(getSegmentPath(undefined, 'checkout', 3)).toBe(
+      path.join('videos', 'checkout_part3.webm'),
+    )
+    expect(getSegmentPath('artifacts', 'checkout', 3, 'mp4')).toBe(
+      path.join('artifacts', 'checkout_part3.mp4'),
+    )
+    expect(getMergedOutputPath(undefined, 'checkout')).toBe(
+      path.join('videos', 'checkout.webm'),
+    )
+    expect(getMergedOutputPath('artifacts', 'checkout', 'mp4')).toBe(
+      path.join('artifacts', 'checkout.mp4'),
+    )
+  })
+
+  it('resolves merge formats and warns on unsupported or mixed segment inputs', () => {
+    const warnMessages: string[] = []
+    const warn = (message: string) => {
+      warnMessages.push(message)
+    }
+
+    expect(resolveMergeFormat([], 'segment merge', warn)).toBeUndefined()
+    expect(
+      resolveMergeFormat(['videos/segment_part1.avi'], 'segment merge', warn),
+    ).toBeUndefined()
+    expect(
+      resolveMergeFormat(
+        ['videos/segment_part1.webm', 'videos/segment_part2.mp4'],
+        'segment merge',
+        warn,
+      ),
+    ).toBeUndefined()
+    expect(
+      resolveMergeFormat(
+        ['videos/segment_part1.webm', 'videos/segment_part2.webm'],
+        'segment merge',
+        warn,
+      ),
+    ).toBe('webm')
+
+    expect(
+      warnMessages.some((message) => message.includes('Unsupported segment format')),
+    ).toBe(true)
+    expect(
+      warnMessages.some((message) => message.includes('segment formats are mixed')),
+    ).toBe(true)
   })
 })

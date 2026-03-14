@@ -2,7 +2,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from '../../src/service/constants.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 
 const createTest = (
@@ -382,6 +383,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._normalizeFileNameStyle('test')).toBe('test')
+    expect(service._normalizeFileNameStyle('testFull')).toBe('testFull')
     expect(service._normalizeFileNameStyle('session')).toBe('session')
     expect(service._normalizeFileNameStyle('sessionFull')).toBe('sessionFull')
     expect(service._normalizeFileNameStyle('invalid')).toBe('test')
@@ -1002,6 +1004,142 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(metadata.hashInput).toContain('spec|')
   })
 
+  it('extractRetryValue floors valid retries and rejects invalid values', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _extractRetryValue: (value: unknown) => number | undefined
+    }
+
+    expect(service._extractRetryValue(2.9)).toBe(2)
+    expect(service._extractRetryValue(0)).toBe(0)
+    expect(service._extractRetryValue(-1)).toBeUndefined()
+    expect(service._extractRetryValue(Number.NaN)).toBeUndefined()
+    expect(service._extractRetryValue('2')).toBeUndefined()
+  })
+
+  it('extractExplicitRetryCount prefers test retry, then context, then currentTest', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _extractExplicitRetryCount: (
+        test: Frameworks.Test,
+        context: unknown,
+      ) => number | undefined
+    }
+
+    expect(
+      service._extractExplicitRetryCount(
+        createTest({ _currentRetry: 3 } as Partial<Frameworks.Test>),
+        {
+          _currentRetry: 2,
+          currentTest: { _currentRetry: 1 },
+        },
+      ),
+    ).toBe(3)
+    expect(
+      service._extractExplicitRetryCount(createTest(), {
+        _currentRetry: 2,
+      }),
+    ).toBe(2)
+    expect(
+      service._extractExplicitRetryCount(createTest(), {
+        currentTest: { _currentRetry: 1 },
+      }),
+    ).toBe(1)
+  })
+
+  it('resolveRetryContextForEntity tracks inferred retries across repeated entities', () => {
+    const service = new WdioPuppeteerVideoService({
+      recordOnRetries: true,
+    }) as unknown as {
+      _collectSlugMetadata: () => {
+        fileToken: string
+        testNameToken: string
+        hashInput: string
+        retryToken: string
+      }
+      _resolveRetryContextForEntity: (
+        test: Frameworks.Test,
+        context: unknown,
+      ) => {
+        explicitFrameworkRetry: number | undefined
+        specFileRetryAttempt: number
+        inferredEntityRetry: number | undefined
+        effectiveRetryCount: number
+      }
+      _specFileRetryAttempt: number
+    }
+
+    service._collectSlugMetadata = () => ({
+      fileToken: 'checkout_spec',
+      testNameToken: 'adds_item',
+      hashInput: 'checkout|adds_item',
+      retryToken: '',
+    })
+    service._specFileRetryAttempt = 0
+
+    const firstAttempt = service._resolveRetryContextForEntity(createTest(), {})
+    const secondAttempt = service._resolveRetryContextForEntity(createTest(), {})
+
+    expect(firstAttempt.inferredEntityRetry).toBe(0)
+    expect(firstAttempt.effectiveRetryCount).toBe(0)
+    expect(secondAttempt.inferredEntityRetry).toBe(1)
+    expect(secondAttempt.effectiveRetryCount).toBe(1)
+  })
+
+  it('applyRetryCountToMetadata and shouldRecordForRetryCount respect retry-only mode', () => {
+    const alwaysRecordService = new WdioPuppeteerVideoService({}) as unknown as {
+      _applyRetryCountToMetadata: (
+        metadata: {
+          fileToken: string
+          testNameToken: string
+          hashInput: string
+          retryToken: string
+        },
+        retryCount: number,
+      ) => {
+        fileToken: string
+        testNameToken: string
+        hashInput: string
+        retryToken: string
+      }
+      _shouldRecordForRetryCount: (retryCount: number) => boolean
+    }
+    const retryOnlyService = new WdioPuppeteerVideoService({
+      recordOnRetries: true,
+    }) as unknown as {
+      _shouldRecordForRetryCount: (retryCount: number) => boolean
+    }
+
+    expect(
+      alwaysRecordService._applyRetryCountToMetadata(
+        {
+          fileToken: 'checkout_spec',
+          testNameToken: 'adds_item',
+          hashInput: 'checkout|adds_item',
+          retryToken: '',
+        },
+        2,
+      ),
+    ).toEqual({
+      fileToken: 'checkout_spec',
+      testNameToken: 'adds_item',
+      hashInput: 'checkout|adds_item|retry=2',
+      retryToken: '_retry2',
+    })
+    expect(
+      alwaysRecordService._applyRetryCountToMetadata(
+        {
+          fileToken: 'checkout_spec',
+          testNameToken: 'adds_item',
+          hashInput: 'checkout|adds_item',
+          retryToken: '_retry2',
+        },
+        0,
+      ).retryToken,
+    ).toBe('')
+    expect(alwaysRecordService._shouldRecordForRetryCount(0)).toBe(true)
+    expect(retryOnlyService._shouldRecordForRetryCount(0)).toBe(false)
+    expect(retryOnlyService._shouldRecordForRetryCount(1)).toBe(true)
+  })
+
   it('normalizeNonNegativeInt accepts zero and rejects negative values', () => {
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _normalizeNonNegativeInt: (
@@ -1068,6 +1206,42 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
     await enabledService._kickOffScreencastFramesIfEnabled({})
     expect(kickoffCalls).toBe(1)
+  })
+
+  it('kickOffScreencastFrames performs both viewport writes even if the first one fails', async () => {
+    vi.useFakeTimers()
+    try {
+      const service = new WdioPuppeteerVideoService({}) as unknown as {
+        _kickOffScreencastFrames: (page: {
+          setViewport: (viewport: {
+            width: number
+            height: number
+          }) => Promise<void>
+        }) => Promise<void>
+      }
+
+      const setViewport = vi
+        .fn<(viewport: { width: number; height: number }) => Promise<void>>()
+        .mockRejectedValueOnce(new Error('first resize failed'))
+        .mockResolvedValueOnce(undefined)
+      const kickoffPromise = service._kickOffScreencastFrames({
+        setViewport,
+      })
+
+      await vi.advanceTimersByTimeAsync(50)
+      await kickoffPromise
+
+      expect(setViewport).toHaveBeenNthCalledWith(1, {
+        width: 1281,
+        height: 720,
+      })
+      expect(setViewport).toHaveBeenNthCalledWith(2, {
+        width: 1280,
+        height: 720,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('segmentOnWindowSwitch can disable window command segmentation', async () => {
@@ -1161,6 +1335,98 @@ describe('WdioPuppeteerVideoService unit', () => {
     await fastFailService._releaseRecordingSlot()
   })
 
+  it('startRecording skips Puppeteer page lookup when slot acquisition fails', async () => {
+    const browserCalls: string[] = []
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _browser: {
+        execute: (script: unknown, markerId: string) => Promise<void>
+        getPuppeteer: () => Promise<unknown>
+        getWindowHandle: () => Promise<string>
+      }
+      _currentTestSlug: string
+      _ensureFfmpegReady: () => Promise<boolean>
+      _acquireRecordingSlot: () => Promise<boolean>
+      _startRecording: () => Promise<boolean>
+    }
+
+    service._browser = {
+      execute: async () => {
+        browserCalls.push('execute')
+      },
+      getPuppeteer: async () => {
+        browserCalls.push('getPuppeteer')
+        return {}
+      },
+      getWindowHandle: async () => {
+        browserCalls.push('getWindowHandle')
+        return 'window-1'
+      },
+    }
+    service._currentTestSlug = 'slot-order'
+    service._ensureFfmpegReady = async () => true
+    service._acquireRecordingSlot = async () => false
+
+    await expect(service._startRecording()).resolves.toBe(false)
+    expect(browserCalls).toEqual([])
+  })
+
+  it('startRecording releases the slot when page lookup fails after acquisition', async () => {
+    const callOrder: string[] = []
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _browser: {
+        execute: (script: unknown, markerId: string) => Promise<void>
+        getPuppeteer: () => Promise<unknown>
+        getWindowHandle: () => Promise<string>
+      }
+      _currentTestSlug: string
+      _ensureFfmpegReady: () => Promise<boolean>
+      _acquireRecordingSlot: () => Promise<boolean>
+      _releaseRecordingSlot: () => Promise<void>
+      _findActivePage: (
+        puppeteerBrowser: unknown,
+        markerId: string,
+      ) => Promise<unknown>
+      _startRecording: () => Promise<boolean>
+    }
+
+    service._browser = {
+      execute: async () => {
+        callOrder.push('execute')
+      },
+      getPuppeteer: async () => {
+        callOrder.push('getPuppeteer')
+        return {}
+      },
+      getWindowHandle: async () => {
+        callOrder.push('getWindowHandle')
+        return 'window-1'
+      },
+    }
+    service._currentTestSlug = 'slot-release'
+    service._ensureFfmpegReady = async () => true
+    service._acquireRecordingSlot = async () => {
+      callOrder.push('acquireRecordingSlot')
+      return true
+    }
+    service._releaseRecordingSlot = async () => {
+      callOrder.push('releaseRecordingSlot')
+    }
+    service._findActivePage = async () => {
+      callOrder.push('findActivePage')
+      return undefined
+    }
+
+    await expect(service._startRecording()).resolves.toBe(false)
+    expect(callOrder).toEqual([
+      'acquireRecordingSlot',
+      'getPuppeteer',
+      'getWindowHandle',
+      'execute',
+      'findActivePage',
+      'releaseRecordingSlot',
+    ])
+  })
+
   it('releases in-process slot when global recording slot cannot be acquired', async () => {
     const service = new WdioPuppeteerVideoService({
       maxConcurrentRecordings: 1,
@@ -1193,6 +1459,85 @@ describe('WdioPuppeteerVideoService unit', () => {
     const acquired = await service._acquireRecordingSlot()
     expect(acquired).toBe(false)
     expect(releaseCount).toBe(1)
+  })
+
+  it('releases global slot candidate when metadata write fails', async () => {
+    await withTempDir(async (tempDir) => {
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+        maxGlobalRecordings: 1,
+      }) as unknown as {
+        _ownsGlobalRecordingSlot: boolean
+        _tryAcquireGlobalRecordingSlot: (
+          lockDir: string,
+          maxGlobalRecordings: number,
+        ) => Promise<boolean>
+        _writeGlobalRecordingSlotMetadata: () => Promise<boolean>
+      }
+
+      service._writeGlobalRecordingSlotMetadata = async () => false
+
+      const acquired = await service._tryAcquireGlobalRecordingSlot(tempDir, 1)
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      const slotExists = await fs
+        .stat(slotPath)
+        .then(() => true)
+        .catch(() => false)
+
+      expect(acquired).toBe(false)
+      expect(slotExists).toBe(false)
+      expect(service._ownsGlobalRecordingSlot).toBe(false)
+    })
+  })
+
+  it('cleans up stale invalid global slot files after the grace window', async () => {
+    await withTempDir(async (tempDir) => {
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      await fs.writeFile(slotPath, '')
+
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _cleanupStaleGlobalRecordingSlot: (slotPath: string) => Promise<void>
+        _shouldCleanupInvalidGlobalRecordingSlot: (
+          lastUpdatedAtMs: number,
+        ) => boolean
+      }
+
+      service._shouldCleanupInvalidGlobalRecordingSlot = () => true
+      await service._cleanupStaleGlobalRecordingSlot(slotPath)
+
+      const slotExists = await fs
+        .stat(slotPath)
+        .then(() => true)
+        .catch(() => false)
+      expect(slotExists).toBe(false)
+    })
+  })
+
+  it('keeps recent invalid global slot files to avoid deleting active writers', async () => {
+    await withTempDir(async (tempDir) => {
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      await fs.writeFile(slotPath, '')
+
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _cleanupStaleGlobalRecordingSlot: (slotPath: string) => Promise<void>
+        _shouldCleanupInvalidGlobalRecordingSlot: (
+          lastUpdatedAtMs: number,
+        ) => boolean
+      }
+
+      service._shouldCleanupInvalidGlobalRecordingSlot = () => false
+      await service._cleanupStaleGlobalRecordingSlot(slotPath)
+
+      const slotExists = await fs
+        .stat(slotPath)
+        .then(() => true)
+        .catch(() => false)
+      expect(slotExists).toBe(true)
+    })
   })
 
   it('resolves global recording lock directory using explicit and default paths', () => {
@@ -1313,6 +1658,126 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
   })
 
+  it('createResolvedTranscodeOptions preserves deleteOriginal and ffmpegArgs', () => {
+    const service = new WdioPuppeteerVideoService({
+      transcode: {
+        deleteOriginal: false,
+        ffmpegArgs: ['-preset', 'slow'],
+      },
+    }) as unknown as {
+      _createResolvedTranscodeOptions: () => {
+        deleteOriginal: boolean
+        ffmpegArgs?: string[]
+      }
+    }
+
+    expect(service._createResolvedTranscodeOptions()).toEqual({
+      deleteOriginal: false,
+      ffmpegArgs: ['-preset', 'slow'],
+    })
+  })
+
+  it('getRecordingStartTimeoutMs only returns a timeout in fastFail mode', () => {
+    const blockingService = new WdioPuppeteerVideoService({
+      recordingStartMode: 'blocking',
+      recordingStartTimeoutMs: 999,
+    }) as unknown as {
+      _getRecordingStartTimeoutMs: () => number | undefined
+    }
+    const fastFailService = new WdioPuppeteerVideoService({
+      recordingStartMode: 'fastFail',
+      recordingStartTimeoutMs: 999,
+    }) as unknown as {
+      _getRecordingStartTimeoutMs: () => number | undefined
+    }
+
+    expect(blockingService._getRecordingStartTimeoutMs()).toBeUndefined()
+    expect(fastFailService._getRecordingStartTimeoutMs()).toBe(999)
+  })
+
+  it('finalizeIfRecording only runs serialized finalize work when recording is active', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _currentTestSlug: string
+      _finalizeCurrentTestRecording: (passed: boolean) => Promise<void>
+      _finalizeIfRecording: (passed: boolean) => Promise<void>
+      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
+    }
+
+    const finalized: boolean[] = []
+    let serializedRuns = 0
+    service._finalizeCurrentTestRecording = async (passed) => {
+      finalized.push(passed)
+    }
+    service._runSerializedRecordingTask = async (task) => {
+      serializedRuns += 1
+      await task()
+    }
+
+    await service._finalizeIfRecording(false)
+    service._currentTestSlug = 'active'
+    await service._finalizeIfRecording(true)
+
+    expect(serializedRuns).toBe(1)
+    expect(finalized).toEqual([true])
+  })
+
+  it('findPageWithId skips pages that throw and returns the first matching marker id', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _findPageWithId: (
+        pages: Array<{ evaluate: () => Promise<string> }>,
+        targetId: string,
+      ) => Promise<{ evaluate: () => Promise<string> } | undefined>
+    }
+    const matchingPage = {
+      evaluate: async () => 'target-page',
+    }
+
+    await expect(
+      service._findPageWithId(
+        [
+          {
+            evaluate: async () => {
+              throw new Error('cross-origin page')
+            },
+          },
+          {
+            evaluate: async () => 'other-page',
+          },
+          matchingPage,
+        ],
+        'target-page',
+      ),
+    ).resolves.toBe(matchingPage)
+  })
+
+  it('runSerializedRecordingTask logs task failures and continues with later tasks', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _log: (level: string, message: string, details?: unknown) => void
+      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
+    }
+
+    const seenTasks: string[] = []
+    const loggedErrors: unknown[] = []
+    service._log = (level, _message, details) => {
+      if (level === 'error') {
+        loggedErrors.push(details)
+      }
+    }
+
+    await Promise.all([
+      service._runSerializedRecordingTask(async () => {
+        seenTasks.push('first')
+        throw new Error('boom')
+      }),
+      service._runSerializedRecordingTask(async () => {
+        seenTasks.push('second')
+      }),
+    ])
+
+    expect(seenTasks).toEqual(['first', 'second'])
+    expect(loggedErrors).toHaveLength(1)
+  })
+
   it('flushes deferred transcode queue in after-hook post processing', async () => {
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'wdio-video-service-unit-'),
@@ -1377,6 +1842,325 @@ describe('WdioPuppeteerVideoService unit', () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('flushDeferredPostProcessTasks dispatches merge and transcode work in queue order', async () => {
+    const service = new WdioPuppeteerVideoService({
+      postProcessMode: 'deferred',
+    }) as unknown as {
+      _deferredPostProcessTasks: Array<{
+        kind: 'merge' | 'transcode'
+        inputPath?: string
+        outputPath?: string
+        deleteOriginal?: boolean
+        mergedPath?: string
+        segmentPaths?: string[]
+        deleteSegments?: boolean
+      }>
+      _executeDeferredMergeTask: (task: { kind: 'merge' }) => Promise<void>
+      _executeDeferredTranscodeTask: (task: { kind: 'transcode' }) => Promise<void>
+      _flushDeferredPostProcessTasks: () => Promise<void>
+      _log: (level: string, message: string) => void
+    }
+
+    const callOrder: string[] = []
+    service._log = () => {}
+    service._executeDeferredMergeTask = async () => {
+      callOrder.push('merge')
+    }
+    service._executeDeferredTranscodeTask = async () => {
+      callOrder.push('transcode')
+    }
+    service._deferredPostProcessTasks.push(
+      {
+        kind: 'merge',
+        mergedPath: 'merged.webm',
+        segmentPaths: ['part1.webm'],
+        deleteSegments: true,
+      },
+      {
+        kind: 'transcode',
+        inputPath: 'input.webm',
+        outputPath: 'output.mp4',
+        deleteOriginal: true,
+      },
+    )
+
+    await service._flushDeferredPostProcessTasks()
+
+    expect(callOrder).toEqual(['merge', 'transcode'])
+    expect(service._deferredPostProcessTasks).toHaveLength(0)
+  })
+
+  it('executeDeferredTranscodeTask skips missing inputs and deletes originals after success', async () => {
+    await withTempDir(async (tempDir) => {
+      const inputPath = path.join(tempDir, 'input.webm')
+      const outputPath = path.join(tempDir, 'output.mp4')
+      const service = new WdioPuppeteerVideoService({}) as unknown as {
+        _executeDeferredTranscodeTask: (task: {
+          kind: 'transcode'
+          inputPath: string
+          outputPath: string
+          deleteOriginal: boolean
+          ffmpegArgs?: string[]
+        }) => Promise<void>
+        _transcodeToH264Mp4WithArgs: (
+          inputPath: string,
+          outputPath: string,
+          ffmpegArgs: string[] | undefined,
+        ) => Promise<boolean>
+      }
+
+      let transcodeCalls = 0
+      service._transcodeToH264Mp4WithArgs = async () => {
+        transcodeCalls += 1
+        return true
+      }
+
+      await service._executeDeferredTranscodeTask({
+        kind: 'transcode',
+        inputPath,
+        outputPath,
+        deleteOriginal: true,
+      })
+      expect(transcodeCalls).toBe(0)
+
+      await fs.writeFile(inputPath, 'source', 'utf8')
+      await service._executeDeferredTranscodeTask({
+        kind: 'transcode',
+        inputPath,
+        outputPath,
+        deleteOriginal: true,
+        ffmpegArgs: ['-preset', 'slow'],
+      })
+
+      expect(transcodeCalls).toBe(1)
+      await expect(fs.stat(inputPath)).rejects.toThrow()
+    })
+  })
+
+  it('executeDeferredMergeTask creates a follow-up transcode task when configured', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _executeDeferredMergeTask: (task: {
+        kind: 'merge'
+        segmentPaths: string[]
+        mergedPath: string
+        deleteSegments: boolean
+        transcodeToMp4?: {
+          outputPath: string
+          deleteOriginal: boolean
+          ffmpegArgs?: string[]
+        }
+      }) => Promise<void>
+      _executeDeferredTranscodeTask: (task: {
+        kind: 'transcode'
+        inputPath: string
+        outputPath: string
+        deleteOriginal: boolean
+        ffmpegArgs?: string[]
+      }) => Promise<void>
+      _mergeSegmentPathsToOutput: () => Promise<boolean>
+    }
+
+    const transcodeTasks: Array<{
+      kind: 'transcode'
+      inputPath: string
+      outputPath: string
+      deleteOriginal: boolean
+      ffmpegArgs?: string[]
+    }> = []
+    service._mergeSegmentPathsToOutput = async () => true
+    service._executeDeferredTranscodeTask = async (task) => {
+      transcodeTasks.push(task)
+    }
+
+    await service._executeDeferredMergeTask({
+      kind: 'merge',
+      segmentPaths: ['part1.webm', 'part2.webm'],
+      mergedPath: 'merged.webm',
+      deleteSegments: true,
+      transcodeToMp4: {
+        outputPath: 'merged.mp4',
+        deleteOriginal: true,
+        ffmpegArgs: ['-preset', 'slow'],
+      },
+    })
+
+    expect(transcodeTasks).toEqual([
+      {
+        kind: 'transcode',
+        inputPath: 'merged.webm',
+        outputPath: 'merged.mp4',
+        deleteOriginal: true,
+        ffmpegArgs: ['-preset', 'slow'],
+      },
+    ])
+  })
+
+  it('dropDeferredPostProcessTasksForPaths removes tasks that touch blocked paths', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _deferredPostProcessTasks: Array<{
+        kind: 'merge' | 'transcode'
+        inputPath?: string
+        outputPath?: string
+        mergedPath?: string
+        segmentPaths?: string[]
+        transcodeToMp4?: { outputPath: string }
+      }>
+      _dropDeferredPostProcessTasksForPaths: (paths: string[]) => void
+    }
+
+    service._deferredPostProcessTasks.push(
+      {
+        kind: 'transcode',
+        inputPath: 'keep-input.webm',
+        outputPath: 'keep-output.mp4',
+      },
+      {
+        kind: 'transcode',
+        inputPath: 'blocked-input.webm',
+        outputPath: 'blocked-output.mp4',
+      },
+      {
+        kind: 'merge',
+        mergedPath: 'blocked-merged.webm',
+        segmentPaths: ['part1.webm', 'part2.webm'],
+        transcodeToMp4: { outputPath: 'blocked-merged.mp4' },
+      },
+    )
+
+    service._dropDeferredPostProcessTasksForPaths([
+      'blocked-input.webm',
+      'blocked-merged.mp4',
+    ])
+
+    expect(service._deferredPostProcessTasks).toEqual([
+      {
+        kind: 'transcode',
+        inputPath: 'keep-input.webm',
+        outputPath: 'keep-output.mp4',
+      },
+    ])
+  })
+
+  it('waitForWriteStream resolves true for clean completion and false for pre-errored streams', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _createWriteStreamTimeout: () => Promise<boolean>
+      _waitForWriteStream: (segment: {
+        recordingPath: string
+        writeStream: {
+          destroyed?: boolean
+          destroy: (error?: Error) => void
+        }
+        writeStreamDone: Promise<void>
+        writeStreamErrored: boolean
+        writeStreamErrorMessage?: string
+      }) => Promise<boolean>
+    }
+
+    service._createWriteStreamTimeout = () => {
+      return new Promise<boolean>(() => {
+        /* keep the timeout branch pending for this test */
+      })
+    }
+
+    await expect(
+      service._waitForWriteStream({
+        recordingPath: 'clean.webm',
+        writeStream: {
+          destroy: () => {},
+        },
+        writeStreamDone: Promise.resolve(),
+        writeStreamErrored: false,
+      }),
+    ).resolves.toBe(true)
+
+    await expect(
+      service._waitForWriteStream({
+        recordingPath: 'errored.webm',
+        writeStream: {
+          destroy: () => {},
+        },
+        writeStreamDone: Promise.reject(new Error('already failed')),
+        writeStreamErrored: true,
+      }),
+    ).resolves.toBe(false)
+  })
+
+  it('markSegmentAsUnclean resets transcode metadata back to the original recording output', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _markSegmentAsUnclean: (segment: {
+        outputFormat: 'webm' | 'mp4'
+        outputPath: string
+        recordingFormat: 'webm' | 'mp4'
+        recordingPath: string
+        transcode: boolean
+      }) => void
+    }
+    const segment = {
+      outputFormat: 'mp4' as const,
+      outputPath: 'segment.mp4',
+      recordingFormat: 'webm' as const,
+      recordingPath: 'segment.webm',
+      transcode: true,
+    }
+
+    service._markSegmentAsUnclean(segment)
+
+    expect(segment).toEqual({
+      outputFormat: 'webm',
+      outputPath: 'segment.webm',
+      recordingFormat: 'webm',
+      recordingPath: 'segment.webm',
+      transcode: false,
+    })
+  })
+
+  it('waitForWriteStream destroys timed-out streams before returning', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _waitForWriteStream: (segment: {
+        recordingPath: string
+        writeStream: {
+          destroyed?: boolean
+          destroy: (error?: Error) => void
+        }
+        writeStreamDone: Promise<void>
+        writeStreamErrored: boolean
+        writeStreamErrorMessage?: string
+      }) => Promise<boolean>
+      _createWriteStreamTimeout: () => Promise<boolean>
+    }
+
+    service._createWriteStreamTimeout = async () => false
+
+    let rejectWriteStreamDone: ((error?: unknown) => void) | undefined
+    const writeStreamDone = new Promise<void>((_resolve, reject) => {
+      rejectWriteStreamDone = reject
+    })
+    const destroyErrors: Array<Error | undefined> = []
+    const writeStream = {
+      destroyed: false,
+      destroy: (error?: Error) => {
+        writeStream.destroyed = true
+        destroyErrors.push(error)
+        rejectWriteStreamDone?.(error)
+      },
+    }
+    const segment = {
+      recordingPath: 'timed-out.webm',
+      writeStream,
+      writeStreamDone,
+      writeStreamErrored: false,
+      writeStreamErrorMessage: undefined,
+    }
+
+    await expect(service._waitForWriteStream(segment)).resolves.toBe(false)
+    expect(writeStream.destroyed).toBe(true)
+    expect(destroyErrors).toHaveLength(1)
+    expect(segment.writeStreamErrored).toBe(true)
+    expect(segment.writeStreamErrorMessage).toContain(
+      'Timed out waiting for recording stream',
+    )
   })
 
   it('marks EPIPE and destroyed-stream write errors as benign', () => {
@@ -1444,6 +2228,60 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     const slug = service._buildTestSlug(testCase)
     expect(slug).toMatch(/^my_test_name_abc123def456_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug keeps default test style scoped to the test title', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    const slug = service._buildTestSlug(
+      createTest({
+        title: 'adds item',
+        fullTitle: 'cart suite adds item',
+      }),
+    )
+
+    expect(slug).toMatch(/^adds_item_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug can prefer full test names when fileNameStyle is testFull', () => {
+    const service = new WdioPuppeteerVideoService({
+      fileNameStyle: 'testFull',
+    }) as unknown as {
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    const slug = service._buildTestSlug(
+      createTest({
+        title: 'adds item',
+        fullTitle: 'cart suite adds item',
+      }),
+    )
+
+    expect(slug).toMatch(/^cart_suite_adds_item_[a-f0-9]{8}$/)
+  })
+
+  it('buildTestSlug derives a suite-aware testFull name from parent when fullTitle is unavailable', () => {
+    const service = new WdioPuppeteerVideoService({
+      fileNameStyle: 'testFull',
+    }) as unknown as {
+      _buildTestSlug: (test: Frameworks.Test, context?: unknown) => string
+    }
+
+    const slug = service._buildTestSlug(
+      createTest({
+        parent: 'Advanced E2E - Filename Style',
+        title: 'unique title token should not appear for session style modes',
+        fullTitle:
+          'unique title token should not appear for session style modes',
+        fullName: '',
+      }),
+    )
+
+    expect(slug).toMatch(
+      /^advanced_e2e_filename_style_unique_title_token_should_not_appear_for_session_style_modes_[a-f0-9]{8}$/,
+    )
   })
 
   it('buildTestSlug falls back to fullName when title is generic', () => {
@@ -1865,6 +2703,490 @@ describe('WdioPuppeteerVideoService unit', () => {
         true,
       )
     })
+  })
+
+  it('_acquireRecordingSlotForStart logs the fastFail timeout when acquisition fails', async () => {
+    const service = new WdioPuppeteerVideoService({
+      recordingStartMode: 'fastFail',
+      recordingStartTimeoutMs: 1234,
+    }) as unknown as {
+      _acquireRecordingSlot: () => Promise<boolean>
+      _acquireRecordingSlotForStart: () => Promise<boolean>
+      _log: (level: string, message: string) => void
+    }
+
+    const warnMessages: string[] = []
+    service._acquireRecordingSlot = async () => false
+    service._log = (level, message) => {
+      if (level === 'warn') {
+        warnMessages.push(message)
+      }
+    }
+
+    await expect(service._acquireRecordingSlotForStart()).resolves.toBe(false)
+    expect(warnMessages).toHaveLength(1)
+    expect(warnMessages[0]).toContain('within 1234ms')
+  })
+
+  it('_prepareRecordingPage tolerates missing window handles and best-effort focus failures', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _prepareRecordingPage: (browser: {
+        execute: (script: unknown, markerId: string) => Promise<void>
+        getPuppeteer: () => Promise<unknown>
+        getWindowHandle: () => Promise<string>
+      }) => Promise<{ page: { bringToFront: () => Promise<void> }; windowHandle: string | undefined } | undefined>
+      _findActivePage: (
+        puppeteerBrowser: unknown,
+        markerId: string,
+      ) => Promise<{
+        bringToFront: () => Promise<void>
+      }>
+    }
+
+    const seenMarkerIds: string[] = []
+    const page = {
+      bringToFront: vi.fn(async () => {
+        throw new Error('focus lost')
+      }),
+    }
+
+    service._findActivePage = async (puppeteerBrowser, markerId) => {
+      expect(puppeteerBrowser).toEqual({ kind: 'puppeteer' })
+      expect(markerId).toBe(seenMarkerIds[0])
+      return page
+    }
+
+    const result = await service._prepareRecordingPage({
+      execute: async (_script, markerId) => {
+        seenMarkerIds.push(markerId)
+      },
+      getPuppeteer: async () => ({ kind: 'puppeteer' }),
+      getWindowHandle: async () => {
+        throw new Error('window closed')
+      },
+    })
+
+    expect(result).toEqual({
+      page,
+      windowHandle: undefined,
+    })
+    expect(seenMarkerIds[0]).toBeTruthy()
+    expect(page.bringToFront).toHaveBeenCalledTimes(1)
+  })
+
+  it('_prepareRecordingPage logs when no matching puppeteer page is found', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _prepareRecordingPage: (browser: {
+        execute: (script: unknown, markerId: string) => Promise<void>
+        getPuppeteer: () => Promise<unknown>
+        getWindowHandle: () => Promise<string>
+      }) => Promise<unknown>
+      _findActivePage: () => Promise<undefined>
+      _log: (level: string, message: string) => void
+    }
+
+    const warnMessages: string[] = []
+    service._findActivePage = async () => undefined
+    service._log = (level, message) => {
+      if (level === 'warn') {
+        warnMessages.push(message)
+      }
+    }
+
+    await expect(
+      service._prepareRecordingPage({
+        execute: async () => {},
+        getPuppeteer: async () => ({}),
+        getWindowHandle: async () => 'window-1',
+      }),
+    ).resolves.toBeUndefined()
+    expect(warnMessages[0]).toContain('Could not find puppeteer page match')
+  })
+
+  it('_createRecordingOutput warns once when direct mp4 capture may be incompatible', () => {
+    const service = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+    }) as unknown as {
+      _createRecordingOutput: () => {
+        outputFormat: 'webm' | 'mp4'
+        outputPath: string
+        recordingFormat: 'webm' | 'mp4'
+        recordingPath: string
+        transcodeEnabled: boolean
+      }
+      _getSegmentPath: (format: 'webm' | 'mp4') => string
+      _log: (level: string, message: string) => void
+      _shouldTranscode: () => boolean
+    }
+
+    const warnMessages: string[] = []
+    service._getSegmentPath = (format) => `capture.${format}`
+    service._shouldTranscode = () => false
+    service._log = (level, message) => {
+      if (level === 'warn') {
+        warnMessages.push(message)
+      }
+    }
+
+    expect(service._createRecordingOutput()).toEqual({
+      outputFormat: 'mp4',
+      outputPath: 'capture.mp4',
+      recordingFormat: 'mp4',
+      recordingPath: 'capture.mp4',
+      transcodeEnabled: false,
+    })
+    expect(service._createRecordingOutput().recordingFormat).toBe('mp4')
+    expect(warnMessages).toHaveLength(1)
+    expect(warnMessages[0]).toContain('VP9-in-MP4 artifacts')
+  })
+
+  it('_createRecordingOutput switches capture to webm when transcode is enabled', () => {
+    const service = new WdioPuppeteerVideoService({
+      outputFormat: 'mp4',
+    }) as unknown as {
+      _createRecordingOutput: () => {
+        outputFormat: 'webm' | 'mp4'
+        outputPath: string
+        recordingFormat: 'webm' | 'mp4'
+        recordingPath: string
+        transcodeEnabled: boolean
+      }
+      _getSegmentPath: (format: 'webm' | 'mp4') => string
+      _log: (level: string, message: string) => void
+      _shouldTranscode: () => boolean
+    }
+
+    const warnMessages: string[] = []
+    service._getSegmentPath = (format) => `capture.${format}`
+    service._shouldTranscode = () => true
+    service._log = (level, message) => {
+      if (level === 'warn') {
+        warnMessages.push(message)
+      }
+    }
+
+    expect(service._createRecordingOutput()).toEqual({
+      outputFormat: 'mp4',
+      outputPath: 'capture.mp4',
+      recordingFormat: 'webm',
+      recordingPath: 'capture.webm',
+      transcodeEnabled: true,
+    })
+    expect(warnMessages).toHaveLength(0)
+  })
+
+  it('_openOwnedGlobalRecordingSlot persists metadata and marks ownership', async () => {
+    await withTempDir(async (tempDir) => {
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _globalRecordingSlotPath: string | undefined
+        _openOwnedGlobalRecordingSlot: (slotPath: string) => Promise<boolean>
+        _ownsGlobalRecordingSlot: boolean
+        _releaseGlobalRecordingSlot: () => Promise<void>
+      }
+
+      await expect(service._openOwnedGlobalRecordingSlot(slotPath)).resolves.toBe(
+        true,
+      )
+      expect(service._ownsGlobalRecordingSlot).toBe(true)
+      expect(service._globalRecordingSlotPath).toBe(slotPath)
+      await expect(
+        fs.readFile(slotPath, 'utf8').then((value) => JSON.parse(value)),
+      ).resolves.toMatchObject({
+        pid: process.pid,
+      })
+
+      await service._releaseGlobalRecordingSlot()
+    })
+  })
+
+  it('_cleanupStaleGlobalRecordingSlot keeps active pid slots', async () => {
+    await withTempDir(async (tempDir) => {
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      await fs.writeFile(slotPath, JSON.stringify({ pid: 123 }), 'utf8')
+
+      const service = new WdioPuppeteerVideoService({}) as unknown as {
+        _cleanupStaleGlobalRecordingSlot: (slotPath: string) => Promise<void>
+        _isProcessAlive: (pid: number) => boolean
+      }
+
+      service._isProcessAlive = () => true
+      await service._cleanupStaleGlobalRecordingSlot(slotPath)
+
+      await expect(fs.stat(slotPath)).resolves.toBeDefined()
+    })
+  })
+
+  it('_cleanupStaleGlobalRecordingSlot removes slots for exited pids', async () => {
+    await withTempDir(async (tempDir) => {
+      const slotPath = path.join(tempDir, 'slot-1.lock')
+      await fs.writeFile(slotPath, JSON.stringify({ pid: 123 }), 'utf8')
+
+      const service = new WdioPuppeteerVideoService({}) as unknown as {
+        _cleanupStaleGlobalRecordingSlot: (slotPath: string) => Promise<void>
+        _isProcessAlive: (pid: number) => boolean
+      }
+
+      service._isProcessAlive = () => false
+      await service._cleanupStaleGlobalRecordingSlot(slotPath)
+
+      await expect(fs.stat(slotPath)).rejects.toThrow()
+    })
+  })
+
+  it('_shouldCleanupInvalidGlobalRecordingSlot uses the stale threshold', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _shouldCleanupInvalidGlobalRecordingSlot: (
+        lastUpdatedAtMs: number,
+      ) => boolean
+    }
+    const now = Date.now()
+
+    expect(
+      service._shouldCleanupInvalidGlobalRecordingSlot(
+        now - GLOBAL_RECORDING_SLOT_INVALID_STALE_MS - 1,
+      ),
+    ).toBe(true)
+    expect(
+      service._shouldCleanupInvalidGlobalRecordingSlot(
+        now - GLOBAL_RECORDING_SLOT_INVALID_STALE_MS + 1,
+      ),
+    ).toBe(false)
+  })
+
+  it('_readSpecRetryState returns persisted retry state when it is valid', async () => {
+    await withTempDir(async (tempDir) => {
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _getSpecRetryStatePathForCid: (cid: string) => string
+        _readSpecRetryState: (cid: string) => Promise<{
+          specRetryKey: string
+          specFileRetryAttempt: number
+        } | undefined>
+      }
+
+      const retryStatePath = service._getSpecRetryStatePathForCid('0-0')
+      await fs.mkdir(path.dirname(retryStatePath), { recursive: true })
+      await fs.writeFile(
+        retryStatePath,
+        JSON.stringify({
+          specRetryKey: 'retry-key',
+          specFileRetryAttempt: 2,
+        }),
+        'utf8',
+      )
+
+      await expect(service._readSpecRetryState('0-0')).resolves.toEqual({
+        specRetryKey: 'retry-key',
+        specFileRetryAttempt: 2,
+      })
+    })
+  })
+
+  it('_readSpecRetryState warns and ignores invalid persisted retry state', async () => {
+    await withTempDir(async (tempDir) => {
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _getSpecRetryStatePathForCid: (cid: string) => string
+        _log: (level: string, message: string) => void
+        _readSpecRetryState: (cid: string) => Promise<unknown>
+      }
+
+      const warnMessages: string[] = []
+      service._log = (level, message) => {
+        if (level === 'warn') {
+          warnMessages.push(message)
+        }
+      }
+
+      const retryStatePath = service._getSpecRetryStatePathForCid('0-0')
+      await fs.mkdir(path.dirname(retryStatePath), { recursive: true })
+      await fs.writeFile(
+        retryStatePath,
+        JSON.stringify({
+          specRetryKey: 'retry-key',
+          specFileRetryAttempt: 'bad-value',
+        }),
+        'utf8',
+      )
+
+      await expect(service._readSpecRetryState('0-0')).resolves.toBeUndefined()
+      expect(warnMessages[0]).toContain('specFileRetryAttempt is invalid')
+    })
+  })
+
+  it('_deleteSpecRetryState logs unexpected unlink failures', async () => {
+    await withTempDir(async (tempDir) => {
+      const service = new WdioPuppeteerVideoService({
+        outputDir: tempDir,
+      }) as unknown as {
+        _deleteSpecRetryState: (cid: string) => Promise<void>
+        _getSpecRetryStatePathForCid: (cid: string) => string
+        _log: (level: string, message: string) => void
+      }
+
+      const traceMessages: string[] = []
+      service._getSpecRetryStatePathForCid = () => tempDir
+      service._log = (level, message) => {
+        if (level === 'trace') {
+          traceMessages.push(message)
+        }
+      }
+
+      await service._deleteSpecRetryState('0-0')
+      expect(traceMessages[0]).toContain('Failed to delete retry state')
+    })
+  })
+
+  it('_releaseInProcessRecordingSlot decrements the counter and wakes the next waiter', async () => {
+    const serviceClass = WdioPuppeteerVideoService as unknown as {
+      _activeRecordingSlots: number
+      _recordingSlotWaiters: Array<() => void>
+    }
+    const service = new WdioPuppeteerVideoService({
+      maxConcurrentRecordings: 2,
+    }) as unknown as {
+      _ownsRecordingSlot: boolean
+      _releaseInProcessRecordingSlot: () => void
+      _log: (level: string, message: string) => void
+    }
+
+    let waiterRuns = 0
+    serviceClass._activeRecordingSlots = 1
+    serviceClass._recordingSlotWaiters = [
+      () => {
+        waiterRuns += 1
+      },
+    ]
+    service._ownsRecordingSlot = true
+    service._log = () => {}
+
+    service._releaseInProcessRecordingSlot()
+    await Promise.resolve()
+
+    expect(serviceClass._activeRecordingSlots).toBe(0)
+    expect(waiterRuns).toBe(1)
+  })
+
+  it('acquireRecordingSlot returns early when slot ownership is already satisfied', async () => {
+    const service = new WdioPuppeteerVideoService({
+      maxGlobalRecordings: 1,
+    }) as unknown as {
+      _acquireRecordingSlot: () => Promise<boolean>
+      _ownsGlobalRecordingSlot: boolean
+      _ownsRecordingSlot: boolean
+    }
+
+    service._ownsRecordingSlot = true
+    service._ownsGlobalRecordingSlot = true
+
+    await expect(service._acquireRecordingSlot()).resolves.toBe(true)
+  })
+
+  it('acquireInProcessRecordingSlot returns immediately when unlimited or already owned', async () => {
+    const unlimitedService = new WdioPuppeteerVideoService({
+      maxConcurrentRecordings: 0,
+    }) as unknown as {
+      _acquireInProcessRecordingSlot: (
+        timeoutMs: number | undefined,
+      ) => Promise<boolean>
+    }
+    const ownedService = new WdioPuppeteerVideoService({
+      maxConcurrentRecordings: 1,
+    }) as unknown as {
+      _acquireInProcessRecordingSlot: (
+        timeoutMs: number | undefined,
+      ) => Promise<boolean>
+      _ownsRecordingSlot: boolean
+    }
+
+    ownedService._ownsRecordingSlot = true
+
+    await expect(unlimitedService._acquireInProcessRecordingSlot(10)).resolves.toBe(
+      true,
+    )
+    await expect(ownedService._acquireInProcessRecordingSlot(10)).resolves.toBe(
+      true,
+    )
+  })
+
+  it('_warnMissingFfmpeg and _disableRecordingForWorker only log once', () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _browser: unknown
+      _canUseRecordingHooks: () => boolean
+      _disableRecordingForWorker: (reason: string) => void
+      _isChromium: boolean
+      _log: (level: string, message: string) => void
+      _warnMissingFfmpeg: (reason: string) => void
+    }
+
+    const warnMessages: string[] = []
+    service._browser = {}
+    service._isChromium = true
+    service._log = (level, message) => {
+      if (level === 'warn') {
+        warnMessages.push(message)
+      }
+    }
+
+    expect(service._canUseRecordingHooks()).toBe(true)
+
+    service._warnMissingFfmpeg('ffmpeg missing')
+    service._warnMissingFfmpeg('ffmpeg missing again')
+    service._disableRecordingForWorker('worker disabled')
+    service._disableRecordingForWorker('worker disabled again')
+
+    expect(service._canUseRecordingHooks()).toBe(false)
+    expect(warnMessages.filter((message) => message.includes('ffmpeg'))).toHaveLength(
+      1,
+    )
+    expect(
+      warnMessages.filter((message) =>
+        message.includes('Recording disabled for this worker'),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('_resetTestState clears recording state and releases held slots', async () => {
+    const service = new WdioPuppeteerVideoService({}) as unknown as {
+      _activeSegment: unknown
+      _currentRecordingRetryCount: number
+      _currentSegment: number
+      _currentTestSlug: string
+      _currentWindowHandle: string | undefined
+      _isRecordingActive: () => boolean
+      _recordedSegments: Set<string>
+      _recorder: unknown
+      _releaseRecordingSlot: () => Promise<void>
+      _resetTestState: () => Promise<void>
+    }
+
+    let releaseCalls = 0
+    service._recorder = {}
+    service._activeSegment = {}
+    service._currentSegment = 3
+    service._currentTestSlug = 'active'
+    service._currentRecordingRetryCount = 2
+    service._currentWindowHandle = 'window-1'
+    service._recordedSegments.add('segment.webm')
+    service._releaseRecordingSlot = async () => {
+      releaseCalls += 1
+    }
+
+    expect(service._isRecordingActive()).toBe(true)
+    await service._resetTestState()
+
+    expect(service._isRecordingActive()).toBe(false)
+    expect(service._currentSegment).toBe(0)
+    expect(service._currentTestSlug).toBe('')
+    expect(service._currentRecordingRetryCount).toBe(0)
+    expect(service._currentWindowHandle).toBeUndefined()
+    expect(service._recordedSegments.size).toBe(0)
+    expect(releaseCalls).toBe(1)
   })
 
   it('_deleteSegments removes all recorded segment files and clears the set', async () => {
