@@ -72,7 +72,10 @@ afterEach(() => {
 
 describe('git-utils resolveGitBinaryPath', () => {
   it('returns the configured absolute GIT_PATH when it is executable', async () => {
-    const configuredGitPath = String.raw`C:\custom\git.exe`
+    const configuredGitPath =
+      process.platform === 'win32'
+        ? String.raw`C:\custom\git.exe`
+        : '/custom/git'
     const { resolveGitBinaryPath } = await loadGitUtils({
       gitPath: configuredGitPath,
       executablePaths: [configuredGitPath],
