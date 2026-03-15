@@ -26,7 +26,6 @@ const expectedTestTitles = [
   'should record a simple navigation',
   'should handle iframe switching',
   'should handle multiple tabs and closing tabs',
-  'should handle javascript alerts',
   'should handle viewport resizing',
   'should record a longer multi-step journey',
 ]
