@@ -6,6 +6,7 @@ import {
   getSpecRetryStateDirPath,
   getSpecRetryStatePathForCid,
   isProcessAlive,
+  parseGlobalRecordingSlotMetadata,
   resolveGlobalRecordingLockDir,
 } from '../../src/service/retry-state.js'
 
@@ -205,6 +206,32 @@ describe('retry-state helper utilities', () => {
       extractPidFromSlotFile(JSON.stringify({ pid: 12.5 })),
     ).toBeUndefined()
     expect(extractPidFromSlotFile(JSON.stringify({ pid: 123 }))).toBe(123)
+  })
+
+  it('parses global slot metadata fields when they are valid integers', () => {
+    expect(
+      parseGlobalRecordingSlotMetadata(
+        JSON.stringify({
+          pid: 123,
+          startedAt: 1_000,
+          lastUpdatedAt: 2_000,
+        }),
+      ),
+    ).toEqual({
+      pid: 123,
+      startedAt: 1_000,
+      lastUpdatedAt: 2_000,
+    })
+
+    expect(
+      parseGlobalRecordingSlotMetadata(
+        JSON.stringify({
+          pid: '123',
+          startedAt: 1.5,
+          lastUpdatedAt: 0,
+        }),
+      ),
+    ).toEqual({})
   })
 
   it('treats ESRCH as dead and other process.kill errors as alive', () => {

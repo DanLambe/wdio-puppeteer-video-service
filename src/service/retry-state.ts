@@ -56,24 +56,37 @@ export const resolveGlobalRecordingLockDir = (
 export const extractPidFromSlotFile = (
   fileContents: string,
 ): number | undefined => {
+  return parseGlobalRecordingSlotMetadata(fileContents)?.pid
+}
+
+export interface GlobalRecordingSlotMetadata {
+  pid?: number
+  startedAt?: number
+  lastUpdatedAt?: number
+}
+
+export const parseGlobalRecordingSlotMetadata = (
+  fileContents: string,
+): GlobalRecordingSlotMetadata | undefined => {
   if (!fileContents.trim()) {
     return undefined
   }
 
   try {
-    const parsed = JSON.parse(fileContents) as { pid?: unknown }
-    if (
-      typeof parsed.pid === 'number' &&
-      Number.isInteger(parsed.pid) &&
-      parsed.pid > 0
-    ) {
-      return parsed.pid
+    const parsed = JSON.parse(fileContents) as Record<string, unknown>
+    const pid = toPositiveInteger(parsed.pid)
+    const startedAt = toPositiveInteger(parsed.startedAt)
+    const lastUpdatedAt = toPositiveInteger(parsed.lastUpdatedAt)
+
+    return {
+      ...(pid === undefined ? {} : { pid }),
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(lastUpdatedAt === undefined ? {} : { lastUpdatedAt }),
     }
   } catch {
     // malformed slot metadata; ignore cleanup to avoid deleting active slots
+    return undefined
   }
-
-  return undefined
 }
 
 export const isProcessAlive = (pid: number): boolean => {
@@ -269,4 +282,12 @@ const toRecord = (value: unknown): Record<string, unknown> | undefined => {
   }
 
   return value as Record<string, unknown>
+}
+
+const toPositiveInteger = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    return undefined
+  }
+
+  return value
 }
