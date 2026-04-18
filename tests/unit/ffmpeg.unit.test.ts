@@ -57,14 +57,29 @@ describe('ffmpeg helpers', () => {
 
   it('reports direct MP4 support when the probe exits cleanly', async () => {
     const probeProcess = new FakeProbeProcess()
+    let seenArgs: string[] | undefined
     const supportPromise = probeDirectMp4Support('/custom/ffmpeg', {
-      spawnProcess: () => probeProcess,
+      spawnProcess: (_ffmpegPath, args) => {
+        seenArgs = args
+        return probeProcess
+      },
     })
 
     probeProcess.emit('close', 0)
 
     await expect(supportPromise).resolves.toBe(true)
     expect(probeProcess.kill).not.toHaveBeenCalled()
+    expect(seenArgs).toEqual(
+      expect.arrayContaining([
+        '-vcodec',
+        'vp9',
+        '-movflags',
+        'hybrid_fragmented',
+        '-f',
+        'mp4',
+      ]),
+    )
+    expect(seenArgs).not.toContain('mpeg4')
   })
 
   it('logs probe failure details when direct MP4 support is unavailable', async () => {

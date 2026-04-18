@@ -22,6 +22,8 @@ import {
   type DeferredMergeTask,
   type DeferredPostProcessTask,
   type DeferredTranscodeTask,
+  GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
+  GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
   GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
   GLOBAL_RECORDING_SLOT_POLL_MS,
   GLOBAL_RECORDING_SLOT_TIMEOUT_MS,
@@ -42,6 +44,7 @@ import * as logging from './service/logging.js'
 import * as normalization from './service/normalization.js'
 import * as artifactPaths from './service/paths.js'
 import * as postProcess from './service/post-process.js'
+import type { GlobalRecordingSlotMetadata } from './service/retry-state.js'
 import * as retryState from './service/retry-state.js'
 import type {
   WdioPuppeteerVideoServiceFileNameOverflowStrategy,
@@ -112,6 +115,8 @@ export default class WdioPuppeteerVideoService
   private _ownsGlobalRecordingSlot = false
   private _globalRecordingSlotPath: string | undefined
   private _globalRecordingSlotFileHandle: FileHandle | undefined
+  private _globalRecordingSlotHeartbeatTimer: NodeJS.Timeout | undefined
+  private _globalRecordingSlotStartedAt: number | undefined
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
 
@@ -899,38 +904,12 @@ export default class WdioPuppeteerVideoService
       this._collectSlugMetadata(test, context),
       retryCount,
     )
-    const testName = metadata.testNameToken
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Starting test recording: ${testName}`,
-    )
-    const baseSlug = this._buildTestSlugFromMetadata(metadata)
-    this._currentTestSlug = this._reserveUniqueSlug(baseSlug)
-    this._currentSegment = 1
-    this._currentRecordingRetryCount = retryCount
-    this._recordedSegments.clear()
-    this._currentWindowHandle = undefined
-    this._activeSegment = undefined
-
-    const started = await this._startRecording()
-    if (!started) {
-      await this._resetTestState()
-    }
+    await this._startRecordingForMetadata(metadata, retryCount)
   }
 
   private async _startSpecLevelRecording(retryCount: number): Promise<void> {
     const specMetadata = this._buildSpecLevelSlugMetadata(retryCount)
-    const specEntity = {
-      title: specMetadata.testNameToken,
-      fullTitle: specMetadata.testNameToken,
-      file: specMetadata.fileToken,
-    } as Frameworks.Test
-
-    await this._startRecordingForEntity(
-      specEntity,
-      { uri: this._specPaths[0] },
-      retryCount,
-    )
+    await this._startRecordingForMetadata(specMetadata, retryCount)
   }
 
   private _buildSpecLevelSlugMetadata(retryCount: number): SlugMetadata {
@@ -948,6 +927,33 @@ export default class WdioPuppeteerVideoService
       testNameToken: specNameToken,
       retryToken: retryCount > 0 ? `_retry${retryCount}` : '',
       hashInput: `spec|${allSpecsToken}|${retryCount}`,
+    }
+  }
+
+  private async _startRecordingForMetadata(
+    metadata: SlugMetadata,
+    retryCount: number,
+  ): Promise<void> {
+    if (this._currentTestSlug) {
+      return
+    }
+
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Starting test recording: ${metadata.testNameToken}`,
+    )
+
+    const baseSlug = this._buildTestSlugFromMetadata(metadata)
+    this._currentTestSlug = this._reserveUniqueSlug(baseSlug)
+    this._currentSegment = 1
+    this._currentRecordingRetryCount = retryCount
+    this._recordedSegments.clear()
+    this._currentWindowHandle = undefined
+    this._activeSegment = undefined
+
+    const started = await this._startRecording()
+    if (!started) {
+      await this._resetTestState()
     }
   }
 
@@ -2046,8 +2052,11 @@ export default class WdioPuppeteerVideoService
     slotPath: string,
   ): Promise<boolean> {
     const fileHandle = await fs.open(slotPath, 'wx')
-    const metadataWritten =
-      await this._writeGlobalRecordingSlotMetadata(fileHandle)
+    const startedAt = Date.now()
+    const metadataWritten = await this._writeGlobalRecordingSlotMetadata(
+      fileHandle,
+      startedAt,
+    )
     if (!metadataWritten) {
       this._log(
         'debug',
@@ -2060,6 +2069,8 @@ export default class WdioPuppeteerVideoService
     this._ownsGlobalRecordingSlot = true
     this._globalRecordingSlotPath = slotPath
     this._globalRecordingSlotFileHandle = fileHandle
+    this._globalRecordingSlotStartedAt = startedAt
+    this._startGlobalRecordingSlotHeartbeat()
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Acquired global recording slot: ${slotPath}`,
@@ -2069,17 +2080,36 @@ export default class WdioPuppeteerVideoService
 
   private async _writeGlobalRecordingSlotMetadata(
     fileHandle: FileHandle,
+    startedAt: number,
   ): Promise<boolean> {
-    return await fileHandle
-      .writeFile(
-        JSON.stringify({
-          pid: process.pid,
-          startedAt: Date.now(),
-        }),
-        'utf8',
-      )
-      .then(() => true)
-      .catch(() => false)
+    const metadata = Buffer.from(
+      JSON.stringify({
+        pid: process.pid,
+        startedAt,
+        lastUpdatedAt: Date.now(),
+      }),
+      'utf8',
+    )
+
+    try {
+      await fileHandle.truncate(0)
+      let bytesWritten = 0
+      while (bytesWritten < metadata.length) {
+        const writeResult = await fileHandle.write(
+          metadata,
+          bytesWritten,
+          metadata.length - bytesWritten,
+          bytesWritten,
+        )
+        if (writeResult.bytesWritten <= 0) {
+          return false
+        }
+        bytesWritten += writeResult.bytesWritten
+      }
+      return true
+    } catch {
+      return false
+    }
   }
 
   private async _discardGlobalRecordingSlotCandidate(
@@ -2103,9 +2133,25 @@ export default class WdioPuppeteerVideoService
     }
 
     const fileContents = await fs.readFile(slotPath, 'utf8').catch(() => '')
-    const parsedPid = this._extractPidFromSlotFile(fileContents)
+    const slotMetadata = this._parseGlobalRecordingSlotMetadata(fileContents)
+    const parsedPid = slotMetadata?.pid
     if (parsedPid) {
+      const lastUpdatedAtMs = this._resolveGlobalRecordingSlotLastUpdatedAtMs(
+        slotMetadata,
+        slotStats.mtimeMs,
+      )
       if (this._isProcessAlive(parsedPid)) {
+        if (!this._isGlobalRecordingSlotFresh(lastUpdatedAtMs)) {
+          this._log(
+            'debug',
+            `[WdioPuppeteerVideoService] Removing stale global recording slot with expired heartbeat for pid=${parsedPid}: ${slotPath}`,
+          )
+          await fs.unlink(slotPath).catch(() => {
+            /* best-effort stale-slot cleanup */
+          })
+          return
+        }
+
         this._log(
           'debug',
           `[WdioPuppeteerVideoService] Keeping active global recording slot owned by pid=${parsedPid}: ${slotPath}`,
@@ -2148,8 +2194,29 @@ export default class WdioPuppeteerVideoService
     )
   }
 
+  private _isGlobalRecordingSlotFresh(lastUpdatedAtMs: number): boolean {
+    return Date.now() - lastUpdatedAtMs < GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS
+  }
+
+  private _resolveGlobalRecordingSlotLastUpdatedAtMs(
+    slotMetadata: GlobalRecordingSlotMetadata | undefined,
+    fallbackLastUpdatedAtMs: number,
+  ): number {
+    return (
+      slotMetadata?.lastUpdatedAt ??
+      slotMetadata?.startedAt ??
+      fallbackLastUpdatedAtMs
+    )
+  }
+
   private _extractPidFromSlotFile(fileContents: string): number | undefined {
     return retryState.extractPidFromSlotFile(fileContents)
+  }
+
+  private _parseGlobalRecordingSlotMetadata(
+    fileContents: string,
+  ): GlobalRecordingSlotMetadata | undefined {
+    return retryState.parseGlobalRecordingSlotMetadata(fileContents)
   }
 
   private _isProcessAlive(pid: number): boolean {
@@ -2295,9 +2362,11 @@ export default class WdioPuppeteerVideoService
 
     const lockPath = this._globalRecordingSlotPath
     const lockFileHandle = this._globalRecordingSlotFileHandle
+    this._stopGlobalRecordingSlotHeartbeat()
     this._ownsGlobalRecordingSlot = false
     this._globalRecordingSlotPath = undefined
     this._globalRecordingSlotFileHandle = undefined
+    this._globalRecordingSlotStartedAt = undefined
 
     if (!lockFileHandle) {
       return
@@ -2312,6 +2381,57 @@ export default class WdioPuppeteerVideoService
       this._log(
         'debug',
         `[WdioPuppeteerVideoService] Released global recording slot: ${lockPath}`,
+      )
+    }
+  }
+
+  private _startGlobalRecordingSlotHeartbeat(): void {
+    if (
+      !this._ownsGlobalRecordingSlot ||
+      !this._globalRecordingSlotPath ||
+      this._globalRecordingSlotStartedAt === undefined ||
+      this._globalRecordingSlotHeartbeatTimer
+    ) {
+      return
+    }
+
+    this._globalRecordingSlotHeartbeatTimer = setInterval(() => {
+      void this._refreshGlobalRecordingSlotHeartbeat()
+    }, GLOBAL_RECORDING_SLOT_HEARTBEAT_MS)
+    this._globalRecordingSlotHeartbeatTimer.unref?.()
+  }
+
+  private _stopGlobalRecordingSlotHeartbeat(): void {
+    if (!this._globalRecordingSlotHeartbeatTimer) {
+      return
+    }
+
+    clearInterval(this._globalRecordingSlotHeartbeatTimer)
+    this._globalRecordingSlotHeartbeatTimer = undefined
+  }
+
+  private async _refreshGlobalRecordingSlotHeartbeat(): Promise<void> {
+    const slotPath = this._globalRecordingSlotPath
+    const fileHandle = this._globalRecordingSlotFileHandle
+    const startedAt = this._globalRecordingSlotStartedAt
+
+    if (
+      !this._ownsGlobalRecordingSlot ||
+      !slotPath ||
+      !fileHandle ||
+      startedAt === undefined
+    ) {
+      return
+    }
+
+    const metadataWritten = await this._writeGlobalRecordingSlotMetadata(
+      fileHandle,
+      startedAt,
+    )
+    if (!metadataWritten) {
+      this._log(
+        'trace',
+        `[WdioPuppeteerVideoService] Failed to refresh global recording slot heartbeat: ${slotPath}`,
       )
     }
   }
