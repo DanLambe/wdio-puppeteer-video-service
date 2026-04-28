@@ -39,6 +39,7 @@ const runWdio = async (
       [wdioCliPath, 'run', 'tests/wdio.conf.ts'],
       {
         stdio: 'inherit',
+        windowsHide: true,
         env: {
           ...process.env,
           ...(ffmpegDetection.resolvedPath

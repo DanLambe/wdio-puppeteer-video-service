@@ -120,7 +120,7 @@ export default class WdioPuppeteerVideoService
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
 
-  constructor(options: WdioPuppeteerVideoServiceOptions) {
+  constructor(options: WdioPuppeteerVideoServiceOptions = {}) {
     const performanceProfile = this._normalizePerformanceProfile(
       options.performanceProfile,
     )
@@ -132,16 +132,10 @@ export default class WdioPuppeteerVideoService
       ? 'warn'
       : this._normalizeLogLevel(options.logLevel)
 
-    const transcodeOptions = options.transcode ?? {}
-    const mergedTranscode: WdioPuppeteerVideoServiceTranscodeOptions = {
-      deleteOriginal: true,
-      ...transcodeOptions,
-    }
-    const mergeOptions = options.mergeSegments ?? {}
-    const mergedMergeSegments: WdioPuppeteerVideoServiceMergeOptions = {
-      deleteSegments: true,
-      ...mergeOptions,
-    }
+    const mergedTranscode = this._normalizeTranscodeOptions(options.transcode)
+    const mergedMergeSegments = this._normalizeMergeOptions(
+      options.mergeSegments,
+    )
 
     let mergedOptions: WdioPuppeteerVideoServiceOptions = {
       outputDir: 'videos',
@@ -157,6 +151,7 @@ export default class WdioPuppeteerVideoService
       maxGlobalRecordings: 0,
       recordingStartMode: 'blocking',
       recordingStartTimeoutMs: DEFAULT_RECORDING_START_TIMEOUT_MS,
+      ffmpegTimeoutMs: 0,
       postProcessMode: 'immediate',
       includeSpecPatterns: [],
       excludeSpecPatterns: [],
@@ -182,7 +177,7 @@ export default class WdioPuppeteerVideoService
         videoWidth: options.videoWidth ?? 1280,
         videoHeight: options.videoHeight ?? 720,
         fps: options.fps ?? 24,
-        outputFormat: options.outputFormat ?? 'webm',
+        outputFormat: this._normalizeOutputFormat(options.outputFormat),
       }
 
       if (options.mergeSegments?.enabled === undefined) {
@@ -199,7 +194,7 @@ export default class WdioPuppeteerVideoService
         videoWidth: options.videoWidth ?? 1280,
         videoHeight: options.videoHeight ?? 720,
         fps: options.fps ?? 24,
-        outputFormat: options.outputFormat ?? 'webm',
+        outputFormat: this._normalizeOutputFormat(options.outputFormat),
         skipViewPortKickoff: options.skipViewPortKickoff ?? true,
         segmentOnWindowSwitch: options.segmentOnWindowSwitch ?? false,
         postProcessMode: options.postProcessMode ?? 'deferred',
@@ -237,6 +232,7 @@ export default class WdioPuppeteerVideoService
       ),
       fileNameStyle: this._normalizeFileNameStyle(mergedOptions.fileNameStyle),
       mp4Mode: this._normalizeMp4Mode(mergedOptions.mp4Mode),
+      outputFormat: this._normalizeOutputFormat(mergedOptions.outputFormat),
       performanceProfile,
       recordOnRetries: this._normalizeBoolean(mergedOptions.recordOnRetries),
       specLevelRecording: this._normalizeBoolean(
@@ -264,9 +260,15 @@ export default class WdioPuppeteerVideoService
         mergedOptions.recordingStartTimeoutMs,
         DEFAULT_RECORDING_START_TIMEOUT_MS,
       ),
+      ffmpegTimeoutMs: this._normalizeNonNegativeInt(
+        mergedOptions.ffmpegTimeoutMs,
+        0,
+      ),
       ...(normalizedGlobalRecordingLockDir
         ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
         : {}),
+      transcode: this._normalizeTranscodeOptions(mergedOptions.transcode),
+      mergeSegments: this._normalizeMergeOptions(mergedOptions.mergeSegments),
       postProcessMode: this._normalizePostProcessMode(
         mergedOptions.postProcessMode,
       ),
@@ -1651,10 +1653,35 @@ export default class WdioPuppeteerVideoService
     const ffmpegPath = this._resolveFfmpegPath()
 
     return new Promise<boolean>((resolve) => {
-      const proc = spawn(ffmpegPath, args, {
-        stdio: ['ignore', 'ignore', 'pipe'],
-      })
+      const proc = this._spawnFfmpegProcess(ffmpegPath, args)
       let stderr = ''
+      let settled = false
+      let timeout: NodeJS.Timeout | undefined
+
+      const settle = (value: boolean) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        if (timeout) {
+          clearTimeout(timeout)
+        }
+        resolve(value)
+      }
+
+      const timeoutMs = this._options.ffmpegTimeoutMs ?? 0
+      if (timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          this._log(
+            'warn',
+            `[WdioPuppeteerVideoService] ffmpeg ${operation} timed out after ${timeoutMs.toString()}ms`,
+          )
+          proc.kill()
+          settle(false)
+        }, timeoutMs)
+        timeout.unref?.()
+      }
 
       proc.stderr?.on('data', (chunk) => {
         const next = stderr + chunk.toString('utf8')
@@ -1662,6 +1689,10 @@ export default class WdioPuppeteerVideoService
       })
 
       proc.on('error', (error) => {
+        if (settled) {
+          return
+        }
+
         this._ffmpegAvailable = false
         this._warnMissingFfmpeg(
           `ffmpeg ${operation} failed to start: ${error.message}`,
@@ -1670,12 +1701,16 @@ export default class WdioPuppeteerVideoService
           'warn',
           `[WdioPuppeteerVideoService] Failed to spawn ffmpeg for ${operation}: ${error.message}`,
         )
-        resolve(false)
+        settle(false)
       })
 
       proc.on('close', (code) => {
+        if (settled) {
+          return
+        }
+
         if (code === 0) {
-          resolve(true)
+          settle(true)
           return
         }
 
@@ -1691,8 +1726,18 @@ export default class WdioPuppeteerVideoService
             `[WdioPuppeteerVideoService] ffmpeg ${operation} exited with code ${code}`,
           )
         }
-        resolve(false)
+        settle(false)
       })
+    })
+  }
+
+  private _spawnFfmpegProcess(
+    ffmpegPath: string,
+    args: string[],
+  ): ReturnType<typeof spawn> {
+    return spawn(ffmpegPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
     })
   }
 
@@ -2584,6 +2629,24 @@ export default class WdioPuppeteerVideoService
     mode: WdioPuppeteerVideoServicePostProcessMode | undefined,
   ): WdioPuppeteerVideoServicePostProcessMode {
     return normalization.normalizePostProcessMode(mode)
+  }
+
+  private _normalizeOutputFormat(
+    format: WdioPuppeteerVideoServiceOptions['outputFormat'] | undefined,
+  ): NonNullable<WdioPuppeteerVideoServiceOptions['outputFormat']> {
+    return normalization.normalizeOutputFormat(format)
+  }
+
+  private _normalizeTranscodeOptions(
+    options: WdioPuppeteerVideoServiceTranscodeOptions | undefined,
+  ): WdioPuppeteerVideoServiceTranscodeOptions {
+    return normalization.normalizeTranscodeOptions(options)
+  }
+
+  private _normalizeMergeOptions(
+    options: WdioPuppeteerVideoServiceMergeOptions | undefined,
+  ): WdioPuppeteerVideoServiceMergeOptions {
+    return normalization.normalizeMergeOptions(options)
   }
 
   private _normalizeFileNameOverflowStrategy(

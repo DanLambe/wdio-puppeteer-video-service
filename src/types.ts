@@ -253,6 +253,16 @@ export interface WdioPuppeteerVideoServiceOptions {
   ffmpegPath?: string
 
   /**
+   * Maximum time (milliseconds) to allow an FFmpeg post-processing operation
+   * to run before it is killed and treated as failed.
+   *
+   * Use `0` (or omit) to disable the timeout.
+   *
+   * @default 0
+   */
+  ffmpegTimeoutMs?: number
+
+  /**
    * Output container format.
    *
    * Note: Puppeteer recording uses VP9 for both `webm` and `mp4` containers.
