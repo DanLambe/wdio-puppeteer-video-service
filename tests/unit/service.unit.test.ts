@@ -180,6 +180,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         maxGlobalRecordings?: number
         recordingStartMode?: string
         recordingStartTimeoutMs?: number
+        ffmpegTimeoutMs?: number
         globalRecordingLockDir?: string
         postProcessMode?: string
         includeSpecPatterns?: string[]
@@ -209,6 +210,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.maxGlobalRecordings).toBe(0)
     expect(service._options.recordingStartMode).toBe('blocking')
     expect(service._options.recordingStartTimeoutMs).toBe(2500)
+    expect(service._options.ffmpegTimeoutMs).toBe(0)
     expect(service._options.globalRecordingLockDir).toBeUndefined()
     expect(service._options.postProcessMode).toBe('immediate')
     expect(service._options.includeSpecPatterns).toEqual([])
@@ -218,6 +220,62 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.transcode?.deleteOriginal).toBe(true)
     expect(service._options.mergeSegments?.deleteSegments).toBe(true)
     expect(service._logLevel).toBe('warn')
+  })
+
+  it('constructor supports omitted options', () => {
+    const service = new WdioPuppeteerVideoService() as unknown as {
+      _options: {
+        outputDir?: string
+        outputFormat?: 'webm' | 'mp4'
+        transcode?: { deleteOriginal?: boolean }
+        mergeSegments?: { deleteSegments?: boolean }
+      }
+    }
+
+    expect(service._options.outputDir).toBe('videos')
+    expect(service._options.outputFormat).toBe('webm')
+    expect(service._options.transcode?.deleteOriginal).toBe(true)
+    expect(service._options.mergeSegments?.deleteSegments).toBe(true)
+  })
+
+  it('constructor defensively normalizes invalid runtime option values', () => {
+    const service = new WdioPuppeteerVideoService({
+      outputFormat: 'avi',
+      ffmpegTimeoutMs: -1,
+      transcode: {
+        enabled: 'yes',
+        deleteOriginal: 'no',
+        ffmpegArgs: ['-crf', 28, '-preset'],
+      },
+      mergeSegments: {
+        enabled: 'true',
+        deleteSegments: 'no',
+      },
+    } as never) as unknown as {
+      _options: {
+        outputFormat?: 'webm' | 'mp4'
+        ffmpegTimeoutMs?: number
+        transcode?: {
+          enabled?: boolean
+          deleteOriginal?: boolean
+          ffmpegArgs?: string[]
+        }
+        mergeSegments?: {
+          enabled?: boolean
+          deleteSegments?: boolean
+        }
+      }
+    }
+
+    expect(service._options.outputFormat).toBe('webm')
+    expect(service._options.ffmpegTimeoutMs).toBe(0)
+    expect(service._options.transcode).toEqual({
+      deleteOriginal: true,
+      ffmpegArgs: ['-crf', '-preset'],
+    })
+    expect(service._options.mergeSegments).toEqual({
+      deleteSegments: true,
+    })
   })
 
   it('parallel performance profile applies conservative defaults', () => {

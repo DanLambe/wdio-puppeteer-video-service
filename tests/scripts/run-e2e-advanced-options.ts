@@ -72,6 +72,7 @@ const runMode = async (
   await new Promise<void>((resolve, reject) => {
     const child = spawn(nodeCommand, [wdioCliPath, 'run', configPath], {
       stdio: 'inherit',
+      windowsHide: true,
       env: {
         ...process.env,
         ...(ffmpegDetection.resolvedPath

@@ -89,6 +89,8 @@ export const config = {
             // Optional: merge *_partN files into one continuous file per test.
             // mergeSegments: { enabled: true, deleteSegments: true },
             // ffmpegPath: '/usr/bin/ffmpeg',
+            // Kill stuck ffmpeg merge/transcode operations after this many ms
+            // ffmpegTimeoutMs: 0, // 0 disables the timeout
         }]
     ],
     // ...
@@ -143,6 +145,7 @@ Service options and defaults:
 - `fileNameOverflowStrategy` (default: `'truncate'`): overflow handling (`'truncate' | 'session'`).
 - `fileNameStyle` (default: `'test'`): naming style (`'test' | 'testFull' | 'session' | 'sessionFull'`).
 - `ffmpegPath` (default: unset): explicit ffmpeg binary path override.
+- `ffmpegTimeoutMs` (default: `0`): maximum milliseconds for FFmpeg merge/transcode work before killing it; `0` disables the timeout.
 - `outputFormat` (default: `'webm'`): artifact container format (`'webm' | 'mp4'`).
 - `mp4Mode` (default: `'auto'`): MP4 capture strategy (`'auto' | 'direct' | 'transcode'`).
 - `transcode.enabled` (default: `false`): force H.264 MP4 post-processing when output is MP4.

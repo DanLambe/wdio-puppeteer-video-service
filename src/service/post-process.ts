@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
@@ -149,7 +150,7 @@ export const mergeSegmentPathsToOutput = async (options: {
 
   const concatListPath = path.join(
     outputDir,
-    `${path.parse(mergedPath).name}_concat_${Date.now().toString(36)}.txt`,
+    `${path.parse(mergedPath).name}_concat_${randomUUID()}.txt`,
   )
   const wroteConcatList = await fs
     .writeFile(concatListPath, buildConcatList(segmentPaths), 'utf8')
