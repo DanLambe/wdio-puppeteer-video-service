@@ -317,6 +317,8 @@ export interface WdioPuppeteerVideoServiceTranscodeOptions {
    * Extra ffmpeg arguments inserted before the output file.
    *
    * Example: `['-crf', '28', '-preset', 'veryfast']`
+   * Under the `ci` performance profile, an explicit empty array opts out of the
+   * profile's default FFmpeg arguments.
    */
   ffmpegArgs?: string[]
 }

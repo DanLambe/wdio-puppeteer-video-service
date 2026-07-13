@@ -101,6 +101,7 @@ export const config = {
 
 - Node.js 24+
 - WebdriverIO v9 using `runner: 'local'`
+- Puppeteer Core 25.3+ (version 0.8.0 raises the peer requirement from 24.x)
 - Chromium-based browser session (Chrome or Edge)
 - FFmpeg installed by your environment team:
   - Available as `ffmpeg` on PATH, or
@@ -154,7 +155,7 @@ Service options and defaults:
 - `mp4Mode` (default: `'auto'`): MP4 capture strategy (`'auto' | 'direct' | 'transcode'`).
 - `transcode.enabled` (default: `false`): force H.264 MP4 post-processing when output is MP4.
 - `transcode.deleteOriginal` (default: `true`): remove intermediate file after successful transcode.
-- `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output.
+- `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output. Under the `ci` profile, an explicit empty array opts out of the profile's FFmpeg defaults.
 - `mergeSegments.enabled` (default: `false`): merge `_partN` artifacts to one output per entity.
 - `mergeSegments.deleteSegments` (default: `true`): delete part files after successful merge.
 

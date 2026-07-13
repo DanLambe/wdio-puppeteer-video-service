@@ -1831,6 +1831,25 @@ describe('WdioPuppeteerVideoService unit', () => {
     })
   })
 
+  it('createResolvedTranscodeOptions lets an explicit empty array opt out of CI defaults', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'ci',
+      transcode: {
+        ffmpegArgs: [],
+      },
+    }) as unknown as {
+      _createResolvedTranscodeOptions: () => {
+        deleteOriginal: boolean
+        ffmpegArgs?: string[]
+      }
+    }
+
+    expect(service._createResolvedTranscodeOptions()).toEqual({
+      deleteOriginal: true,
+      ffmpegArgs: [],
+    })
+  })
+
   it('transcodeToH264Mp4WithArgs removes partial output after failure', async () => {
     await withTempDir(async (tempDir) => {
       const inputPath = path.join(tempDir, 'input.webm')
