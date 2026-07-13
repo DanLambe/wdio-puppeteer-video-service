@@ -193,7 +193,9 @@ export interface WdioPuppeteerVideoServiceOptions {
    *   `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`,
    *   `postProcessMode: deferred`, `recordingStartMode: fastFail`,
    *   `recordingStartTimeoutMs: 2500`, `mergeSegments.enabled: false` when unset,
-   *   and service `logLevel` pinned to `warn` unless explicitly set)
+   *   service `logLevel` pinned to `warn` unless explicitly set, and conservative
+   *   H.264 arguments (`veryfast`, CRF 28, one thread) when `transcode.ffmpegArgs`
+   *   is unset)
    *
    * Explicit user options always take precedence over profile defaults.
    *

@@ -16,12 +16,14 @@ import {
   ACTIVE_PAGE_POLL_MS,
   ACTIVE_PAGE_TIMEOUT_MS,
   type ActiveSegment,
+  CI_TRANSCODE_FFMPEG_ARGS,
   DEFAULT_MAX_FILENAME_LENGTH,
   DEFAULT_OUTPUT_DIR,
   DEFAULT_RECORDING_START_TIMEOUT_MS,
   type DeferredMergeTask,
   type DeferredPostProcessTask,
   type DeferredTranscodeTask,
+  FFMPEG_TERMINATION_GRACE_MS,
   GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
   GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
   GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
@@ -1328,11 +1330,16 @@ export default class WdioPuppeteerVideoService
   }
 
   private _createResolvedTranscodeOptions(): ResolvedTranscodeOptions {
+    const configuredFfmpegArgs = this._options.transcode?.ffmpegArgs
+    const ffmpegArgs =
+      configuredFfmpegArgs ??
+      (this._options.performanceProfile === 'ci'
+        ? [...CI_TRANSCODE_FFMPEG_ARGS]
+        : undefined)
+
     return {
       deleteOriginal: this._options.transcode?.deleteOriginal ?? true,
-      ...(this._options.transcode?.ffmpegArgs === undefined
-        ? {}
-        : { ffmpegArgs: this._options.transcode.ffmpegArgs }),
+      ...(ffmpegArgs === undefined ? {} : { ffmpegArgs }),
     }
   }
 
@@ -1633,10 +1640,17 @@ export default class WdioPuppeteerVideoService
     outputPath: string,
     ffmpegArgs: string[] | undefined,
   ): Promise<boolean> {
-    return this._runFfmpeg(
+    const transcoded = await this._runFfmpeg(
       postProcess.buildH264TranscodeArgs(inputPath, outputPath, ffmpegArgs),
       'transcode',
     )
+    if (!transcoded) {
+      await fs.unlink(outputPath).catch(() => {
+        /* best-effort partial-output cleanup */
+      })
+    }
+
+    return transcoded
   }
 
   private async _runFfmpeg(
@@ -1657,6 +1671,8 @@ export default class WdioPuppeteerVideoService
       let stderr = ''
       let settled = false
       let timeout: NodeJS.Timeout | undefined
+      let terminationTimeout: NodeJS.Timeout | undefined
+      let timedOut = false
 
       const settle = (value: boolean) => {
         if (settled) {
@@ -1667,18 +1683,26 @@ export default class WdioPuppeteerVideoService
         if (timeout) {
           clearTimeout(timeout)
         }
+        if (terminationTimeout) {
+          clearTimeout(terminationTimeout)
+        }
         resolve(value)
       }
 
       const timeoutMs = this._options.ffmpegTimeoutMs ?? 0
       if (timeoutMs > 0) {
         timeout = setTimeout(() => {
+          timedOut = true
           this._log(
             'warn',
             `[WdioPuppeteerVideoService] ffmpeg ${operation} timed out after ${timeoutMs.toString()}ms`,
           )
           proc.kill()
-          settle(false)
+          terminationTimeout = setTimeout(() => {
+            proc.kill('SIGKILL')
+            settle(false)
+          }, FFMPEG_TERMINATION_GRACE_MS)
+          terminationTimeout.unref?.()
         }, timeoutMs)
         timeout.unref?.()
       }
@@ -1690,6 +1714,10 @@ export default class WdioPuppeteerVideoService
 
       proc.on('error', (error) => {
         if (settled) {
+          return
+        }
+        if (timedOut) {
+          settle(false)
           return
         }
 
@@ -1706,6 +1734,10 @@ export default class WdioPuppeteerVideoService
 
       proc.on('close', (code) => {
         if (settled) {
+          return
+        }
+        if (timedOut) {
+          settle(false)
           return
         }
 

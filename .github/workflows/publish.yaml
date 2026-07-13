@@ -12,6 +12,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -23,16 +26,18 @@ jobs:
       should_publish: ${{ steps.npm_check.outputs.should_publish }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
-          cache: npm
+          node-version: 24.18.0
 
-      - name: Install Dependencies
-        run: npm ci
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Verify npm Signatures
+        run: corepack npm audit signatures
 
       - name: Read Package Metadata
         id: package_meta
@@ -59,42 +64,38 @@ jobs:
           fi
 
       - name: Run Release Checks
-        run: npm run release:check
+        run: corepack npm run release:check
 
-  publish:
+  pack:
     needs: verify
     runs-on: ubuntu-latest
-    if: needs.verify.outputs.should_publish == 'true' && (github.event_name == 'push' || inputs.publish == true)
+    if: needs.verify.outputs.should_publish == 'true' && github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.publish == true)
     permissions:
-      contents: write
-      id-token: write
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js For npm Publish
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
-          cache: npm
-          registry-url: 'https://registry.npmjs.org'
+          node-version: 24.18.0
 
-      - name: Install Dependencies
-        run: npm ci
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Verify npm Signatures
+        run: corepack npm audit signatures
 
       - name: Build Package
-        run: npm run clean && npm run build
+        run: corepack npm run clean && corepack npm run build
 
-      - name: Log Publish Target
-        run: echo "Publishing ${{ needs.verify.outputs.package_name }}@${{ needs.verify.outputs.package_version }} to npm"
-
-      - name: Publish To npm
-        run: npm publish --access public --provenance
+      - name: Pack npm Artifact
+        run: corepack npm pack --ignore-scripts --allow-directory=all
 
       - name: Generate Release Notes
-        id: release_notes
         shell: bash
         run: |
           latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1 || true)"
@@ -103,13 +104,77 @@ jobs:
             commit_range="${latest_tag}..HEAD"
           fi
 
-          npx tsx scripts/generate-release-notes.ts "${{ needs.verify.outputs.package_version }}" "$commit_range" > release-notes.md
-          echo "release_tag=v${{ needs.verify.outputs.package_version }}" >> "$GITHUB_OUTPUT"
+          ./node_modules/.bin/tsx scripts/generate-release-notes.ts "${{ needs.verify.outputs.package_version }}" "$commit_range" > release-notes.md
+
+      - name: Upload npm Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-package
+          path: '*.tgz'
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Release Notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs:
+      - verify
+      - pack
+    runs-on: ubuntu-latest
+    if: needs.verify.outputs.should_publish == 'true' && github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.publish == true)
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Node.js For npm Publish
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.18.0
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download npm Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-package
+
+      - name: Log Publish Target
+        run: echo "Publishing ${{ needs.verify.outputs.package_name }}@${{ needs.verify.outputs.package_version }} to npm"
+
+      - name: Publish To npm
+        run: corepack npm publish ./*.tgz --access public --provenance --allow-file=all
+
+  github_release:
+    needs:
+      - verify
+      - publish
+    runs-on: ubuntu-latest
+    if: needs.publish.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Release Notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
 
       - name: Create Git Tag
         shell: bash
         run: |
-          release_tag="${{ steps.release_notes.outputs.release_tag }}"
+          release_tag="v${{ needs.verify.outputs.package_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -122,8 +187,8 @@ jobs:
           git push origin "$release_tag"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.release_notes.outputs.release_tag }}
-          name: ${{ steps.release_notes.outputs.release_tag }}
+          tag_name: v${{ needs.verify.outputs.package_version }}
+          name: v${{ needs.verify.outputs.package_version }}
           body_path: release-notes.md

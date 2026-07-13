@@ -173,6 +173,9 @@ export const mergeSegmentPathsToOutput = async (options: {
     /* best-effort cleanup */
   })
   if (!merged) {
+    await fs.unlink(mergedPath).catch(() => {
+      /* best-effort partial-output cleanup */
+    })
     return false
   }
 

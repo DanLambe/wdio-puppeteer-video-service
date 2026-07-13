@@ -1,0 +1,46 @@
+{
+  "updatedAt": "2026-07-12",
+  "wdioConfigs": [
+    "tests/wdio.conf.ts",
+    "tests/wdio.jasmine.conf.ts",
+    "tests/wdio.cucumber.conf.ts",
+    "tests/wdio.advanced.conf.ts"
+  ],
+  "reporters": ["spec"],
+  "services": [
+    "wdio-puppeteer-video-service (source import from src/index.js)"
+  ],
+  "linting": {
+    "command": "corepack npm run lint",
+    "tool": "Biome 2.5.3 recommended preset"
+  },
+  "testScripts": {
+    "unit": "corepack npm run test:unit",
+    "videoModes": "corepack npm run test:e2e:both",
+    "frameworks": "corepack npm run test:e2e:frameworks",
+    "advanced": "corepack npm run test:e2e:advanced",
+    "full": "corepack npm test"
+  },
+  "customCommands": [],
+  "apiInterfaces": [
+    "tests/utils/video-artifact-assertions.ts validates generated video artifacts"
+  ],
+  "envVars": [
+    "FFMPEG_PATH",
+    "WDIO_ADVANCED_MODE",
+    "WDIO_EXPECT_VIDEOS",
+    "WDIO_MAX_INSTANCES",
+    "WDIO_MERGE_SEGMENTS",
+    "WDIO_RESULTS_DIR",
+    "WDIO_VIDEO_MODE"
+  ],
+  "servers": [
+    "Local data: pages used by the WebdriverIO specs; no remote baseUrl"
+  ],
+  "notes": [
+    "Chrome runs headless with GPU disabled at 1280x720.",
+    "The primary video-mode suite supports parallel workers through WDIO_MAX_INSTANCES.",
+    "E2E completion hooks validate artifact count, names, format, dimensions, duration, and merge behavior.",
+    "Use repository package scripts rather than raw npx wdio commands."
+  ]
+}

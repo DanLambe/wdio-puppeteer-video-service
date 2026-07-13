@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { waitForChildProcess } from './child-process.js'
 import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
 
 type AdvancedMode =
@@ -69,32 +70,22 @@ const runMode = async (
 
   console.log(`[e2e:advanced] Starting ${mode} run. Artifacts => ${resultsDir}`)
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(nodeCommand, [wdioCliPath, 'run', configPath], {
-      stdio: 'inherit',
-      windowsHide: true,
-      env: {
-        ...process.env,
-        ...(ffmpegDetection.resolvedPath
-          ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
-          : {}),
-        WDIO_ADVANCED_MODE: mode,
-        WDIO_RESULTS_DIR: resultsDir,
-        WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
-      },
-    })
+  const child = spawn(nodeCommand, [wdioCliPath, 'run', configPath], {
+    stdio: 'inherit',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      ...(ffmpegDetection.resolvedPath
+        ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
+        : {}),
+      WDIO_ADVANCED_MODE: mode,
+      WDIO_RESULTS_DIR: resultsDir,
+      WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
+    },
+  })
 
-    child.on('error', (error) => {
-      reject(error)
-    })
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve()
-        return
-      }
-      reject(new Error(`[e2e:advanced] ${mode} run failed with code ${code}`))
-    })
+  await waitForChildProcess(child, (code) => {
+    return `[e2e:advanced] ${mode} run failed with code ${code}`
   })
 
   console.log(`[e2e:advanced] Completed ${mode} run.`)

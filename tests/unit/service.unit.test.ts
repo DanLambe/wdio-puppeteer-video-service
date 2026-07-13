@@ -4,10 +4,12 @@ import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  CI_TRANSCODE_FFMPEG_ARGS,
   GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
   GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
 } from '../../src/service/constants.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
+import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 
 const createTest = (
   overrides: Partial<Frameworks.Test> = {},
@@ -63,6 +65,40 @@ type RetryWorkerService = {
   beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
 }
 
+type RecordingOutput = {
+  outputFormat: 'webm' | 'mp4'
+  outputPath: string
+  recordingFormat: 'webm' | 'mp4'
+  recordingPath: string
+  transcodeEnabled: boolean
+}
+
+type RecordingOutputService = {
+  _createRecordingOutput: () => RecordingOutput
+  _getSegmentPath: (format: 'webm' | 'mp4') => string
+  _log: (level: string, message: string) => void
+  _shouldTranscode: () => boolean
+}
+
+const createRecordingOutputHarness = (
+  options: WdioPuppeteerVideoServiceOptions,
+  shouldTranscode: boolean,
+): { service: RecordingOutputService; warnMessages: string[] } => {
+  const service = new WdioPuppeteerVideoService(
+    options,
+  ) as unknown as RecordingOutputService
+  const warnMessages: string[] = []
+  service._getSegmentPath = (format) => `capture.${format}`
+  service._shouldTranscode = () => shouldTranscode
+  service._log = (level, message) => {
+    if (level === 'warn') {
+      warnMessages.push(message)
+    }
+  }
+
+  return { service, warnMessages }
+}
+
 const withTempDir = async (
   run: (tempDir: string) => Promise<void>,
 ): Promise<void> => {
@@ -83,7 +119,7 @@ const createRetryLauncherService = (
   return new WdioPuppeteerVideoService({
     outputDir,
     recordOnRetries: true,
-  }) as unknown as RetryLauncherService
+  })
 }
 
 const primeRetryStateForSecondWorker = async (
@@ -597,16 +633,12 @@ describe('WdioPuppeteerVideoService unit', () => {
       return '/tmp/ffmpeg'
     }
 
-    await service.before(
-      {} as WebdriverIO.Capabilities,
-      ['tests/specs/e2e.test.ts'],
-      {
-        sessionId: 'abc123',
-        capabilities: {
-          browserName: 'chrome',
-        },
+    await service.before({}, ['tests/specs/e2e.test.ts'], {
+      sessionId: 'abc123',
+      capabilities: {
+        browserName: 'chrome',
       },
-    )
+    })
 
     expect(resolveCalls).toBe(0)
     expect(service._ffmpegInitializationCompleted).toBe(false)
@@ -997,13 +1029,17 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     await service.beforeTest(createTest({ title: 'first spec test' }), {})
     await service.beforeTest(createTest({ title: 'second spec test' }), {})
-    await service.afterTest(createTest({ title: 'first spec test' }), {}, {
-      passed: false,
-      duration: 100,
-      retries: { attempts: 0, limit: 0 },
-      exception: '',
-      status: 'failed',
-    } as Frameworks.TestResult)
+    await service.afterTest(
+      createTest({ title: 'first spec test' }),
+      {},
+      {
+        passed: false,
+        duration: 100,
+        retries: { attempts: 0, limit: 0 },
+        exception: '',
+        status: 'failed',
+      },
+    )
     await service.after()
 
     expect(startCount).toBe(1)
@@ -1124,13 +1160,10 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(
-      service._extractExplicitRetryCount(
-        createTest({ _currentRetry: 3 } as Partial<Frameworks.Test>),
-        {
-          _currentRetry: 2,
-          currentTest: { _currentRetry: 1 },
-        },
-      ),
+      service._extractExplicitRetryCount(createTest({ _currentRetry: 3 }), {
+        _currentRetry: 2,
+        currentTest: { _currentRetry: 1 },
+      }),
     ).toBe(3)
     expect(
       service._extractExplicitRetryCount(createTest(), {
@@ -1764,6 +1797,7 @@ describe('WdioPuppeteerVideoService unit', () => {
 
   it('createResolvedTranscodeOptions preserves deleteOriginal and ffmpegArgs', () => {
     const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'ci',
       transcode: {
         deleteOriginal: false,
         ffmpegArgs: ['-preset', 'slow'],
@@ -1778,6 +1812,49 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._createResolvedTranscodeOptions()).toEqual({
       deleteOriginal: false,
       ffmpegArgs: ['-preset', 'slow'],
+    })
+  })
+
+  it('createResolvedTranscodeOptions uses conservative CI defaults when args are unset', () => {
+    const service = new WdioPuppeteerVideoService({
+      performanceProfile: 'ci',
+    }) as unknown as {
+      _createResolvedTranscodeOptions: () => {
+        deleteOriginal: boolean
+        ffmpegArgs?: string[]
+      }
+    }
+
+    expect(service._createResolvedTranscodeOptions()).toEqual({
+      deleteOriginal: true,
+      ffmpegArgs: [...CI_TRANSCODE_FFMPEG_ARGS],
+    })
+  })
+
+  it('transcodeToH264Mp4WithArgs removes partial output after failure', async () => {
+    await withTempDir(async (tempDir) => {
+      const inputPath = path.join(tempDir, 'input.webm')
+      const outputPath = path.join(tempDir, 'output.mp4')
+      await fs.writeFile(inputPath, 'source', 'utf8')
+
+      const service = new WdioPuppeteerVideoService() as unknown as {
+        _runFfmpeg: () => Promise<boolean>
+        _transcodeToH264Mp4WithArgs: (
+          inputPath: string,
+          outputPath: string,
+          ffmpegArgs: string[] | undefined,
+        ) => Promise<boolean>
+      }
+      service._runFfmpeg = async () => {
+        await fs.writeFile(outputPath, 'partial', 'utf8')
+        return false
+      }
+
+      await expect(
+        service._transcodeToH264Mp4WithArgs(inputPath, outputPath, undefined),
+      ).resolves.toBe(false)
+      await expect(fs.stat(outputPath)).rejects.toThrow()
+      await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source')
     })
   })
 
@@ -2696,14 +2773,10 @@ describe('WdioPuppeteerVideoService unit', () => {
 
       // The before() hook must resolve — never throw — even when mkdir rejects
       await expect(
-        service.before(
-          { browserName: 'chrome' } as WebdriverIO.Capabilities,
-          ['tests/specs/e2e.test.ts'],
-          {
-            sessionId: 'abc123',
-            capabilities: { browserName: 'chrome' },
-          },
-        ),
+        service.before({ browserName: 'chrome' }, ['tests/specs/e2e.test.ts'], {
+          sessionId: 'abc123',
+          capabilities: { browserName: 'chrome' },
+        }),
       ).resolves.toBeUndefined()
 
       expect(
@@ -2755,11 +2828,9 @@ describe('WdioPuppeteerVideoService unit', () => {
 
       await expect(service.onPrepare()).resolves.toBeUndefined()
       await expect(
-        service.onWorkerStart(
-          '0-0',
-          { browserName: 'chrome' } as WebdriverIO.Capabilities,
-          ['tests/specs/e2e.test.ts'],
-        ),
+        service.onWorkerStart('0-0', { browserName: 'chrome' }, [
+          'tests/specs/e2e.test.ts',
+        ]),
       ).resolves.toBeUndefined()
 
       expect(writeCalls).toBe(0)
@@ -2916,29 +2987,10 @@ describe('WdioPuppeteerVideoService unit', () => {
   })
 
   it('_createRecordingOutput warns once when direct mp4 capture may be incompatible', () => {
-    const service = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-    }) as unknown as {
-      _createRecordingOutput: () => {
-        outputFormat: 'webm' | 'mp4'
-        outputPath: string
-        recordingFormat: 'webm' | 'mp4'
-        recordingPath: string
-        transcodeEnabled: boolean
-      }
-      _getSegmentPath: (format: 'webm' | 'mp4') => string
-      _log: (level: string, message: string) => void
-      _shouldTranscode: () => boolean
-    }
-
-    const warnMessages: string[] = []
-    service._getSegmentPath = (format) => `capture.${format}`
-    service._shouldTranscode = () => false
-    service._log = (level, message) => {
-      if (level === 'warn') {
-        warnMessages.push(message)
-      }
-    }
+    const { service, warnMessages } = createRecordingOutputHarness(
+      { outputFormat: 'mp4' },
+      false,
+    )
 
     expect(service._createRecordingOutput()).toEqual({
       outputFormat: 'mp4',
@@ -2953,29 +3005,10 @@ describe('WdioPuppeteerVideoService unit', () => {
   })
 
   it('_createRecordingOutput switches capture to webm when transcode is enabled', () => {
-    const service = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-    }) as unknown as {
-      _createRecordingOutput: () => {
-        outputFormat: 'webm' | 'mp4'
-        outputPath: string
-        recordingFormat: 'webm' | 'mp4'
-        recordingPath: string
-        transcodeEnabled: boolean
-      }
-      _getSegmentPath: (format: 'webm' | 'mp4') => string
-      _log: (level: string, message: string) => void
-      _shouldTranscode: () => boolean
-    }
-
-    const warnMessages: string[] = []
-    service._getSegmentPath = (format) => `capture.${format}`
-    service._shouldTranscode = () => true
-    service._log = (level, message) => {
-      if (level === 'warn') {
-        warnMessages.push(message)
-      }
-    }
+    const { service, warnMessages } = createRecordingOutputHarness(
+      { outputFormat: 'mp4' },
+      true,
+    )
 
     expect(service._createRecordingOutput()).toEqual({
       outputFormat: 'mp4',

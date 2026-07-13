@@ -1,8 +1,9 @@
 {
   "name": "wdio-puppeteer-video-service",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "description": "WebdriverIO Service to record videos using Puppeteer",
   "type": "module",
+  "packageManager": "npm@12.0.1",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
   "files": [
@@ -19,6 +20,18 @@
   "engines": {
     "node": ">=24"
   },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^24.15.0",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "12.0.1",
+      "onFail": "error"
+    }
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/DanLambe/wdio-puppeteer-video-service.git"
@@ -30,8 +43,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf build",
-    "prepack": "npm run clean && npm run build && npm run test:unit",
-    "test": "npm run test:unit && npm run test:e2e && npm run test:e2e:frameworks && npm run test:e2e:advanced",
+    "prepack": "corepack npm run clean && corepack npm run build && corepack npm run test:unit",
+    "test": "corepack npm run test:unit && corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced",
     "test:e2e": "tsx tests/scripts/run-e2e-video-modes.ts multipart",
     "test:e2e:merge": "tsx tests/scripts/run-e2e-video-modes.ts merge",
     "test:e2e:both": "tsx tests/scripts/run-e2e-video-modes.ts both",
@@ -50,9 +63,15 @@
     "test:e2e:advanced:include-spec": "tsx tests/scripts/run-e2e-advanced-options.ts include-spec",
     "test:e2e:advanced:exclude-spec": "tsx tests/scripts/run-e2e-advanced-options.ts exclude-spec",
     "test:unit": "vitest run --dir tests/unit",
-    "pr:check": "npm run lint && npm test && npm run clean && npm run build && npm pack --dry-run",
-    "release:check": "npm run lint && npm run test:unit && npm run clean && npm run build && npm pack --dry-run",
+    "typecheck": "tsc -p tsconfig.spec.json",
+    "package:check": "corepack npm run clean && corepack npm run build && corepack npm pack --dry-run --ignore-scripts --allow-directory=all",
+    "pr:check": "corepack npm run lint && corepack npm run typecheck && corepack npm run test && corepack npm run package:check",
+    "release:check": "corepack npm run lint && corepack npm run typecheck && corepack npm run test:unit && corepack npm run package:check",
     "release:notes": "tsx scripts/preview-release-notes.ts",
+    "audit": "corepack npm audit",
+    "audit:signatures": "corepack npm audit signatures",
+    "audit:fix": "corepack npm audit fix --package-lock-only --ignore-scripts",
+    "audit:fix:latest": "corepack npm audit fix --package-lock-only --ignore-scripts --min-release-age=0",
     "lint": "biome check",
     "format": "biome format --write"
   },
@@ -71,32 +90,43 @@
   "license": "Apache-2.0",
   "peerDependencies": {
     "@wdio/types": "^9.0.0",
-    "puppeteer-core": "^24.0.0",
+    "puppeteer-core": "^25.3.0",
     "webdriverio": "^9.0.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.13",
-    "@cucumber/cucumber": "^12.8.2",
+    "@biomejs/biome": "^2.5.3",
+    "@cucumber/cucumber": "^13.0.0",
     "@types/fs-extra": "^11.0.4",
-    "@types/node": "^24.12.2",
-    "@vitest/coverage-v8": "^4.1.5",
-    "@wdio/cli": "^9.27.0",
-    "@wdio/cucumber-framework": "^9.27.0",
-    "@wdio/globals": "^9.27.0",
-    "@wdio/jasmine-framework": "^9.27.0",
-    "@wdio/local-runner": "^9.27.0",
-    "@wdio/mocha-framework": "^9.27.0",
-    "@wdio/spec-reporter": "^9.27.0",
-    "@wdio/types": "^9.27.0",
-    "expect-webdriverio": "^5.6.5",
+    "@types/node": "^24.13.3",
+    "@types/semver": "^7.7.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "@wdio/cli": "^9.29.1",
+    "@wdio/cucumber-framework": "^9.29.1",
+    "@wdio/globals": "^9.29.1",
+    "@wdio/jasmine-framework": "^9.29.1",
+    "@wdio/local-runner": "^9.29.1",
+    "@wdio/mocha-framework": "^9.29.1",
+    "@wdio/spec-reporter": "^9.29.1",
+    "@wdio/types": "^9.29.1",
+    "expect-webdriverio": "^5.7.0",
     "ffmpeg-static": "^5.3.0",
-    "fs-extra": "^11.3.4",
-    "puppeteer-core": "^24.42.0",
+    "fs-extra": "^11.3.6",
+    "puppeteer-core": "^25.3.0",
     "rimraf": "^6.1.3",
-    "semver": "^7.7.4",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.5",
-    "webdriverio": "^9.27.0"
+    "semver": "^7.8.5",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "webdriverio": "^9.29.1"
+  },
+  "allowScripts": {
+    "edgedriver@6.3.0": true,
+    "ffmpeg-static@5.3.0": true,
+    "geckodriver@6.1.0": true,
+    "esbuild@0.28.1": true
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.7",
+    "tmp": "0.2.7"
   }
 }
