@@ -12,21 +12,61 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
-          cache: npm
+          node-version: 24.18.0
 
-      - name: Install Dependencies
-        run: npm ci
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Verify npm Signatures
+        run: corepack npm audit signatures
 
       - name: Verify Version Bump
         run: ./node_modules/.bin/tsx scripts/check-version-bump.ts "${{ github.event.pull_request.base.sha }}"
 
-      - name: Run Pull Request Checks
-        run: npm run pr:check
+      - name: Run Lint
+        run: corepack npm run lint
+
+      - name: Run Typecheck
+        run: corepack npm run typecheck
+
+      - name: Run Unit Tests
+        run: corepack npm run test:unit
+
+      - name: Build Package
+        run: corepack npm run clean && corepack npm run build
+
+      - name: Check Package Contents
+        run: corepack npm pack --dry-run --ignore-scripts --allow-directory=all
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.18.0
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Verify npm Signatures
+        run: corepack npm audit signatures
+
+      - name: Rebuild E2E Binary Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static edgedriver geckodriver
+
+      - name: Run E2E Tests
+        run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced

@@ -235,6 +235,95 @@ describe('post-process helpers', () => {
     )
   })
 
+  it('removes partial merged output after ffmpeg failure', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const mergedPath = path.join(tempDir, 'merged.webm')
+    const segmentPaths = [
+      path.join(tempDir, 'part1.webm'),
+      path.join(tempDir, 'part2.webm'),
+    ]
+    await Promise.all(
+      segmentPaths.map((segmentPath) =>
+        fs.writeFile(segmentPath, 'segment-data', 'utf8'),
+      ),
+    )
+
+    const merged = await mergeSegmentPathsToOutput({
+      deleteSegments: true,
+      ffmpegOperation: 'segment merge',
+      mergedPath,
+      outputDir: tempDir,
+      runFfmpeg: async () => {
+        await fs.writeFile(mergedPath, 'partial', 'utf8')
+        return false
+      },
+      segmentPaths,
+      warn: vi.fn(),
+      writeFailureContext: 'segment merge',
+    })
+
+    expect(merged).toBe(false)
+    await expect(fs.stat(mergedPath)).rejects.toThrow()
+    await Promise.all(
+      segmentPaths.map((segmentPath) =>
+        expect(fs.readFile(segmentPath, 'utf8')).resolves.toBe('segment-data'),
+      ),
+    )
+    await expect(fs.readdir(tempDir)).resolves.not.toContainEqual(
+      expect.stringContaining('_concat_'),
+    )
+  })
+
+  it('uses unique concat input paths for concurrent merge attempts', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const mergedPath = path.join(tempDir, 'merged.webm')
+    const segmentPaths = [
+      path.join(tempDir, 'part1.webm'),
+      path.join(tempDir, 'part2.webm'),
+    ]
+    const concatListPaths = new Set<string>()
+    await Promise.all(
+      segmentPaths.map((segmentPath, index) =>
+        fs.writeFile(segmentPath, `segment-${index + 1}`, 'utf8'),
+      ),
+    )
+
+    const runFfmpeg = vi.fn(async (args: string[]) => {
+      const concatListPath = args[6]
+      expect(concatListPath).toBeDefined()
+      if (concatListPath) {
+        concatListPaths.add(concatListPath)
+      }
+      return false
+    })
+
+    await Promise.all([
+      mergeSegmentPathsToOutput({
+        deleteSegments: false,
+        ffmpegOperation: 'segment merge',
+        mergedPath,
+        outputDir: tempDir,
+        runFfmpeg,
+        segmentPaths,
+        warn: vi.fn(),
+        writeFailureContext: 'segment merge',
+      }),
+      mergeSegmentPathsToOutput({
+        deleteSegments: false,
+        ffmpegOperation: 'segment merge',
+        mergedPath,
+        outputDir: tempDir,
+        runFfmpeg,
+        segmentPaths,
+        warn: vi.fn(),
+        writeFailureContext: 'segment merge',
+      }),
+    ])
+
+    expect(runFfmpeg).toHaveBeenCalledTimes(2)
+    expect(concatListPaths.size).toBe(2)
+  })
+
   it('warns and returns false when it cannot write the concat input list', async () => {
     const tempDir = await createTempDir(tempDirs)
     const outputDirPath = path.join(tempDir, 'blocked-output-dir')

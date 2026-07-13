@@ -89,6 +89,8 @@ export const config = {
             // Optional: merge *_partN files into one continuous file per test.
             // mergeSegments: { enabled: true, deleteSegments: true },
             // ffmpegPath: '/usr/bin/ffmpeg',
+            // Kill stuck ffmpeg merge/transcode operations after this many ms
+            // ffmpegTimeoutMs: 0, // 0 disables the timeout
         }]
     ],
     // ...
@@ -99,6 +101,7 @@ export const config = {
 
 - Node.js 24+
 - WebdriverIO v9 using `runner: 'local'`
+- Puppeteer Core 25.3+ (version 0.8.0 raises the peer requirement from 24.x)
 - Chromium-based browser session (Chrome or Edge)
 - FFmpeg installed by your environment team:
   - Available as `ffmpeg` on PATH, or
@@ -113,6 +116,10 @@ The service resolves FFmpeg in this order:
 4. `ffmpeg-static` if it is installed in the project
 
 This package does not install FFmpeg automatically for end users.
+
+Repository development and CI use Node.js 24.15+ with the npm version pinned by
+`packageManager`. Run repository npm commands through `corepack npm` so local and
+CI dependency policy stays consistent.
 
 ## Option Reference
 
@@ -143,11 +150,12 @@ Service options and defaults:
 - `fileNameOverflowStrategy` (default: `'truncate'`): overflow handling (`'truncate' | 'session'`).
 - `fileNameStyle` (default: `'test'`): naming style (`'test' | 'testFull' | 'session' | 'sessionFull'`).
 - `ffmpegPath` (default: unset): explicit ffmpeg binary path override.
+- `ffmpegTimeoutMs` (default: `0`): maximum milliseconds for FFmpeg merge/transcode work before killing it; `0` disables the timeout.
 - `outputFormat` (default: `'webm'`): artifact container format (`'webm' | 'mp4'`).
 - `mp4Mode` (default: `'auto'`): MP4 capture strategy (`'auto' | 'direct' | 'transcode'`).
 - `transcode.enabled` (default: `false`): force H.264 MP4 post-processing when output is MP4.
 - `transcode.deleteOriginal` (default: `true`): remove intermediate file after successful transcode.
-- `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output.
+- `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output. Under the `ci` profile, an explicit empty array opts out of the profile's FFmpeg defaults.
 - `mergeSegments.enabled` (default: `false`): merge `_partN` artifacts to one output per entity.
 - `mergeSegments.deleteSegments` (default: `true`): delete part files after successful merge.
 
@@ -230,6 +238,8 @@ Your WDIO run continues, but no video artifacts are created for that worker unti
 When `outputFormat: 'mp4'` and `mp4Mode: 'auto'`, the service runs a one-time ffmpeg capability probe on the first eligible recording attempt in each worker.
 If direct MP4 is not compatible, it automatically falls back to transcode mode to keep recording stable in CI/headless runs.
 
+Timed-out or failed merge/transcode operations retain their source recordings and remove partial output files. After a configured timeout, the service first asks FFmpeg to terminate and then force-stops it if it does not exit within a short grace period.
+
 If a recorder stream closes during teardown (for example, aborted worker shutdown), the service now handles expected write errors (like `EPIPE`) gracefully and prevents repeated stream-failure log spam.
 
 ## Logging
@@ -260,7 +270,7 @@ For CI agents running multiple WDIO workers in parallel, these settings usually 
 - Optionally set `globalRecordingLockDir` when workers do not share a stable `outputDir` path.
 - Use `postProcessMode: 'deferred'` to move merge/transcode CPU cost out of per-test hooks and into worker teardown.
 - Use `performanceProfile: 'parallel'` for a manual opt-in baseline (`fps: 24`, `videoWidth: 1280`, `videoHeight: 720`, `outputFormat: webm` when unset).
-- Use `performanceProfile: 'ci'` for an opt-in conservative CI baseline (`fps: 24`, `webm`, `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`, `postProcessMode: 'deferred'`, `recordingStartMode: 'fastFail'`, `mergeSegments.enabled: false` when unset, and service `logLevel` pinned to `warn` unless explicitly set).
+- Use `performanceProfile: 'ci'` for an opt-in conservative CI baseline (`fps: 24`, `webm`, `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`, `postProcessMode: 'deferred'`, `recordingStartMode: 'fastFail'`, `mergeSegments.enabled: false` when unset, and service `logLevel` pinned to `warn` unless explicitly set). If MP4 transcoding is also enabled and `transcode.ffmpegArgs` is unset, the profile uses `-preset veryfast -crf 28 -threads 1` to avoid FFmpeg oversubscribing shared CPU runners; explicit arguments always win.
 - Use spec/tag filters (`include*Patterns` / `exclude*Patterns`) to record only critical paths in large suites.
 - On low-tier/shared runners, start with fewer workers (for example `maxInstances: 1-2`) and increase only after artifacts stay stable.
 - Prefer `outputFormat: 'webm'` when MP4 output is not strictly required.

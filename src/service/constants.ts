@@ -88,6 +88,7 @@ export const ACTIVE_PAGE_POLL_MS = 50
 export const SEGMENT_SWITCH_DELAY_MS = 50
 export const WRITE_STREAM_TIMEOUT_MS = 30_000
 export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
+export const FFMPEG_TERMINATION_GRACE_MS = 1_000
 export const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
 export const DEFAULT_MAX_FILENAME_LENGTH = 255
 export const WINDOWS_MAX_PATH_LENGTH = 259
@@ -105,6 +106,15 @@ export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 export const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
+
+export const CI_TRANSCODE_FFMPEG_ARGS = [
+  '-preset',
+  'veryfast',
+  '-crf',
+  '28',
+  '-threads',
+  '1',
+] as const
 
 export const LOG_LEVEL_PRIORITY: Record<
   WdioPuppeteerVideoServiceLogLevel,

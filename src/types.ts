@@ -193,7 +193,9 @@ export interface WdioPuppeteerVideoServiceOptions {
    *   `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`,
    *   `postProcessMode: deferred`, `recordingStartMode: fastFail`,
    *   `recordingStartTimeoutMs: 2500`, `mergeSegments.enabled: false` when unset,
-   *   and service `logLevel` pinned to `warn` unless explicitly set)
+   *   service `logLevel` pinned to `warn` unless explicitly set, and conservative
+   *   H.264 arguments (`veryfast`, CRF 28, one thread) when `transcode.ffmpegArgs`
+   *   is unset)
    *
    * Explicit user options always take precedence over profile defaults.
    *
@@ -253,6 +255,16 @@ export interface WdioPuppeteerVideoServiceOptions {
   ffmpegPath?: string
 
   /**
+   * Maximum time (milliseconds) to allow an FFmpeg post-processing operation
+   * to run before it is killed and treated as failed.
+   *
+   * Use `0` (or omit) to disable the timeout.
+   *
+   * @default 0
+   */
+  ffmpegTimeoutMs?: number
+
+  /**
    * Output container format.
    *
    * Note: Puppeteer recording uses VP9 for both `webm` and `mp4` containers.
@@ -305,6 +317,8 @@ export interface WdioPuppeteerVideoServiceTranscodeOptions {
    * Extra ffmpeg arguments inserted before the output file.
    *
    * Example: `['-crf', '28', '-preset', 'veryfast']`
+   * Under the `ci` performance profile, an explicit empty array opts out of the
+   * profile's default FFmpeg arguments.
    */
   ffmpegArgs?: string[]
 }

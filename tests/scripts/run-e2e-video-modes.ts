@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { waitForChildProcess } from './child-process.js'
 import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
 
 type VideoMode = 'multipart' | 'merge'
@@ -33,36 +34,23 @@ const runWdio = async (
 
   console.log(`[e2e:modes] Starting ${mode} run. Artifacts => ${resultsDir}`)
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      nodeCommand,
-      [wdioCliPath, 'run', 'tests/wdio.conf.ts'],
-      {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          ...(ffmpegDetection.resolvedPath
-            ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
-            : {}),
-          WDIO_MERGE_SEGMENTS: mergeEnabled,
-          WDIO_VIDEO_MODE: mode,
-          WDIO_RESULTS_DIR: resultsDir,
-          WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
-        },
-      },
-    )
+  const child = spawn(nodeCommand, [wdioCliPath, 'run', 'tests/wdio.conf.ts'], {
+    stdio: 'inherit',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      ...(ffmpegDetection.resolvedPath
+        ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
+        : {}),
+      WDIO_MERGE_SEGMENTS: mergeEnabled,
+      WDIO_VIDEO_MODE: mode,
+      WDIO_RESULTS_DIR: resultsDir,
+      WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
+    },
+  })
 
-    child.on('error', (error) => {
-      reject(error)
-    })
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve()
-        return
-      }
-      reject(new Error(`[e2e:modes] ${mode} run failed with code ${code}`))
-    })
+  await waitForChildProcess(child, (code) => {
+    return `[e2e:modes] ${mode} run failed with code ${code}`
   })
 
   console.log(`[e2e:modes] Completed ${mode} run.`)

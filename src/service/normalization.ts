@@ -2,11 +2,13 @@ import path from 'node:path'
 import type {
   WdioPuppeteerVideoServiceFileNameOverflowStrategy,
   WdioPuppeteerVideoServiceFileNameStyle,
+  WdioPuppeteerVideoServiceMergeOptions,
   WdioPuppeteerVideoServiceMp4Mode,
   WdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServicePerformanceProfile,
   WdioPuppeteerVideoServicePostProcessMode,
   WdioPuppeteerVideoServiceRecordingStartMode,
+  WdioPuppeteerVideoServiceTranscodeOptions,
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
@@ -68,6 +70,59 @@ export const normalizeBoolean = (
   }
 
   return value
+}
+
+export const normalizeOutputFormat = (
+  format: WdioPuppeteerVideoServiceOptions['outputFormat'] | undefined,
+): NonNullable<WdioPuppeteerVideoServiceOptions['outputFormat']> => {
+  if (format === 'mp4') {
+    return 'mp4'
+  }
+
+  return 'webm'
+}
+
+export const normalizeTranscodeOptions = (
+  options: WdioPuppeteerVideoServiceTranscodeOptions | undefined,
+): WdioPuppeteerVideoServiceTranscodeOptions => {
+  const optionRecord = toRecord(options)
+  const normalizedOptions: WdioPuppeteerVideoServiceTranscodeOptions = {
+    deleteOriginal: normalizeBoolean(
+      optionRecord?.deleteOriginal as boolean | undefined,
+      true,
+    ),
+  }
+
+  const enabled = optionRecord?.enabled
+  if (typeof enabled === 'boolean') {
+    normalizedOptions.enabled = enabled
+  }
+
+  const ffmpegArgs = normalizeStringList(optionRecord?.ffmpegArgs)
+  if (ffmpegArgs !== undefined) {
+    normalizedOptions.ffmpegArgs = ffmpegArgs
+  }
+
+  return normalizedOptions
+}
+
+export const normalizeMergeOptions = (
+  options: WdioPuppeteerVideoServiceMergeOptions | undefined,
+): WdioPuppeteerVideoServiceMergeOptions => {
+  const optionRecord = toRecord(options)
+  const normalizedOptions: WdioPuppeteerVideoServiceMergeOptions = {
+    deleteSegments: normalizeBoolean(
+      optionRecord?.deleteSegments as boolean | undefined,
+      true,
+    ),
+  }
+
+  const enabled = optionRecord?.enabled
+  if (typeof enabled === 'boolean') {
+    normalizedOptions.enabled = enabled
+  }
+
+  return normalizedOptions
 }
 
 export const normalizePatternList = (
@@ -236,4 +291,23 @@ export const computeMaxSlugLength = (
 ): number => {
   const effectiveMaxFilenameLength = getEffectiveMaxFilenameLength(options)
   return Math.max(16, effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH)
+}
+
+const normalizeStringList = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+
+  return value.filter(
+    (entry): entry is string =>
+      typeof entry === 'string' && entry.trim().length > 0,
+  )
+}
+
+const toRecord = (value: unknown): Record<string, unknown> | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+
+  return value as Record<string, unknown>
 }
