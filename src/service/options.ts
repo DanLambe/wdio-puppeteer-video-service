@@ -35,6 +35,7 @@ export const resolveServiceConfiguration = (
   const processing = options.processing ?? {}
   const concurrency = options.concurrency ?? {}
   const naming = options.artifacts?.naming ?? {}
+  const allure = options.integrations?.allure
   const profile = options.profile ?? 'default'
   const retain = recording.retain ?? 'failures'
   const platformMaxFilenameLength =
@@ -124,6 +125,16 @@ export const resolveServiceConfiguration = (
     mp4Mode: processing.mp4Mode ?? 'auto',
     transcode,
     mergeSegments,
+    ...(allure
+      ? {
+          allure: {
+            attach: allure.attach ?? 'failures',
+            ...(allure.maxBytes === undefined
+              ? {}
+              : { maxBytes: allure.maxBytes }),
+          },
+        }
+      : {}),
     ...(capture.crop ? { captureCrop: capture.crop } : {}),
     ...(globalRecordingLockDir ? { globalRecordingLockDir } : {}),
     ...(ffmpegPath ? { ffmpegPath } : {}),

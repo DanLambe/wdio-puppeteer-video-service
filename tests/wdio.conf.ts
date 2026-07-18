@@ -91,6 +91,7 @@ export const config: WebdriverIO.Config = {
         },
         processing: {
           format: 'mp4',
+          timing: 'after-test',
           transcode: {
             enabled: true,
           },
@@ -99,11 +100,23 @@ export const config: WebdriverIO.Config = {
             deleteSegments: true,
           },
         },
+        integrations: { allure: { attach: 'retained' } },
       },
     ],
   ],
   framework: 'mocha',
-  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir: resultsDir }]],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,

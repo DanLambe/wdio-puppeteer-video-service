@@ -1,6 +1,8 @@
 import WdioPuppeteerVideoService from './service.js'
 
 export type {
+  AllureAttachmentMode,
+  AllureIntegrationOptions,
   ArtifactNameOverflowStrategy,
   ArtifactNameStyle,
   ArtifactNamingOptions,

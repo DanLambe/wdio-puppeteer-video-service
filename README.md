@@ -19,11 +19,19 @@ Features:
 - Supports retry-only capture and independent artifact retention rules.
 - Provides cross-worker recording limits and crash-tolerant lifecycle cleanup.
 - Uses local, deterministic Mocha, Jasmine, and Cucumber fixtures in CI.
+- Optionally attaches retained recordings to the active Allure test.
 
 ## Installation
 
 ```bash
 npm install wdio-puppeteer-video-service
+```
+
+Install `@wdio/allure-reporter` separately when using the optional Allure
+integration:
+
+```bash
+npm install --save-dev @wdio/allure-reporter
 ```
 
 ## Configuration
@@ -90,6 +98,12 @@ export const config = {
           naming: {
             style: 'test',
             overflow: 'truncate',
+          },
+        },
+        integrations: {
+          allure: {
+            attach: 'failures',
+            maxBytes: 25000000,
           },
         },
         profile: 'default',
@@ -184,8 +198,23 @@ source recordings and removes partial output.
 - `maxLength` (default `180` on Windows and `255` elsewhere).
 - `overflow` (`'truncate' | 'session'`, default `'truncate'`).
 
-`integrations` is intentionally empty until an integration is implemented. An
-unknown integration is rejected instead of being silently ignored.
+`integrations.allure`:
+
+- Presence enables lazy loading of the optional `@wdio/allure-reporter` peer.
+- `attach` (`'failures' | 'retained'`, default `'failures'`) attaches failed-test media only or every retained recording.
+- `maxBytes` optionally skips an individual attachment exceeding the configured byte size.
+- Requires `recording.scope: 'test'` and `processing.timing: 'after-test'`. Spec-scoped and after-worker configurations are rejected before browser startup because the final media would not be available while the correct Allure test is active.
+- Attachment errors warn by default. `failurePolicy: 'error'` raises them only after recording cleanup finishes.
+- Attachments use `video/webm` or `video/mp4` according to the retained file. The normal Allure reporter must also be present in WDIO's `reporters` list.
+
+```typescript
+reporters: [
+  'spec',
+  ['allure', { outputDir: 'allure-results' }],
+]
+```
+
+Unknown integrations are rejected instead of being silently ignored.
 
 ### Recording and Retention Rules
 

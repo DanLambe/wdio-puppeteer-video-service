@@ -71,6 +71,7 @@ export function validateServiceOptions(
   validateConcurrency(root.concurrency)
   validateArtifacts(root.artifacts)
   validateIntegrations(root.integrations)
+  validateIntegrationCompatibility(root)
 }
 
 const validateRecording = (value: unknown): void => {
@@ -353,7 +354,45 @@ const validateIntegrations = (value: unknown): void => {
     return
   }
 
-  assertKnownOptions(integrations, 'integrations', [])
+  assertKnownOptions(integrations, 'integrations', ['allure'])
+  const allure = readOptionalOptionObject(
+    integrations.allure,
+    'integrations.allure',
+  )
+  if (!allure) {
+    return
+  }
+
+  assertKnownOptions(allure, 'integrations.allure', ['attach', 'maxBytes'])
+  assertOptionalEnum(allure.attach, 'integrations.allure.attach', [
+    'failures',
+    'retained',
+  ])
+  assertOptionalInteger(allure.maxBytes, 'integrations.allure.maxBytes', 1)
+}
+
+const validateIntegrationCompatibility = (root: OptionRecord): void => {
+  const integrations = root.integrations as OptionRecord | undefined
+  if (integrations?.allure === undefined) {
+    return
+  }
+
+  const recording = root.recording as OptionRecord | undefined
+  if (recording?.scope === 'spec') {
+    throw new TypeError(
+      '[WdioPuppeteerVideoService] integrations.allure requires recording.scope to be "test" so attachments are associated with the active Allure test.',
+    )
+  }
+
+  const processing = root.processing as OptionRecord | undefined
+  const profile = root.profile ?? 'default'
+  const timing =
+    processing?.timing ?? (profile === 'ci' ? 'after-worker' : 'after-test')
+  if (timing !== 'after-test') {
+    throw new TypeError(
+      '[WdioPuppeteerVideoService] integrations.allure requires processing.timing to be "after-test" so final media exists while the Allure test is active.',
+    )
+  }
 }
 
 const assertKnownRootOptions = (options: OptionRecord): void => {

@@ -35,6 +35,7 @@ const options = {
     maxPostProcessesGlobal: 1,
   },
   artifacts: { naming: { style: 'test' } },
+  integrations: { allure: { attach: 'failures', maxBytes: 25_000_000 } },
   profile: 'default',
   failurePolicy: 'warn',
 } satisfies WdioPuppeteerVideoServiceOptions

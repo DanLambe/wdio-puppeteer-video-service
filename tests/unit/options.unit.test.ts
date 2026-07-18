@@ -71,6 +71,20 @@ describe('service option resolution', () => {
     })
   })
 
+  it('resolves Allure defaults without loading the optional peer', () => {
+    expect(
+      resolveServiceConfiguration({ integrations: { allure: {} } }).options
+        .allure,
+    ).toEqual({ attach: 'failures' })
+    expect(
+      resolveServiceConfiguration({
+        integrations: {
+          allure: { attach: 'retained', maxBytes: 42 },
+        },
+      }).options.allure,
+    ).toEqual({ attach: 'retained', maxBytes: 42 })
+  })
+
   it('applies CI defaults, pinned logging, and explicit grouped overrides', () => {
     const defaults = resolveServiceConfiguration({ profile: 'ci' })
     expect(defaults.options).toMatchObject({
@@ -281,12 +295,41 @@ describe('service option resolution', () => {
       'concurrency.postProcessStartMode',
     ],
     [{ processing: { timing: 'deferred' } }, 'processing.timing'],
-    [{ integrations: { allure: {} } }, 'integrations.allure'],
+    [
+      { integrations: { allure: { attach: 'all' } } },
+      'integrations.allure.attach',
+    ],
+    [
+      { integrations: { allure: { maxBytes: 0 } } },
+      'integrations.allure.maxBytes',
+    ],
   ])('rejects invalid runtime configuration %#', (value, expectedPath) => {
     expect(() =>
       resolveServiceConfiguration(
         value as unknown as WdioPuppeteerVideoServiceOptions,
       ),
     ).toThrow(expectedPath)
+  })
+
+  it.each([
+    [
+      { integrations: { allure: {} }, recording: { scope: 'spec' } },
+      'recording.scope to be "test"',
+    ],
+    [
+      {
+        integrations: { allure: {} },
+        processing: { timing: 'after-worker' },
+      },
+      'processing.timing to be "after-test"',
+    ],
+    [
+      { integrations: { allure: {} }, profile: 'ci' },
+      'processing.timing to be "after-test"',
+    ],
+  ])('rejects incompatible Allure configuration %#', (value, message) => {
+    expect(() =>
+      resolveServiceConfiguration(value as WdioPuppeteerVideoServiceOptions),
+    ).toThrow(message)
   })
 })

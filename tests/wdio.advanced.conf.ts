@@ -155,6 +155,7 @@ const defaultServiceOptions: ServiceOptions = {
   },
   processing: {
     format: 'mp4',
+    timing: 'after-test',
     transcode: {
       enabled: true,
     },
@@ -206,9 +207,11 @@ const createServiceOptions = (overrides: ServiceOptions): ServiceOptions => {
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
+    integrations: { allure: { attach: 'retained' } },
   }),
   'spec-file-retry': createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
+    integrations: { allure: { attach: 'retained' } },
   }),
   'spec-level': createServiceOptions({
     recording: { scope: 'spec' },
@@ -244,6 +247,7 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   }),
   retention: createServiceOptions({
     recording: { retain: 'failures' },
+    integrations: { allure: {} },
   }),
   'global-concurrency': createServiceOptions({
     concurrency: {
@@ -506,7 +510,18 @@ export const config: WebdriverIO.Config = {
   specFileRetriesDeferred: false,
   services: [[WdioPuppeteerVideoService, serviceOptionsByMode[mode]]],
   framework: 'mocha',
-  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir: resultsDir }]],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,

@@ -12,6 +12,7 @@ import type {
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import { generateVideoReportForRun } from './reporter/report-generator.js'
+import { AllureVideoIntegration } from './service/allure-integration.js'
 import * as artifactIntegrity from './service/artifact-integrity.js'
 import * as capture from './service/capture.js'
 import {
@@ -141,6 +142,7 @@ export default class WdioPuppeteerVideoService
   private _manifestRunContext: ManifestRunContext | undefined
   private _manifestRecorder: ManifestWorkerRecorder | undefined
   private _manifestCaptureDimensions: ManifestCaptureDimensions | undefined
+  private readonly _allureIntegration: AllureVideoIntegration | undefined
 
   constructor(options: WdioPuppeteerVideoServiceOptions = {}) {
     const resolvedConfiguration = resolveServiceConfiguration(options)
@@ -148,6 +150,14 @@ export default class WdioPuppeteerVideoService
     this._logLevel = resolvedConfiguration.logLevel
     this._maxSlugLength = resolvedConfiguration.maxSlugLength
     this._options = resolvedConfiguration.options
+    this._allureIntegration = this._options.allure
+      ? new AllureVideoIntegration(
+          this._options.allure,
+          (level, message, details) => {
+            this._log(level, message, details)
+          },
+        )
+      : undefined
     this._recordingSlotScheduler = new RecordingSlotScheduler(
       this._options,
       (level, message, details) => {
@@ -1393,6 +1403,7 @@ export default class WdioPuppeteerVideoService
     }
 
     let keepArtifacts = false
+    let allureError: Error | undefined
     const deferredTaskCount = this._deferredPostProcessTasks.length
     try {
       await this._recordingLifecycle.finalize({
@@ -1446,6 +1457,11 @@ export default class WdioPuppeteerVideoService
             ? { processingOperation: 'transcode' as const }
             : {}),
       })
+      const allureResult = await this._allureIntegration?.attachRetainedVideos(
+        paths,
+        passed,
+      )
+      allureError = allureResult?.error
     } catch (error) {
       await this._manifestRecorder?.completeCurrent({
         decision: 'failed',
@@ -1457,6 +1473,10 @@ export default class WdioPuppeteerVideoService
       throw error
     } finally {
       await this._resetTestState()
+    }
+
+    if (allureError && this._options.failurePolicy === 'error') {
+      throw allureError
     }
   }
 

@@ -49,7 +49,12 @@ const validOptions = {
       overflow: 'truncate',
     },
   },
-  integrations: {},
+  integrations: {
+    allure: {
+      attach: 'retained',
+      maxBytes: 25_000_000,
+    },
+  },
   profile: 'ci',
   logLevel: 'warn',
   failurePolicy: 'error',
@@ -76,14 +81,16 @@ const unknownNestedOption = {
   },
 } satisfies WdioPuppeteerVideoServiceOptions
 
-const unavailableIntegration = {
+const invalidAllureMode = {
   integrations: {
-    // @ts-expect-error Integrations are added only when their implementation ships.
-    allure: {},
+    allure: {
+      // @ts-expect-error Allure attachments are failures-only or retained.
+      attach: 'all',
+    },
   },
 } satisfies WdioPuppeteerVideoServiceOptions
 
 void removedBetaOption
 void invalidRecordingScope
 void unknownNestedOption
-void unavailableIntegration
+void invalidAllureMode

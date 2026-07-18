@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -118,6 +119,18 @@ const runMode = async (
       expectedTitles: [retryTitle],
       expectRetryOutcomes: true,
       runLabel: `advanced-${mode}`,
+    })
+  }
+
+  if (mode === 'retry' || mode === 'spec-file-retry' || mode === 'retention') {
+    await assertAllureVideoAttachments({
+      resultsDir,
+      expectedTitles: [
+        mode === 'retention'
+          ? 'should retain an intentionally failed recording'
+          : retryTitle,
+      ],
+      runLabel: `advanced-${mode}-allure`,
     })
   }
 

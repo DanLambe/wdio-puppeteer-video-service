@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -77,6 +78,15 @@ const runWdioFramework = async (
         : 'cucumber style should keep scenario name in video filename',
     ],
     runLabel: framework,
+  })
+  await assertAllureVideoAttachments({
+    resultsDir,
+    expectedTitles: [
+      framework === 'jasmine'
+        ? 'jasmine style should keep test name in video filename'
+        : 'cucumber style should keep scenario name in video filename',
+    ],
+    runLabel: `${framework}-allure`,
   })
 
   console.log(`[e2e:frameworks] Completed ${framework} run.`)

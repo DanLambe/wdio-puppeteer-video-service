@@ -52,6 +52,7 @@ export const config: WebdriverIO.Config = {
         },
         processing: {
           format: 'mp4',
+          timing: 'after-test',
           transcode: {
             enabled: true,
           },
@@ -59,11 +60,23 @@ export const config: WebdriverIO.Config = {
             enabled: false,
           },
         },
+        integrations: { allure: { attach: 'retained' } },
       },
     ],
   ],
   framework: 'jasmine',
-  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir: resultsDir }]],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   jasmineOpts: {
     defaultTimeoutInterval: 60000,
   },

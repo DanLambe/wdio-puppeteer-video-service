@@ -16,6 +16,7 @@ export type ArtifactNameStyle =
   | 'test-full'
   | 'session'
   | 'session-full'
+export type AllureAttachmentMode = 'failures' | 'retained'
 
 export interface RecordingFilterOptions {
   includeSpecs?: string[]
@@ -131,8 +132,17 @@ export interface ArtifactOptions {
   naming?: ArtifactNamingOptions
 }
 
-/** Reserved for optional, explicitly supported integrations. */
-export type IntegrationOptions = Record<string, never>
+export interface AllureIntegrationOptions {
+  /** Attach only failed-test videos or every retained video. @default 'failures' */
+  attach?: AllureAttachmentMode
+  /** Skip an individual video attachment when its size exceeds this limit. */
+  maxBytes?: number
+}
+
+export interface IntegrationOptions {
+  /** Enables lazy integration with an installed `@wdio/allure-reporter`. */
+  allure?: AllureIntegrationOptions
+}
 
 export interface WdioPuppeteerVideoServiceOptions {
   /** @default 'videos' */
@@ -194,6 +204,8 @@ export interface ResolvedWdioPuppeteerVideoServiceOptions {
   mp4Mode: Mp4Mode
   transcode: ProcessingTranscodeOptions
   mergeSegments: ProcessingMergeOptions
+  allure?: Required<Pick<AllureIntegrationOptions, 'attach'>> &
+    Pick<AllureIntegrationOptions, 'maxBytes'>
 }
 
 export type InternalArtifactNameStyle =
