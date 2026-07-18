@@ -1816,6 +1816,54 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._deferredPostProcessTasks).toHaveLength(0)
   })
 
+  it('drains deferred work after a task fails and rethrows the first failure', async () => {
+    const service = new WdioPuppeteerVideoService({
+      postProcessMode: 'deferred',
+    }) as unknown as {
+      _deferredPostProcessTasks: Array<{
+        kind: 'transcode'
+        inputPath: string
+        outputPath: string
+        deleteOriginal: boolean
+      }>
+      _executeDeferredTranscodeTask: (task: {
+        kind: 'transcode'
+        inputPath: string
+      }) => Promise<void>
+      _flushDeferredPostProcessTasks: () => Promise<void>
+      _log: (level: string, message: string) => void
+    }
+    const callOrder: string[] = []
+    service._log = () => {}
+    service._executeDeferredTranscodeTask = async (task) => {
+      callOrder.push(task.inputPath)
+      if (task.inputPath === 'first.webm') {
+        throw new Error('first deferred failure')
+      }
+      throw new Error('second deferred failure')
+    }
+    service._deferredPostProcessTasks.push(
+      {
+        kind: 'transcode',
+        inputPath: 'first.webm',
+        outputPath: 'first.mp4',
+        deleteOriginal: true,
+      },
+      {
+        kind: 'transcode',
+        inputPath: 'second.webm',
+        outputPath: 'second.mp4',
+        deleteOriginal: true,
+      },
+    )
+
+    await expect(service._flushDeferredPostProcessTasks()).rejects.toThrow(
+      'first deferred failure',
+    )
+    expect(callOrder).toEqual(['first.webm', 'second.webm'])
+    expect(service._deferredPostProcessTasks).toHaveLength(0)
+  })
+
   it('executeDeferredTranscodeTask skips missing inputs and deletes originals after success', async () => {
     await withTempDir(async (tempDir) => {
       const inputPath = path.join(tempDir, 'input.webm')

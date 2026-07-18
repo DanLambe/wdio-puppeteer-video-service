@@ -347,6 +347,28 @@ describe('WdioPuppeteerVideoService lifecycle', () => {
     expect(resetTestState).toHaveBeenCalledOnce()
   })
 
+  it('clears a rejected teardown task so a later hook can retry cleanup', async () => {
+    const service = new WdioPuppeteerVideoService({
+      failurePolicy: 'error',
+      logLevel: 'silent',
+    }) as unknown as {
+      _flushDeferredPostProcessTasks: () => Promise<void>
+      _teardownTask: Promise<void> | undefined
+      after: () => Promise<void>
+    }
+    const flushDeferredPostProcessTasks = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('first teardown failed'))
+      .mockResolvedValue(undefined)
+    service._flushDeferredPostProcessTasks = flushDeferredPostProcessTasks
+
+    await expect(service.after()).rejects.toThrow('first teardown failed')
+    expect(service._teardownTask).toBeUndefined()
+
+    await expect(service.after()).resolves.toBeUndefined()
+    expect(flushDeferredPostProcessTasks).toHaveBeenCalledTimes(2)
+  })
+
   it('routes Cucumber teardown through the shared finalizer', async () => {
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _afterTestOrScenario: (passed: boolean) => Promise<void>

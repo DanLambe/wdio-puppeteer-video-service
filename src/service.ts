@@ -741,8 +741,9 @@ export default class WdioPuppeteerVideoService
       }
     })
     this._teardownTask = task
-    await task
-    if (this._teardownTask === task) {
+    try {
+      await task
+    } finally {
       this._teardownTask = undefined
     }
   }
@@ -2181,18 +2182,32 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Processing ${this._deferredPostProcessTasks.length} deferred post-processing task(s).`,
     )
 
+    let firstFailure: { error: unknown } | undefined
     while (this._deferredPostProcessTasks.length > 0) {
       const nextTask = this._deferredPostProcessTasks.shift()
       if (!nextTask) {
         break
       }
 
-      if (nextTask.kind === 'merge') {
-        await this._executeDeferredMergeTask(nextTask)
-        continue
-      }
+      try {
+        if (nextTask.kind === 'merge') {
+          await this._executeDeferredMergeTask(nextTask)
+          continue
+        }
 
-      await this._executeDeferredTranscodeTask(nextTask)
+        await this._executeDeferredTranscodeTask(nextTask)
+      } catch (error) {
+        firstFailure ??= { error }
+        this._log(
+          'error',
+          `[WdioPuppeteerVideoService] Deferred ${nextTask.kind} task failed:`,
+          error,
+        )
+      }
+    }
+
+    if (firstFailure) {
+      throw firstFailure.error
     }
   }
 

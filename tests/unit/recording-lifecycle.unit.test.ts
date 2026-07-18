@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { RecordingLifecycle } from '../../src/service/recording-lifecycle.js'
+import {
+  type RecordingFinalizeOperations,
+  RecordingLifecycle,
+  type RecordingStopOperations,
+} from '../../src/service/recording-lifecycle.js'
 
 const createDeferred = <T>() => {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -71,6 +75,28 @@ describe('RecordingLifecycle', () => {
     expect(lifecycle.state).toBe('recording')
   })
 
+  it('deduplicates synchronous start re-entry and converts throws to rejections', async () => {
+    const lifecycle = new RecordingLifecycle()
+    const nestedOperation = vi.fn(async () => true)
+    let nestedStart: Promise<boolean> | undefined
+
+    const firstStart = lifecycle.start(async () => {
+      nestedStart = lifecycle.start(nestedOperation)
+      return true
+    })
+
+    await expect(firstStart).resolves.toBe(true)
+    expect(nestedStart).toBe(firstStart)
+    expect(nestedOperation).not.toHaveBeenCalled()
+
+    await lifecycle.reset(async () => {})
+    const throwingStart = lifecycle.start(() => {
+      throw new Error('synchronous start failure')
+    })
+    await expect(throwingStart).rejects.toThrow('synchronous start failure')
+    expect(lifecycle.state).toBe('failed')
+  })
+
   it('rejects starts while recording, stopping, or processing', async () => {
     const lifecycle = new RecordingLifecycle()
     await lifecycle.start(async () => true)
@@ -83,6 +109,7 @@ describe('RecordingLifecycle', () => {
       stopCapture: () => stopDeferred.promise,
       processCapture: async () => {},
     })
+    await Promise.resolve()
     expect(lifecycle.state).toBe('stopping')
     await expect(lifecycle.start(async () => true)).resolves.toBe(false)
     stopDeferred.resolve()
@@ -93,6 +120,8 @@ describe('RecordingLifecycle', () => {
       stopRecording: async () => {},
       processArtifacts: () => processDeferred.promise,
     })
+    await expect(lifecycle.start(async () => true)).resolves.toBe(false)
+    await Promise.resolve()
     await Promise.resolve()
     expect(lifecycle.state).toBe('processing')
     await expect(lifecycle.start(async () => true)).resolves.toBe(false)
@@ -212,6 +241,43 @@ describe('RecordingLifecycle', () => {
     expect(stopCapture).toHaveBeenCalledOnce()
     expect(operations.processCapture).not.toHaveBeenCalled()
     expect(lifecycle.state).toBe('failed')
+  })
+
+  it('deduplicates synchronous stop, finalize, and reset re-entry', async () => {
+    const lifecycle = new RecordingLifecycle()
+    await lifecycle.start(async () => true)
+    let nestedStop: Promise<void> | undefined
+    const stopOperations: RecordingStopOperations = {
+      hasWork: () => {
+        nestedStop = lifecycle.stop(stopOperations)
+        return false
+      },
+      stopCapture: vi.fn(async () => {}),
+      processCapture: vi.fn(async () => {}),
+    }
+    const firstStop = lifecycle.stop(stopOperations)
+    await firstStop
+    expect(nestedStop).toBe(firstStop)
+
+    let nestedFinalize: Promise<void> | undefined
+    const finalizeOperations: RecordingFinalizeOperations = {
+      stopRecording: async () => {
+        nestedFinalize = lifecycle.finalize(finalizeOperations)
+      },
+      processArtifacts: vi.fn(async () => {}),
+    }
+    const firstFinalize = lifecycle.finalize(finalizeOperations)
+    await firstFinalize
+    expect(nestedFinalize).toBe(firstFinalize)
+    expect(lifecycle.state).toBe('completed')
+
+    let nestedReset: Promise<void> | undefined
+    const firstReset = lifecycle.reset(async () => {
+      nestedReset = lifecycle.reset(async () => {})
+    })
+    await firstReset
+    expect(nestedReset).toBe(firstReset)
+    expect(lifecycle.state).toBe('idle')
   })
 
   it('records processing failures', async () => {

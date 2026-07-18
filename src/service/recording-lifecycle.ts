@@ -37,6 +37,10 @@ export class RecordingLifecycle {
 
   get isBusy(): boolean {
     return (
+      this.startTask !== undefined ||
+      this.stopTask !== undefined ||
+      this.finalizeTask !== undefined ||
+      this.resetTask !== undefined ||
       this.currentState === 'preparing' ||
       this.currentState === 'recording' ||
       this.currentState === 'stopping' ||
@@ -50,6 +54,9 @@ export class RecordingLifecycle {
     }
 
     if (
+      this.stopTask ||
+      this.finalizeTask ||
+      this.resetTask ||
       this.currentState === 'recording' ||
       this.currentState === 'stopping' ||
       this.currentState === 'processing'
@@ -58,7 +65,8 @@ export class RecordingLifecycle {
     }
 
     this.currentState = 'preparing'
-    const task = operation()
+    const task = Promise.resolve()
+      .then(operation)
       .then((started) => {
         this.currentState = started ? 'recording' : 'failed'
         return started
@@ -68,9 +76,7 @@ export class RecordingLifecycle {
         throw error
       })
       .finally(() => {
-        if (this.startTask === task) {
-          this.startTask = undefined
-        }
+        this.startTask = undefined
       })
     this.startTask = task
     return task
@@ -81,11 +87,11 @@ export class RecordingLifecycle {
       return this.stopTask
     }
 
-    const task = this.runStop(operations).finally(() => {
-      if (this.stopTask === task) {
+    const task = Promise.resolve()
+      .then(() => this.runStop(operations))
+      .finally(() => {
         this.stopTask = undefined
-      }
-    })
+      })
     this.stopTask = task
     return task
   }
@@ -95,11 +101,11 @@ export class RecordingLifecycle {
       return this.finalizeTask
     }
 
-    const task = this.runFinalize(operations).finally(() => {
-      if (this.finalizeTask === task) {
+    const task = Promise.resolve()
+      .then(() => this.runFinalize(operations))
+      .finally(() => {
         this.finalizeTask = undefined
-      }
-    })
+      })
     this.finalizeTask = task
     return task
   }
@@ -109,14 +115,13 @@ export class RecordingLifecycle {
       return this.resetTask
     }
 
-    const task = operation()
+    const task = Promise.resolve()
+      .then(operation)
       .finally(() => {
         this.currentState = 'idle'
       })
       .finally(() => {
-        if (this.resetTask === task) {
-          this.resetTask = undefined
-        }
+        this.resetTask = undefined
       })
     this.resetTask = task
     return task
@@ -150,6 +155,7 @@ export class RecordingLifecycle {
   private async runFinalize(
     operations: RecordingFinalizeOperations,
   ): Promise<void> {
+    this.currentState = 'stopping'
     try {
       await operations.stopRecording()
       this.currentState = 'processing'
