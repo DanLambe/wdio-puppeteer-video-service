@@ -22,6 +22,7 @@ import {
   type VideoManifestV1,
   validateVideoManifest,
 } from '../manifest.js'
+import { nodeProcess } from './boundaries.js'
 
 const require = createRequire(import.meta.url)
 const MANIFEST_WORK_DIR = '.wdio-video-manifest'
@@ -30,6 +31,13 @@ const MANIFEST_LOCK_FILE = '.wdio-video-manifest.lock'
 const MANIFEST_LOCK_TIMEOUT_MS = 30_000
 const MANIFEST_LOCK_STALE_MS = 120_000
 const MANIFEST_LOCK_POLL_MS = 25
+const ignoreFileError = (): undefined => undefined
+
+interface ManifestLockMetadata {
+  createdAt: number
+  ownerId?: string
+  pid: number
+}
 
 export const MANIFEST_RUN_CONFIG_KEY =
   'wdioPuppeteerVideoServiceManifestRun' as const
@@ -579,11 +587,11 @@ export const aggregateManifestRun = async (
     await fs.rm(getRunDir(context), { recursive: true, force: true })
     await fs
       .rmdir(path.join(context.outputDir, MANIFEST_WORK_DIR))
-      .catch(() => undefined)
+      .catch(ignoreFileError)
     return manifest
   } finally {
     if (temporaryPath) {
-      await fs.unlink(temporaryPath).catch(() => undefined)
+      await fs.unlink(temporaryPath).catch(ignoreFileError)
     }
     await release()
   }
@@ -788,20 +796,33 @@ const acquireManifestLock = async (
   while (Date.now() < deadline) {
     try {
       const handle = await fs.open(lockPath, 'wx')
-      await handle.writeFile(
-        JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
-        'utf8',
-      )
+      const ownerId = randomUUID()
+      try {
+        await handle.writeFile(
+          JSON.stringify({
+            ownerId,
+            pid: nodeProcess.pid,
+            createdAt: Date.now(),
+          }),
+          'utf8',
+        )
+      } catch (error) {
+        await handle.close().catch(ignoreFileError)
+        await fs.unlink(lockPath).catch(ignoreFileError)
+        throw error
+      }
       await handle.close()
       return async () => {
-        await fs.unlink(lockPath).catch(() => undefined)
+        const metadata = await readManifestLockMetadata(lockPath)
+        if (metadata?.ownerId === ownerId) {
+          await fs.unlink(lockPath).catch(ignoreFileError)
+        }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error
       }
-      if (await isManifestLockStale(lockPath)) {
-        await fs.unlink(lockPath).catch(() => undefined)
+      if (await cleanupStaleManifestLock(lockPath)) {
         continue
       }
       await delay(MANIFEST_LOCK_POLL_MS)
@@ -810,33 +831,60 @@ const acquireManifestLock = async (
   throw new Error(`Timed out waiting for manifest lock: ${lockPath}`)
 }
 
-const isManifestLockStale = async (lockPath: string): Promise<boolean> => {
-  const metadata = await fs
-    .readFile(lockPath, 'utf8')
-    .then(
-      (value) => JSON.parse(value) as { pid?: unknown; createdAt?: unknown },
-    )
-    .catch(() => undefined)
-  if (
-    !metadata ||
-    typeof metadata.pid !== 'number' ||
-    typeof metadata.createdAt !== 'number'
-  ) {
-    return true
+const readManifestLockMetadata = async (
+  lockPath: string,
+): Promise<ManifestLockMetadata | undefined> => {
+  try {
+    const value = JSON.parse(
+      await fs.readFile(lockPath, 'utf8'),
+    ) as Partial<ManifestLockMetadata>
+    if (
+      typeof value.createdAt !== 'number' ||
+      !Number.isFinite(value.createdAt) ||
+      (value.ownerId !== undefined &&
+        (typeof value.ownerId !== 'string' || !value.ownerId)) ||
+      typeof value.pid !== 'number' ||
+      !Number.isInteger(value.pid) ||
+      value.pid <= 0
+    ) {
+      return undefined
+    }
+    return value as ManifestLockMetadata
+  } catch {
+    return undefined
   }
-  return (
-    Date.now() - metadata.createdAt > MANIFEST_LOCK_STALE_MS ||
-    !isProcessAlive(metadata.pid)
-  )
 }
 
-const isProcessAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
+const cleanupStaleManifestLock = async (lockPath: string): Promise<boolean> => {
+  const [contents, stats] = await Promise.all([
+    fs.readFile(lockPath, 'utf8').catch(ignoreFileError),
+    fs.stat(lockPath).catch(ignoreFileError),
+  ])
+  if (contents === undefined || !stats) {
     return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
   }
+  const metadata = await readManifestLockMetadata(lockPath)
+  const stale = metadata
+    ? !nodeProcess.isAlive(metadata.pid)
+    : Date.now() - stats.mtimeMs > MANIFEST_LOCK_STALE_MS
+  if (!stale) {
+    return false
+  }
+
+  const [currentContents, currentStats] = await Promise.all([
+    fs.readFile(lockPath, 'utf8').catch(ignoreFileError),
+    fs.stat(lockPath).catch(ignoreFileError),
+  ])
+  if (
+    currentContents !== contents ||
+    !currentStats ||
+    currentStats.ino !== stats.ino ||
+    currentStats.mtimeMs !== stats.mtimeMs
+  ) {
+    return false
+  }
+  await fs.unlink(lockPath).catch(ignoreFileError)
+  return !(await fs.stat(lockPath).catch(ignoreFileError))
 }
 
 const readPackageVersion = (packageName: string): string => {

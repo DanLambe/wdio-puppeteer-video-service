@@ -6,9 +6,12 @@ import { nodeProcess } from './boundaries.js'
 import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from './constants.js'
 
 const RESERVATION_SUFFIX = '.wdio-reserve'
+const ignoreFileError = (): undefined => undefined
+const emptyTextOnFileError = (): string => ''
 
 interface ArtifactReservationMetadata {
   createdAt: number
+  ownerId?: string
   outputPath: string
   pid: number
   temporaryPath: string
@@ -57,6 +60,7 @@ export const publishAtomicArtifact = async (
     return undefined
   }
 
+  let published = false
   try {
     const produced = await options.produce(reservation.temporaryPath)
     if (!produced) {
@@ -82,7 +86,20 @@ export const publishAtomicArtifact = async (
       return undefined
     }
 
+    if (
+      !(await isArtifactReservationOwner(
+        reservation.reservationPath,
+        reservation.ownerId,
+      ))
+    ) {
+      options.warn(
+        `[WdioPuppeteerVideoService] Refusing to publish an artifact after reservation ownership changed: ${reservation.outputPath}`,
+      )
+      return undefined
+    }
+
     await fs.rename(reservation.temporaryPath, reservation.outputPath)
+    published = true
     return reservation.outputPath
   } catch (error) {
     options.warn(
@@ -90,12 +107,15 @@ export const publishAtomicArtifact = async (
     )
     return undefined
   } finally {
-    await fs.unlink(reservation.temporaryPath).catch(() => {
-      /* already published or best-effort partial-output cleanup */
-    })
-    await fs.unlink(reservation.reservationPath).catch(() => {
-      /* best-effort reservation cleanup */
-    })
+    if (!published) {
+      await fs.unlink(reservation.temporaryPath).catch(() => {
+        /* best-effort partial-output cleanup */
+      })
+    }
+    await releaseArtifactReservation(
+      reservation.reservationPath,
+      reservation.ownerId,
+    )
   }
 }
 
@@ -104,6 +124,7 @@ const acquireArtifactReservation = async (
   processBoundary: ProcessBoundary,
 ): Promise<{
   outputPath: string
+  ownerId: string
   reservationPath: string
   temporaryPath: string
 }> => {
@@ -115,12 +136,17 @@ const acquireArtifactReservation = async (
     }
 
     const reservationPath = `${outputPath}${RESERVATION_SUFFIX}`
-    const temporaryPath = createTemporaryArtifactPath(outputPath)
+    const temporaryPath = createTemporaryArtifactPath(
+      outputPath,
+      processBoundary.pid,
+    )
+    const ownerId = randomUUID()
     let fileHandle: Awaited<ReturnType<typeof fs.open>> | undefined
     try {
       fileHandle = await fs.open(reservationPath, 'wx')
       const metadata: ArtifactReservationMetadata = {
         createdAt: Date.now(),
+        ownerId,
         outputPath,
         pid: processBoundary.pid,
         temporaryPath,
@@ -128,7 +154,7 @@ const acquireArtifactReservation = async (
       await fileHandle.writeFile(JSON.stringify(metadata), 'utf8')
       await fileHandle.close()
       fileHandle = undefined
-      return { outputPath, reservationPath, temporaryPath }
+      return { outputPath, ownerId, reservationPath, temporaryPath }
     } catch (error) {
       await fileHandle?.close().catch(() => {
         /* best-effort failed-reservation close */
@@ -156,8 +182,8 @@ const cleanupStaleReservation = async (
   processBoundary: ProcessBoundary,
 ): Promise<boolean> => {
   const [contents, stats] = await Promise.all([
-    fs.readFile(reservationPath, 'utf8').catch(() => ''),
-    fs.stat(reservationPath).catch(() => undefined),
+    fs.readFile(reservationPath, 'utf8').catch(emptyTextOnFileError),
+    fs.stat(reservationPath).catch(ignoreFileError),
   ])
   if (!stats) {
     return true
@@ -184,13 +210,40 @@ const cleanupStaleReservation = async (
     metadata &&
     isTemporaryPathForOutput(metadata.temporaryPath, reservedOutputPath)
   ) {
+    if (metadata.ownerId) {
+      const currentMetadata = await readReservationMetadata(reservationPath)
+      if (currentMetadata?.ownerId !== metadata.ownerId) {
+        return false
+      }
+      await fs.unlink(metadata.temporaryPath).catch(() => {
+        /* best-effort abandoned temporary-output cleanup */
+      })
+      return releaseArtifactReservation(reservationPath, metadata.ownerId)
+    }
+  }
+
+  const [currentContents, currentStats] = await Promise.all([
+    fs.readFile(reservationPath, 'utf8').catch(ignoreFileError),
+    fs.stat(reservationPath).catch(ignoreFileError),
+  ])
+  if (
+    currentContents !== contents ||
+    !currentStats ||
+    currentStats.ino !== stats.ino ||
+    currentStats.mtimeMs !== stats.mtimeMs
+  ) {
+    return false
+  }
+  if (
+    ownsReservation &&
+    metadata &&
+    isTemporaryPathForOutput(metadata.temporaryPath, reservedOutputPath)
+  ) {
     await fs.unlink(metadata.temporaryPath).catch(() => {
-      /* best-effort abandoned temporary-output cleanup */
+      /* best-effort abandoned legacy temporary-output cleanup */
     })
   }
-  await fs.unlink(reservationPath).catch(() => {
-    /* another worker may have recovered it */
-  })
+  await fs.unlink(reservationPath).catch(ignoreFileError)
   return !(await pathExists(reservationPath))
 }
 
@@ -214,6 +267,8 @@ const parseReservationMetadata = (
     const value = JSON.parse(contents) as Partial<ArtifactReservationMetadata>
     if (
       typeof value.createdAt !== 'number' ||
+      (value.ownerId !== undefined &&
+        (typeof value.ownerId !== 'string' || !value.ownerId)) ||
       typeof value.outputPath !== 'string' ||
       typeof value.pid !== 'number' ||
       typeof value.temporaryPath !== 'string'
@@ -226,12 +281,43 @@ const parseReservationMetadata = (
   }
 }
 
-const createTemporaryArtifactPath = (outputPath: string): string => {
+const createTemporaryArtifactPath = (
+  outputPath: string,
+  processId: number,
+): string => {
   const parsed = path.parse(outputPath)
   return path.join(
     parsed.dir,
-    `.${parsed.name}.wdio-${process.pid.toString()}-${randomUUID()}${parsed.ext}`,
+    `.${parsed.name}.wdio-${processId.toString()}-${randomUUID()}${parsed.ext}`,
   )
+}
+
+const readReservationMetadata = async (
+  reservationPath: string,
+): Promise<ArtifactReservationMetadata | undefined> => {
+  const contents = await fs
+    .readFile(reservationPath, 'utf8')
+    .catch(ignoreFileError)
+  return contents === undefined ? undefined : parseReservationMetadata(contents)
+}
+
+const releaseArtifactReservation = async (
+  reservationPath: string,
+  ownerId: string,
+): Promise<boolean> => {
+  if (!(await isArtifactReservationOwner(reservationPath, ownerId))) {
+    return false
+  }
+  await fs.unlink(reservationPath).catch(ignoreFileError)
+  return !(await pathExists(reservationPath))
+}
+
+const isArtifactReservationOwner = async (
+  reservationPath: string,
+  ownerId: string,
+): Promise<boolean> => {
+  const metadata = await readReservationMetadata(reservationPath)
+  return metadata?.ownerId === ownerId
 }
 
 const getCollisionPath = (

@@ -60,6 +60,7 @@ export const extractPidFromSlotFile = (
 }
 
 export interface GlobalRecordingSlotMetadata {
+  ownerId?: string
   pid?: number
   startedAt?: number
   lastUpdatedAt?: number
@@ -75,10 +76,12 @@ export const parseGlobalRecordingSlotMetadata = (
   try {
     const parsed = JSON.parse(fileContents) as Record<string, unknown>
     const pid = toPositiveInteger(parsed.pid)
+    const ownerId = toNonEmptyString(parsed.ownerId)
     const startedAt = toPositiveInteger(parsed.startedAt)
     const lastUpdatedAt = toPositiveInteger(parsed.lastUpdatedAt)
 
     return {
+      ...(ownerId === undefined ? {} : { ownerId }),
       ...(pid === undefined ? {} : { pid }),
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(lastUpdatedAt === undefined ? {} : { lastUpdatedAt }),

@@ -14,7 +14,10 @@ export interface ClockBoundary {
 }
 
 export interface FileStatsBoundary {
+  birthtimeMs?: number
+  ino?: number
   mtimeMs: number
+  size?: number
 }
 
 export interface FileSystemBoundary {

@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -575,6 +576,31 @@ describe('manifest runtime', () => {
     ).toEqual(expect.arrayContaining([first.runId, second.runId]))
   })
 
+  it('does not remove a replacement manifest lock during release', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const lockPath = path.join(outputDir, '.wdio-video-manifest.lock')
+    const rename = fs.rename.bind(fs)
+    vi.spyOn(fs, 'rename').mockImplementationOnce(async (oldPath, newPath) => {
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          createdAt: Date.now(),
+          ownerId: 'replacement-owner',
+          pid: process.pid,
+        }),
+        'utf8',
+      )
+      await rename(oldPath, newPath)
+    })
+
+    await aggregateManifestRun(context, 0)
+
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toContain(
+      'replacement-owner',
+    )
+  })
+
   it('aggregates an empty run after its journal directory is lost', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
@@ -592,7 +618,10 @@ describe('manifest runtime', () => {
     const lockPath = path.join(outputDir, '.wdio-video-manifest.lock')
     await fs.writeFile(
       lockPath,
-      JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+      JSON.stringify({
+        pid: process.pid,
+        createdAt: Date.now() - 300_000,
+      }),
       'utf8',
     )
     const releaseTimer = setTimeout(() => {
@@ -609,11 +638,10 @@ describe('manifest runtime', () => {
   it('recovers a stale lock and refuses to overwrite an invalid manifest', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
-    await fs.writeFile(
-      path.join(outputDir, '.wdio-video-manifest.lock'),
-      '{invalid',
-      'utf8',
-    )
+    const staleLockPath = path.join(outputDir, '.wdio-video-manifest.lock')
+    await fs.writeFile(staleLockPath, '{invalid', 'utf8')
+    const staleTime = new Date(Date.now() - 300_000)
+    await fs.utimes(staleLockPath, staleTime, staleTime)
     await aggregateManifestRun(context, 0)
     expect(
       await fs

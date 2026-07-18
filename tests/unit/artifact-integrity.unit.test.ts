@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -13,6 +14,7 @@ describe('artifact integrity', () => {
   const tempDirs: string[] = []
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     await Promise.all(
       tempDirs.map((tempDir) =>
         fs.rm(tempDir, { recursive: true, force: true }),
@@ -37,6 +39,8 @@ describe('artifact integrity', () => {
   it('publishes only after production and validation complete', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'final.mp4')
+    let producedTemporaryPath = ''
+    const unlink = vi.spyOn(fs, 'unlink')
     const validate = vi.fn(async (temporaryPath: string) => {
       await expect(fs.readFile(temporaryPath, 'utf8')).resolves.toBe(
         'complete-media',
@@ -49,6 +53,7 @@ describe('artifact integrity', () => {
       publishAtomicArtifact({
         desiredPath,
         produce: async (temporaryPath) => {
+          producedTemporaryPath = temporaryPath
           expect(temporaryPath).not.toBe(desiredPath)
           expect(path.extname(temporaryPath)).toBe('.mp4')
           await expect(fs.stat(desiredPath)).rejects.toThrow()
@@ -61,6 +66,7 @@ describe('artifact integrity', () => {
     ).resolves.toBe(desiredPath)
 
     expect(validate).toHaveBeenCalledOnce()
+    expect(unlink).not.toHaveBeenCalledWith(producedTemporaryPath)
     await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
       'complete-media',
     )
@@ -105,6 +111,43 @@ describe('artifact integrity', () => {
       }),
     ).resolves.toBeUndefined()
     expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('does not publish or delete a replacement reservation', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'replacement.webm')
+    const reservationPath = `${desiredPath}.wdio-reserve`
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(
+            reservationPath,
+            JSON.stringify({
+              createdAt: Date.now(),
+              ownerId: 'replacement-owner',
+              outputPath: desiredPath,
+              pid: 222,
+              temporaryPath: path.join(
+                tempDir,
+                '.replacement.wdio-222-replacement.webm',
+              ),
+            }),
+            'utf8',
+          )
+          await fs.writeFile(temporaryPath, 'media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBeUndefined()
+
+    await expect(fs.readFile(reservationPath, 'utf8')).resolves.toContain(
+      'replacement-owner',
+    )
+    await expect(fs.stat(desiredPath)).rejects.toThrow()
   })
 
   it('rejects empty output and catches producer exceptions', async () => {
@@ -268,6 +311,64 @@ describe('artifact integrity', () => {
     await expect(fs.stat(`${desiredPath}.wdio-reserve`)).resolves.toBeDefined()
   })
 
+  it('does not reclaim a reservation whose ownership changes during cleanup', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'ownership-race.webm')
+    const reservationPath = `${desiredPath}.wdio-reserve`
+    const temporaryPath = path.join(
+      tempDir,
+      '.ownership-race.wdio-222-old.webm',
+    )
+    await fs.writeFile(
+      reservationPath,
+      JSON.stringify({
+        createdAt: Date.now(),
+        ownerId: 'old-owner',
+        outputPath: desiredPath,
+        pid: 222,
+        temporaryPath,
+      }),
+      'utf8',
+    )
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        process: {
+          environment: () => undefined,
+          isAlive: () => {
+            writeFileSync(
+              reservationPath,
+              JSON.stringify({
+                createdAt: Date.now(),
+                ownerId: 'replacement-owner',
+                outputPath: desiredPath,
+                pid: 333,
+                temporaryPath: path.join(
+                  tempDir,
+                  '.ownership-race.wdio-333-new.webm',
+                ),
+              }),
+              'utf8',
+            )
+            return false
+          },
+          pid: 444,
+          platform: 'linux',
+        },
+        produce: async (outputPath) => {
+          await fs.writeFile(outputPath, 'media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(path.join(tempDir, 'ownership-race_run2.webm'))
+    await expect(fs.readFile(reservationPath, 'utf8')).resolves.toContain(
+      'replacement-owner',
+    )
+  })
+
   it('reclaims an expired malformed reservation', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'expired.webm')
@@ -290,6 +391,49 @@ describe('artifact integrity', () => {
     await expect(fs.stat(reservationPath)).rejects.toThrow()
   })
 
+  it('reclaims expired reservations with missing or empty owner tokens', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    for (const [name, ownerId, includeOutputPath] of [
+      ['missing-owner', undefined, true],
+      ['empty-owner', '', true],
+      ['missing-output', 'owner-token', false],
+    ] as const) {
+      const desiredPath = path.join(tempDir, `${name}.webm`)
+      const reservationPath = `${desiredPath}.wdio-reserve`
+      await fs.writeFile(
+        reservationPath,
+        JSON.stringify({
+          createdAt: Date.now(),
+          ...(ownerId === undefined ? {} : { ownerId }),
+          ...(includeOutputPath ? { outputPath: desiredPath } : {}),
+          pid: 222,
+          temporaryPath: path.join(tempDir, `.${name}.wdio-222-old.webm`),
+        }),
+        'utf8',
+      )
+      const expired = new Date(0)
+      await fs.utimes(reservationPath, expired, expired)
+
+      await expect(
+        publishAtomicArtifact({
+          desiredPath,
+          process: {
+            environment: () => undefined,
+            isAlive: () => false,
+            pid: 444,
+            platform: 'linux',
+          },
+          produce: async (temporaryPath) => {
+            await fs.writeFile(temporaryPath, 'media', 'utf8')
+            return true
+          },
+          validate: async () => true,
+          warn: vi.fn(),
+        }),
+      ).resolves.toBe(desiredPath)
+    }
+  })
+
   it('recovers reservations and temporary output left by a killed worker', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'final.webm')
@@ -300,6 +444,7 @@ describe('artifact integrity', () => {
       reservationPath,
       JSON.stringify({
         createdAt: Date.now(),
+        ownerId: 'abandoned-owner',
         outputPath: desiredPath,
         pid: 99999,
         temporaryPath: abandonedPath,
@@ -318,6 +463,7 @@ describe('artifact integrity', () => {
         desiredPath,
         process: processBoundary,
         produce: async (temporaryPath) => {
+          expect(path.basename(temporaryPath)).toContain('.wdio-12345-')
           await fs.writeFile(temporaryPath, 'recovered-media', 'utf8')
           return true
         },
@@ -339,6 +485,7 @@ describe('artifact integrity', () => {
       `${desiredPath}.wdio-reserve`,
       JSON.stringify({
         createdAt: Date.now(),
+        ownerId: 'forged-owner',
         outputPath: desiredPath,
         pid: 99999,
         temporaryPath: protectedPath,

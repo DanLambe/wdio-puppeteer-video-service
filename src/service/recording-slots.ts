@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 import type { InternalRecordingStartMode } from '../types.js'
@@ -55,6 +56,8 @@ export const createInProcessRecordingSlotState =
 
 const sharedInProcessState = createInProcessRecordingSlotState()
 const sharedPostProcessState = createInProcessRecordingSlotState()
+const ignoreFileError = (): undefined => undefined
+const emptyTextOnFileError = (): string => ''
 
 export class RecordingSlotScheduler {
   private readonly clock: ClockBoundary
@@ -66,6 +69,7 @@ export class RecordingSlotScheduler {
   private readonly resourceLabel: 'recording' | 'post-processing'
   private globalSlotFileHandle: FileHandle | undefined
   private globalSlotHeartbeatTimer: NodeJS.Timeout | undefined
+  private globalSlotOwnerId: string | undefined
   private globalSlotPath: string | undefined
   private globalSlotStartedAt: number | undefined
   private ownsGlobalSlot = false
@@ -217,9 +221,11 @@ export class RecordingSlotScheduler {
   async openOwnedGlobalSlot(slotPath: string): Promise<boolean> {
     const fileHandle = await this.fileSystem.openExclusive(slotPath)
     const startedAt = this.clock.now()
+    const ownerId = randomUUID()
     const metadataWritten = await this.writeGlobalSlotMetadata(
       fileHandle,
       startedAt,
+      ownerId,
     )
     if (!metadataWritten) {
       this.log(
@@ -233,6 +239,7 @@ export class RecordingSlotScheduler {
     this.ownsGlobalSlot = true
     this.globalSlotPath = slotPath
     this.globalSlotFileHandle = fileHandle
+    this.globalSlotOwnerId = ownerId
     this.globalSlotStartedAt = startedAt
     this.startGlobalSlotHeartbeat()
     this.log(
@@ -245,9 +252,11 @@ export class RecordingSlotScheduler {
   async writeGlobalSlotMetadata(
     fileHandle: FileHandle,
     startedAt: number,
+    ownerId: string,
   ): Promise<boolean> {
     const metadata = Buffer.from(
       JSON.stringify({
+        ownerId,
         pid: this.process.pid,
         startedAt,
         lastUpdatedAt: this.clock.now(),
@@ -279,14 +288,14 @@ export class RecordingSlotScheduler {
   async cleanupStaleGlobalSlot(slotPath: string): Promise<void> {
     const slotStats = await this.fileSystem
       .stat(slotPath)
-      .catch(() => undefined)
+      .catch(ignoreFileError)
     if (!slotStats) {
       return
     }
 
     const fileContents = await this.fileSystem
       .readText(slotPath)
-      .catch(() => '')
+      .catch(emptyTextOnFileError)
     const slotMetadata = parseGlobalRecordingSlotMetadata(fileContents)
     const parsedPid = slotMetadata?.pid
     if (parsedPid) {
@@ -295,18 +304,9 @@ export class RecordingSlotScheduler {
         slotStats.mtimeMs,
       )
       if (this.process.isAlive(parsedPid)) {
-        if (!this.isActiveGlobalSlotFresh(lastUpdatedAtMs)) {
-          this.log(
-            'debug',
-            `[WdioPuppeteerVideoService] Removing stale global ${this.resourceLabel} slot with expired heartbeat for pid=${parsedPid}: ${slotPath}`,
-          )
-          await this.unlinkBestEffort(slotPath)
-          return
-        }
-
         this.log(
           'debug',
-          `[WdioPuppeteerVideoService] Keeping active global ${this.resourceLabel} slot owned by pid=${parsedPid}: ${slotPath}`,
+          `[WdioPuppeteerVideoService] Keeping live-process global ${this.resourceLabel} slot${this.isActiveGlobalSlotFresh(lastUpdatedAtMs) ? '' : ' despite its expired heartbeat'} for pid=${parsedPid}: ${slotPath}`,
         )
         return
       }
@@ -315,7 +315,7 @@ export class RecordingSlotScheduler {
         'debug',
         `[WdioPuppeteerVideoService] Removing stale global ${this.resourceLabel} slot for exited pid=${parsedPid}: ${slotPath}`,
       )
-      await this.unlinkBestEffort(slotPath)
+      await this.unlinkGlobalSlotIfUnchanged(slotPath, fileContents, slotStats)
       return
     }
 
@@ -331,7 +331,7 @@ export class RecordingSlotScheduler {
       'debug',
       `[WdioPuppeteerVideoService] Removing stale invalid global ${this.resourceLabel} slot: ${slotPath}`,
     )
-    await this.unlinkBestEffort(slotPath)
+    await this.unlinkGlobalSlotIfUnchanged(slotPath, fileContents, slotStats)
   }
 
   shouldCleanupInvalidGlobalSlot(lastUpdatedAtMs: number): boolean {
@@ -395,10 +395,12 @@ export class RecordingSlotScheduler {
 
     const lockPath = this.globalSlotPath
     const lockFileHandle = this.globalSlotFileHandle
+    const ownerId = this.globalSlotOwnerId
     this.stopGlobalSlotHeartbeat()
     this.ownsGlobalSlot = false
     this.globalSlotPath = undefined
     this.globalSlotFileHandle = undefined
+    this.globalSlotOwnerId = undefined
     this.globalSlotStartedAt = undefined
 
     if (!lockFileHandle) {
@@ -407,7 +409,11 @@ export class RecordingSlotScheduler {
     await lockFileHandle.close().catch(() => {
       /* best-effort slot close */
     })
-    if (lockPath) {
+    if (
+      lockPath &&
+      ownerId &&
+      (await this.isGlobalSlotOwner(lockPath, ownerId))
+    ) {
       await this.unlinkBestEffort(lockPath)
       this.log(
         'debug',
@@ -420,11 +426,13 @@ export class RecordingSlotScheduler {
     const slotPath = this.globalSlotPath
     const fileHandle = this.globalSlotFileHandle
     const startedAt = this.globalSlotStartedAt
+    const ownerId = this.globalSlotOwnerId
 
     if (
       !this.ownsGlobalSlot ||
       !slotPath ||
       !fileHandle ||
+      !ownerId ||
       startedAt === undefined
     ) {
       return
@@ -433,6 +441,7 @@ export class RecordingSlotScheduler {
     const metadataWritten = await this.writeGlobalSlotMetadata(
       fileHandle,
       startedAt,
+      ownerId,
     )
     if (!metadataWritten) {
       this.log(
@@ -495,6 +504,50 @@ export class RecordingSlotScheduler {
     await this.fileSystem.unlink(filePath).catch(() => {
       /* best-effort cleanup */
     })
+  }
+
+  private async isGlobalSlotOwner(
+    slotPath: string,
+    ownerId: string,
+  ): Promise<boolean> {
+    const contents = await this.fileSystem
+      .readText(slotPath)
+      .catch(emptyTextOnFileError)
+    return parseGlobalRecordingSlotMetadata(contents)?.ownerId === ownerId
+  }
+
+  private async unlinkGlobalSlotIfUnchanged(
+    slotPath: string,
+    expectedContents: string,
+    expectedStats: Awaited<ReturnType<FileSystemBoundary['stat']>>,
+  ): Promise<void> {
+    const [currentContents, currentStats] = await Promise.all([
+      this.fileSystem.readText(slotPath).catch(ignoreFileError),
+      this.fileSystem.stat(slotPath).catch(ignoreFileError),
+    ])
+    if (
+      currentContents !== expectedContents ||
+      !currentStats ||
+      !this.isSameFile(expectedStats, currentStats)
+    ) {
+      return
+    }
+    await this.unlinkBestEffort(slotPath)
+  }
+
+  private isSameFile(
+    expected: Awaited<ReturnType<FileSystemBoundary['stat']>>,
+    current: Awaited<ReturnType<FileSystemBoundary['stat']>>,
+  ): boolean {
+    if (expected.ino !== undefined && current.ino !== undefined) {
+      return expected.ino === current.ino
+    }
+    return (
+      expected.mtimeMs === current.mtimeMs &&
+      (expected.size === undefined ||
+        current.size === undefined ||
+        expected.size === current.size)
+    )
   }
 }
 

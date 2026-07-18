@@ -212,12 +212,14 @@ describe('retry-state helper utilities', () => {
     expect(
       parseGlobalRecordingSlotMetadata(
         JSON.stringify({
+          ownerId: 'slot-owner',
           pid: 123,
           startedAt: 1_000,
           lastUpdatedAt: 2_000,
         }),
       ),
     ).toEqual({
+      ownerId: 'slot-owner',
       pid: 123,
       startedAt: 1_000,
       lastUpdatedAt: 2_000,

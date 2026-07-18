@@ -231,9 +231,15 @@ describe('recording slot scheduler', () => {
       await expect(scheduler.acquire()).resolves.toBe(true)
       const slotPath = scheduler.ownedGlobalRecordingSlotPath
       expect(slotPath).toBe(path.join(tempDir, 'slot-1.lock'))
-      await expect(fs.readFile(slotPath ?? '', 'utf8')).resolves.toBe(
-        JSON.stringify({ pid: 12345, startedAt: 100, lastUpdatedAt: 100 }),
-      )
+      const metadata = JSON.parse(
+        await fs.readFile(slotPath ?? '', 'utf8'),
+      ) as Record<string, unknown>
+      expect(metadata).toMatchObject({
+        ownerId: expect.any(String),
+        pid: 12345,
+        startedAt: 100,
+        lastUpdatedAt: 100,
+      })
 
       await scheduler.release()
       await expect(fs.stat(slotPath ?? '')).rejects.toThrow()
@@ -269,7 +275,7 @@ describe('recording slot scheduler', () => {
     expect(scheduler.ownsGlobalRecordingSlot).toBe(false)
   })
 
-  it('keeps fresh live-process slots and removes stale live-process slots', async () => {
+  it('keeps live-process slots even when their heartbeat is stale', async () => {
     await withTempDir(async (tempDir) => {
       const slotPath = path.join(tempDir, 'slot.lock')
       const clock = createClock(50_000)
@@ -294,7 +300,35 @@ describe('recording slot scheduler', () => {
         }),
       )
       await scheduler.cleanupStaleGlobalSlot(slotPath)
-      await expect(fs.stat(slotPath)).rejects.toThrow()
+      await expect(fs.stat(slotPath)).resolves.toBeDefined()
+    })
+  })
+
+  it('does not remove a replacement lock when an old owner releases', async () => {
+    await withTempDir(async (tempDir) => {
+      const scheduler = new RecordingSlotScheduler(
+        { globalRecordingLockDir: tempDir, maxGlobalRecordings: 1 },
+        noopLogger,
+        { clock: createClock(100), process: createProcess() },
+      )
+      await scheduler.acquire()
+      const slotPath = scheduler.ownedGlobalRecordingSlotPath
+      expect(slotPath).toBeDefined()
+      await fs.writeFile(
+        slotPath ?? '',
+        JSON.stringify({
+          ownerId: 'replacement-owner',
+          pid: 22222,
+          startedAt: 200,
+          lastUpdatedAt: 200,
+        }),
+      )
+
+      await scheduler.release()
+
+      await expect(fs.readFile(slotPath ?? '', 'utf8')).resolves.toContain(
+        'replacement-owner',
+      )
     })
   })
 
