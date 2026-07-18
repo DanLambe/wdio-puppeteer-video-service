@@ -7,6 +7,7 @@ import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
 import * as ffmpeg from '../../src/service/ffmpeg.js'
 import * as pageLookup from '../../src/service/page-lookup.js'
 import * as retryState from '../../src/service/retry-state.js'
+import WdioPuppeteerVideoServiceRuntime from '../../src/service.js'
 import WdioPuppeteerVideoService, {
   type CharacterizedServiceOptions,
 } from './characterized-service.js'
@@ -1574,23 +1575,74 @@ describe('WdioPuppeteerVideoService unit', () => {
       await fs.writeFile(inputPath, 'source', 'utf8')
 
       const service = new WdioPuppeteerVideoService() as unknown as {
-        _runFfmpeg: () => Promise<boolean>
+        _runFfmpeg: (args: string[]) => Promise<boolean>
         _transcodeToH264Mp4WithArgs: (
           inputPath: string,
           outputPath: string,
           ffmpegArgs: string[] | undefined,
-        ) => Promise<boolean>
+        ) => Promise<string | undefined>
       }
-      service._runFfmpeg = async () => {
-        await fs.writeFile(outputPath, 'partial', 'utf8')
+      service._runFfmpeg = async (args) => {
+        const temporaryPath = args.at(-1)
+        if (temporaryPath) {
+          await fs.writeFile(temporaryPath, 'partial', 'utf8')
+        }
         return false
       }
 
       await expect(
         service._transcodeToH264Mp4WithArgs(inputPath, outputPath, undefined),
-      ).resolves.toBe(false)
+      ).resolves.toBeUndefined()
       await expect(fs.stat(outputPath)).rejects.toThrow()
       await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source')
+    })
+  })
+
+  it('applies error failure policy only after preserving media and releasing post-processing capacity', async () => {
+    await withTempDir(async (tempDir) => {
+      const inputPath = path.join(tempDir, 'input.webm')
+      const outputPath = path.join(tempDir, 'output.mp4')
+      await fs.writeFile(inputPath, 'source-media', 'utf8')
+      const service = new WdioPuppeteerVideoServiceRuntime({
+        outputDir: tempDir,
+        concurrency: { maxPostProcessesPerProcess: 1 },
+        failurePolicy: 'error',
+        processing: {
+          format: 'mp4',
+          transcode: { enabled: true },
+        },
+      }) as unknown as {
+        _finalizeSegment: (segment: {
+          recordingPath: string
+          outputPath: string
+          outputFormat: 'mp4'
+          recordingFormat: 'webm'
+          transcode: true
+          transcodeOptions: { deleteOriginal: boolean }
+        }) => Promise<void>
+        _postProcessSlotScheduler: {
+          ownsPostProcessSlot: boolean
+        }
+        _recordedSegments: Set<string>
+        _runFfmpeg: () => Promise<boolean>
+      }
+      service._runFfmpeg = async () => false
+
+      await expect(
+        service._finalizeSegment({
+          recordingPath: inputPath,
+          outputPath,
+          outputFormat: 'mp4',
+          recordingFormat: 'webm',
+          transcode: true,
+          transcodeOptions: { deleteOriginal: true },
+        }),
+      ).rejects.toThrow('keeping original recording')
+
+      expect(service._recordedSegments.has(inputPath)).toBe(true)
+      expect(service._postProcessSlotScheduler.ownsPostProcessSlot).toBe(false)
+      await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source-media')
+      await expect(fs.stat(outputPath)).rejects.toThrow()
     })
   })
 
@@ -1831,7 +1883,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         deleteOriginal: boolean
         ffmpegArgs?: string[]
       }) => Promise<void>
-      _mergeSegmentPathsToOutput: () => Promise<boolean>
+      _mergeSegmentPathsToOutput: () => Promise<string | undefined>
     }
 
     const transcodeTasks: Array<{
@@ -1841,7 +1893,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       deleteOriginal: boolean
       ffmpegArgs?: string[]
     }> = []
-    service._mergeSegmentPathsToOutput = async () => true
+    service._mergeSegmentPathsToOutput = async () => 'merged.webm'
     service._executeDeferredTranscodeTask = async (task) => {
       transcodeTasks.push(task)
     }

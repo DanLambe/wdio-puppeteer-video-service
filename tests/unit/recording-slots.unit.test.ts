@@ -14,6 +14,7 @@ import {
 } from '../../src/service/constants.js'
 import {
   createInProcessRecordingSlotState,
+  PostProcessSlotScheduler,
   RecordingSlotScheduler,
 } from '../../src/service/recording-slots.js'
 
@@ -62,6 +63,74 @@ const createProcess = (
 })
 
 describe('recording slot scheduler', () => {
+  it('keeps post-processing capacity independent from recording capacity', async () => {
+    const recordingState = createInProcessRecordingSlotState()
+    const postProcessState = createInProcessRecordingSlotState()
+    const recording = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1 },
+      noopLogger,
+      { inProcessState: recordingState },
+    )
+    const postProcess = new PostProcessSlotScheduler(
+      { maxConcurrentPostProcesses: 1 },
+      noopLogger,
+      { inProcessState: postProcessState },
+    )
+
+    await expect(recording.acquire()).resolves.toBe(true)
+    await expect(postProcess.acquire()).resolves.toBe(true)
+    expect(recordingState.activeSlots).toBe(1)
+    expect(postProcessState.activeSlots).toBe(1)
+
+    await recording.release()
+    await postProcess.release()
+  })
+
+  it('fast-fails post-processing contention and recovers exited-worker locks', async () => {
+    await withTempDir(async (tempDir) => {
+      const clock = createClock(100)
+      const state = createInProcessRecordingSlotState()
+      const lockDir = path.join(tempDir, 'post-process')
+      await fs.mkdir(lockDir, { recursive: true })
+      await fs.writeFile(
+        path.join(lockDir, 'slot-1.lock'),
+        JSON.stringify({ pid: 99, startedAt: 1, lastUpdatedAt: 1 }),
+      )
+      const scheduler = new PostProcessSlotScheduler(
+        {
+          globalRecordingLockDir: tempDir,
+          maxConcurrentPostProcesses: 1,
+          maxGlobalPostProcesses: 1,
+          postProcessStartMode: 'fastFail',
+          postProcessStartTimeoutMs: 150,
+        },
+        noopLogger,
+        {
+          clock,
+          inProcessState: state,
+          process: createProcess(() => false),
+        },
+      )
+
+      await expect(scheduler.acquire()).resolves.toBe(true)
+      expect(scheduler.ownedGlobalPostProcessSlotPath).toBe(
+        path.join(lockDir, 'slot-1.lock'),
+      )
+
+      const blocked = new PostProcessSlotScheduler(
+        {
+          maxConcurrentPostProcesses: 1,
+          postProcessStartMode: 'fastFail',
+          postProcessStartTimeoutMs: 20,
+        },
+        noopLogger,
+        { clock, inProcessState: state },
+      )
+      await expect(blocked.acquire()).resolves.toBe(false)
+      await scheduler.release()
+    })
+  })
+
   it('uses no start timeout in blocking mode', () => {
     const scheduler = new RecordingSlotScheduler(
       { recordingStartMode: 'blocking', recordingStartTimeoutMs: 20 },

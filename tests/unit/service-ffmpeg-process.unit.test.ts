@@ -14,9 +14,11 @@ import {
   FfmpegProcessRegistry,
   runFfmpeg,
   spawnFfmpegProcess,
+  terminateFfmpegProcessTree,
 } from '../../src/service/ffmpeg-runner.js'
 
 class FakeFfmpegProcess extends EventEmitter implements FfmpegProcess {
+  pid: number | undefined
   stderr: PassThrough | null = new PassThrough()
   kill = vi.fn((_signal?: NodeJS.Signals | number) => true)
 }
@@ -63,6 +65,7 @@ describe('ffmpeg runner process handling', () => {
     expect(spawnFfmpegProcess('ffmpeg', ['-version'])).toBe(process)
     expect(spawnMock).toHaveBeenCalledWith('ffmpeg', ['-version'], {
       stdio: ['ignore', 'ignore', 'pipe'],
+      detached: globalThis.process.platform !== 'win32',
       windowsHide: true,
     })
   })
@@ -126,7 +129,7 @@ describe('ffmpeg runner process handling', () => {
       await vi.advanceTimersByTimeAsync(25 + FFMPEG_TERMINATION_GRACE_MS)
 
       await expect(resultPromise).resolves.toBe(false)
-      expect(process.kill.mock.calls).toEqual([[], ['SIGKILL']])
+      expect(process.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']])
     } finally {
       vi.useRealTimers()
     }
@@ -153,6 +156,58 @@ describe('ffmpeg runner process handling', () => {
     ).resolves.toBe(false)
     expect(spawnProcess).not.toHaveBeenCalled()
     expect(warnMissing).toHaveBeenCalledOnce()
+  })
+
+  it('terminates the complete process tree before force-killing it', async () => {
+    vi.useFakeTimers()
+    const process = new FakeFfmpegProcess()
+    const terminateProcessTree = vi.fn()
+    const resultPromise = runFfmpeg(
+      {
+        args: [],
+        available: true,
+        ffmpegPath: 'ffmpeg',
+        log: () => {},
+        markUnavailable: () => {},
+        operation: 'transcode',
+        timeoutMs: 10,
+        warnMissing: () => {},
+      },
+      {
+        spawnProcess: () => process,
+        terminateProcessTree,
+      },
+    )
+
+    await vi.advanceTimersByTimeAsync(10 + FFMPEG_TERMINATION_GRACE_MS)
+
+    await expect(resultPromise).resolves.toBe(false)
+    expect(terminateProcessTree.mock.calls).toEqual([
+      [process, false],
+      [process, true],
+    ])
+  })
+
+  it('uses the operating-system process-tree termination mechanism', () => {
+    const ffmpegProcess = new FakeFfmpegProcess()
+    ffmpegProcess.pid = 4321
+    if (globalThis.process.platform === 'win32') {
+      const terminator = new FakeFfmpegProcess()
+      spawnMock.mockReturnValue(terminator)
+
+      terminateFfmpegProcessTree(ffmpegProcess, true)
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'taskkill',
+        ['/PID', '4321', '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true },
+      )
+      return
+    }
+
+    const kill = vi.spyOn(globalThis.process, 'kill').mockReturnValue(true)
+    terminateFfmpegProcessTree(ffmpegProcess, false)
+    expect(kill).toHaveBeenCalledWith(-4321, 'SIGTERM')
   })
 
   it('terminates registered processes during service teardown', async () => {

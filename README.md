@@ -81,6 +81,10 @@ export const config = {
           maxRecordingsGlobal: 0,
           startMode: 'blocking',
           startTimeoutMs: 2500,
+          maxPostProcessesPerProcess: 0,
+          maxPostProcessesGlobal: 0,
+          postProcessStartMode: 'blocking',
+          postProcessStartTimeoutMs: 2500,
         },
         artifacts: {
           naming: {
@@ -127,7 +131,7 @@ Top-level options:
 - `outputDir` (default `'videos'`): generated artifact directory.
 - `profile` (`'default' | 'parallel' | 'ci'`, default `'default'`): grouped preset. Explicit values always win.
 - `logLevel` (`'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'`): inherits WDIO when omitted, with a `'warn'` fallback.
-- `failurePolicy` (`'warn' | 'error'`, default `'warn'`): reserved for consistent cleanup-first failure handling in the 1.0 processing work.
+- `failurePolicy` (`'warn' | 'error'`, default `'warn'`): post-processing failures warn or throw only after slots and temporary files are cleaned up and source media is preserved.
 
 `recording`:
 
@@ -162,6 +166,17 @@ Top-level options:
 - `maxRecordingsGlobal` (default `0`, disabled).
 - `startMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
 - `startTimeoutMs` (default `2500`) and optional `lockDir`.
+- `maxPostProcessesPerProcess` (default `0`, unlimited).
+- `maxPostProcessesGlobal` (default `0`, disabled; the `ci` profile defaults to `1`).
+- `postProcessStartMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
+- `postProcessStartTimeoutMs` (default `2500`).
+
+Recording and post-processing use separate in-process and cross-worker slot
+pools. Global slots carry heartbeats so an exited worker does not permanently
+consume capacity. Capture paths are exclusively reserved, while merge and
+transcode outputs are decoded from unique temporary files and atomically
+published only after validation. A failed or timed-out operation keeps its
+source recordings and removes partial output.
 
 `artifacts.naming`:
 

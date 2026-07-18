@@ -203,15 +203,19 @@ describe('WdioPuppeteerVideoService lifecycle', () => {
       }
       await service._startRecording()
       recorder.write('unprocessed-media')
-      service._finalizeSegment = async () => {
+      const finalizeSegment = vi.fn(async () => {
         throw new Error('finalization failed')
-      }
+      })
+      service._finalizeSegment = finalizeSegment
 
       await expect(service._stopRecording()).rejects.toThrow(
         'finalization failed',
       )
 
       expect(release).toHaveBeenCalledOnce()
+      expect(release.mock.invocationCallOrder[0]).toBeLessThan(
+        finalizeSegment.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+      )
       expect(service._recordingLifecycle.state).toBe('failed')
       await expect(fs.readFile(artifactPath, 'utf8')).resolves.toBe(
         'unprocessed-media',

@@ -1,0 +1,39 @@
+name: Post-process Performance
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.18.0
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Rebuild E2E Binary Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Measure deferred merge and global contention
+        shell: bash
+        run: |
+          started_at=$(date +%s)
+          corepack npm run test:e2e:advanced:deferred-merge
+          corepack npm run test:e2e:advanced:global-concurrency
+          finished_at=$(date +%s)
+          elapsed_seconds=$((finished_at - started_at))
+          echo "post_process_elapsed_seconds=${elapsed_seconds}"
+          echo "Post-process elapsed seconds: ${elapsed_seconds}" >> "$GITHUB_STEP_SUMMARY"

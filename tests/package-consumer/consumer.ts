@@ -21,7 +21,11 @@ const options = {
   recording,
   capture,
   processing: { format: 'webm', timing: 'after-test' },
-  concurrency: { startMode: 'blocking' },
+  concurrency: {
+    startMode: 'blocking',
+    maxPostProcessesPerProcess: 1,
+    maxPostProcessesGlobal: 1,
+  },
   artifacts: { naming: { style: 'test' } },
   profile: 'default',
   failurePolicy: 'warn',

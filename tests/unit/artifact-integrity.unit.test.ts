@@ -1,0 +1,425 @@
+import { spawn } from 'node:child_process'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  publishAtomicArtifact,
+  reserveArtifactPath,
+} from '../../src/service/artifact-integrity.js'
+import type { ProcessBoundary } from '../../src/service/boundaries.js'
+
+describe('artifact integrity', () => {
+  const tempDirs: string[] = []
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.map((tempDir) =>
+        fs.rm(tempDir, { recursive: true, force: true }),
+      ),
+    )
+    tempDirs.length = 0
+  })
+
+  it('reserves duplicate recording names without overwriting prior media', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'journey_part1.webm')
+    await fs.writeFile(desiredPath, 'existing-media', 'utf8')
+
+    const reservedPath = await reserveArtifactPath(desiredPath)
+
+    expect(reservedPath).toBe(path.join(tempDir, 'journey_run2_part1.webm'))
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
+      'existing-media',
+    )
+  })
+
+  it('publishes only after production and validation complete', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'final.mp4')
+    const validate = vi.fn(async (temporaryPath: string) => {
+      await expect(fs.readFile(temporaryPath, 'utf8')).resolves.toBe(
+        'complete-media',
+      )
+      await expect(fs.stat(desiredPath)).rejects.toThrow()
+      return true
+    })
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          expect(temporaryPath).not.toBe(desiredPath)
+          expect(path.extname(temporaryPath)).toBe('.mp4')
+          await expect(fs.stat(desiredPath)).rejects.toThrow()
+          await fs.writeFile(temporaryPath, 'complete-media', 'utf8')
+          return true
+        },
+        validate,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(desiredPath)
+
+    expect(validate).toHaveBeenCalledOnce()
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
+      'complete-media',
+    )
+  })
+
+  it('removes corrupt partial output and preserves source media', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'final.mp4')
+    const sourcePath = path.join(tempDir, 'source.webm')
+    const warn = vi.fn()
+    await fs.writeFile(sourcePath, 'source-media', 'utf8')
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'partial-media', 'utf8')
+          return true
+        },
+        validate: async () => false,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+
+    await expect(fs.stat(desiredPath)).rejects.toThrow()
+    await expect(fs.readFile(sourcePath, 'utf8')).resolves.toBe('source-media')
+    expect(await fs.readdir(tempDir)).toEqual(['source.webm'])
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to publish a corrupt artifact'),
+    )
+  })
+
+  it('cleans reservations when production fails before writing output', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'failed.mp4')
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async () => false,
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBeUndefined()
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('rejects empty output and catches producer exceptions', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const emptyPath = path.join(tempDir, 'empty.webm')
+    const thrownPath = path.join(tempDir, 'thrown.webm')
+    const warn = vi.fn()
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath: emptyPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, '')
+          return true
+        },
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+    await expect(
+      publishAtomicArtifact({
+        desiredPath: thrownPath,
+        produce: async () => {
+          throw new Error('producer failed')
+        },
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+
+    expect(warn.mock.calls.flat()).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Refusing to publish an empty artifact'),
+        expect.stringContaining('producer failed'),
+      ]),
+    )
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('warns when the output directory cannot be reserved', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const blockedDirectory = path.join(tempDir, 'blocked')
+    const warn = vi.fn()
+    await fs.writeFile(blockedDirectory, 'not-a-directory', 'utf8')
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath: path.join(blockedDirectory, 'final.mp4'),
+        produce: async () => true,
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to reserve artifact'),
+    )
+  })
+
+  it('does not reclaim a recent malformed reservation', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'malformed.webm')
+    await fs.writeFile(`${desiredPath}.wdio-reserve`, '{', 'utf8')
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(path.join(tempDir, 'malformed_run2.webm'))
+    await expect(fs.stat(`${desiredPath}.wdio-reserve`)).resolves.toBeDefined()
+  })
+
+  it('recovers reservations and temporary output left by a killed worker', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'final.webm')
+    const abandonedPath = path.join(tempDir, '.final.wdio-99999-abandoned.webm')
+    const reservationPath = `${desiredPath}.wdio-reserve`
+    await fs.writeFile(abandonedPath, 'partial', 'utf8')
+    await fs.writeFile(
+      reservationPath,
+      JSON.stringify({
+        createdAt: Date.now(),
+        outputPath: desiredPath,
+        pid: 99999,
+        temporaryPath: abandonedPath,
+      }),
+      'utf8',
+    )
+    const processBoundary: ProcessBoundary = {
+      environment: () => undefined,
+      isAlive: () => false,
+      pid: 12345,
+      platform: 'linux',
+    }
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        process: processBoundary,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'recovered-media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(desiredPath)
+
+    await expect(fs.stat(abandonedPath)).rejects.toThrow()
+    await expect(fs.stat(reservationPath)).rejects.toThrow()
+  })
+
+  it('does not delete paths that forged reservation metadata does not own', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'final.webm')
+    const protectedPath = path.join(tempDir, 'protected.webm')
+    await fs.writeFile(protectedPath, 'keep-me', 'utf8')
+    await fs.writeFile(
+      `${desiredPath}.wdio-reserve`,
+      JSON.stringify({
+        createdAt: Date.now(),
+        outputPath: desiredPath,
+        pid: 99999,
+        temporaryPath: protectedPath,
+      }),
+      'utf8',
+    )
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        process: {
+          environment: () => undefined,
+          isAlive: () => false,
+          pid: 12345,
+          platform: 'linux',
+        },
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'new-media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(desiredPath)
+    await expect(fs.readFile(protectedPath, 'utf8')).resolves.toBe('keep-me')
+  })
+
+  it('coordinates concurrent workers with exclusive final reservations', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'shared.mp4')
+    const publish = (contents: string) =>
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, contents, 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      })
+
+    const publishedPaths = await Promise.all([
+      publish('worker-a'),
+      publish('worker-b'),
+    ])
+
+    expect(new Set(publishedPaths)).toEqual(
+      new Set([desiredPath, path.join(tempDir, 'shared_run2.mp4')]),
+    )
+    await expect(
+      Promise.all(
+        publishedPaths.map((publishedPath) =>
+          fs.readFile(publishedPath ?? '', 'utf8'),
+        ),
+      ),
+    ).resolves.toEqual(expect.arrayContaining(['worker-a', 'worker-b']))
+  })
+
+  it('prevents overwrites across independent Node worker processes', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'multiprocess.webm')
+    const publishedPaths = await Promise.all([
+      runPublisherChild(desiredPath, 'child-a'),
+      runPublisherChild(desiredPath, 'child-b'),
+    ])
+
+    expect(new Set(publishedPaths)).toEqual(
+      new Set([desiredPath, path.join(tempDir, 'multiprocess_run2.webm')]),
+    )
+    await expect(
+      Promise.all(
+        publishedPaths.map((publishedPath) =>
+          fs.readFile(publishedPath, 'utf8'),
+        ),
+      ),
+    ).resolves.toEqual(expect.arrayContaining(['child-a', 'child-b']))
+  })
+
+  it('recovers the real reservation of a terminated Node worker', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'terminated-worker.webm')
+    await terminatePublisherAfterReservation(desiredPath)
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'replacement-media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(desiredPath)
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
+      'replacement-media',
+    )
+    expect(await fs.readdir(tempDir)).toEqual(['terminated-worker.webm'])
+  })
+})
+
+const createTempDir = async (tempDirs: string[]): Promise<string> => {
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'wdio-video-artifact-integrity-'),
+  )
+  tempDirs.push(tempDir)
+  return tempDir
+}
+
+const runPublisherChild = (
+  desiredPath: string,
+  contents: string,
+): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        path.resolve('tests/scripts/artifact-publisher-child.ts'),
+        desiredPath,
+        contents,
+      ],
+      { windowsHide: true },
+    )
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8')
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8')
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout)
+        return
+      }
+      reject(
+        new Error(`Artifact publisher exited with ${String(code)}: ${stderr}`),
+      )
+    })
+  })
+}
+
+const terminatePublisherAfterReservation = (
+  desiredPath: string,
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        path.resolve('tests/scripts/artifact-publisher-child.ts'),
+        desiredPath,
+        'abandoned-media',
+        'hang',
+      ],
+      { windowsHide: true },
+    )
+    let ready = false
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error(`Timed out waiting for child reservation: ${stderr}`))
+    }, 10_000)
+    timeout.unref?.()
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (!chunk.toString('utf8').includes('READY')) {
+        return
+      }
+      ready = true
+      child.kill('SIGKILL')
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8')
+    })
+    child.on('error', reject)
+    child.on('close', () => {
+      clearTimeout(timeout)
+      if (!ready) {
+        reject(
+          new Error(`Child exited before reserving its artifact: ${stderr}`),
+        )
+        return
+      }
+      resolve()
+    })
+  })
+}

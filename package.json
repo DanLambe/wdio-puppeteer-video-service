@@ -65,6 +65,8 @@
     "test:e2e:advanced:session-style": "tsx tests/scripts/run-e2e-advanced-options.ts session-style",
     "test:e2e:advanced:session-full-style": "tsx tests/scripts/run-e2e-advanced-options.ts session-full-style",
     "test:e2e:advanced:deferred-merge": "tsx tests/scripts/run-e2e-advanced-options.ts deferred-merge",
+    "test:e2e:advanced:global-concurrency": "tsx tests/scripts/run-e2e-advanced-options.ts global-concurrency",
+    "test:e2e:advanced:ffmpeg-failure": "tsx tests/scripts/run-e2e-advanced-options.ts ffmpeg-failure",
     "test:e2e:advanced:include-spec": "tsx tests/scripts/run-e2e-advanced-options.ts include-spec",
     "test:e2e:advanced:exclude-spec": "tsx tests/scripts/run-e2e-advanced-options.ts exclude-spec",
     "test:unit": "vitest run --dir tests/unit",

@@ -91,6 +91,16 @@ export const resolveServiceConfiguration = (
         : 'blocking',
     recordingStartTimeoutMs:
       concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
+    maxConcurrentPostProcesses: concurrency.maxPostProcessesPerProcess ?? 0,
+    maxGlobalPostProcesses:
+      concurrency.maxPostProcessesGlobal ?? (profile === 'ci' ? 1 : 0),
+    postProcessStartMode:
+      (concurrency.postProcessStartMode ?? 'blocking') === 'fast-fail'
+        ? 'fastFail'
+        : 'blocking',
+    postProcessStartTimeoutMs:
+      concurrency.postProcessStartTimeoutMs ??
+      DEFAULT_RECORDING_START_TIMEOUT_MS,
     postProcessMode:
       (processing.timing ??
         (profile === 'ci' ? 'after-worker' : 'after-test')) === 'after-worker'

@@ -269,6 +269,10 @@ const validateConcurrency = (value: unknown): void => {
     'maxRecordingsGlobal',
     'startMode',
     'startTimeoutMs',
+    'maxPostProcessesPerProcess',
+    'maxPostProcessesGlobal',
+    'postProcessStartMode',
+    'postProcessStartTimeoutMs',
     'lockDir',
   ])
   assertOptionalInteger(
@@ -288,6 +292,26 @@ const validateConcurrency = (value: unknown): void => {
   assertOptionalInteger(
     concurrency.startTimeoutMs,
     'concurrency.startTimeoutMs',
+    1,
+  )
+  assertOptionalInteger(
+    concurrency.maxPostProcessesPerProcess,
+    'concurrency.maxPostProcessesPerProcess',
+    0,
+  )
+  assertOptionalInteger(
+    concurrency.maxPostProcessesGlobal,
+    'concurrency.maxPostProcessesGlobal',
+    0,
+  )
+  assertOptionalEnum(
+    concurrency.postProcessStartMode,
+    'concurrency.postProcessStartMode',
+    ['blocking', 'fast-fail'],
+  )
+  assertOptionalInteger(
+    concurrency.postProcessStartTimeoutMs,
+    'concurrency.postProcessStartTimeoutMs',
     1,
   )
   assertOptionalNonEmptyString(concurrency.lockDir, 'concurrency.lockDir')

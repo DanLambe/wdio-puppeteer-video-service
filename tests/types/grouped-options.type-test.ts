@@ -37,6 +37,10 @@ const validOptions = {
     maxRecordingsGlobal: 2,
     startMode: 'fast-fail',
     startTimeoutMs: 2500,
+    maxPostProcessesPerProcess: 1,
+    maxPostProcessesGlobal: 1,
+    postProcessStartMode: 'blocking',
+    postProcessStartTimeoutMs: 2500,
   },
   artifacts: {
     naming: {

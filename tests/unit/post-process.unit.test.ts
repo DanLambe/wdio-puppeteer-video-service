@@ -6,6 +6,7 @@ import type { ResolvedTranscodeOptions } from '../../src/service/constants.js'
 import {
   buildConcatMergeArgs,
   buildH264TranscodeArgs,
+  buildMediaValidationArgs,
   createDeferredMergeTask,
   createDeferredTranscodeTask,
   mergeSegmentPathsToOutput,
@@ -94,7 +95,7 @@ describe('post-process helpers', () => {
     expect(
       buildH264TranscodeArgs('input.webm', 'output.mp4', ['-preset', 'slow']),
     ).toEqual([
-      '-y',
+      '-n',
       '-i',
       'input.webm',
       '-an',
@@ -114,7 +115,7 @@ describe('post-process helpers', () => {
     expect(
       buildConcatMergeArgs('merge_concat.txt', 'merged_output.webm'),
     ).toEqual([
-      '-y',
+      '-n',
       '-f',
       'concat',
       '-safe',
@@ -124,6 +125,21 @@ describe('post-process helpers', () => {
       '-c',
       'copy',
       'merged_output.webm',
+    ])
+  })
+
+  it('builds a full video decode validation command', () => {
+    expect(buildMediaValidationArgs('candidate.mp4')).toEqual([
+      '-v',
+      'error',
+      '-xerror',
+      '-i',
+      'candidate.mp4',
+      '-map',
+      '0:v:0',
+      '-f',
+      'null',
+      '-',
     ])
   })
 
@@ -145,7 +161,7 @@ describe('post-process helpers', () => {
         warn: vi.fn(),
         writeFailureContext: 'segment merge',
       }),
-    ).resolves.toBe(true)
+    ).resolves.toBe(mergedPath)
 
     await expect(fs.readFile(mergedPath, 'utf8')).resolves.toBe('segment-data')
     await expect(fs.readFile(segmentPath, 'utf8')).resolves.toBe('segment-data')
@@ -169,7 +185,7 @@ describe('post-process helpers', () => {
         warn: vi.fn(),
         writeFailureContext: 'segment merge',
       }),
-    ).resolves.toBe(true)
+    ).resolves.toBe(mergedPath)
 
     await expect(fs.readFile(mergedPath, 'utf8')).resolves.toBe('segment-data')
     await expect(fs.stat(segmentPath)).rejects.toThrow()
@@ -190,6 +206,9 @@ describe('post-process helpers', () => {
     )
 
     const runFfmpeg = vi.fn(async (args: string[], operation: string) => {
+      if (operation === 'segment merge validation') {
+        return true
+      }
       expect(operation).toBe('segment merge')
 
       const concatListPath = args[6]
@@ -202,9 +221,14 @@ describe('post-process helpers', () => {
       await expect(fs.readFile(concatListPath, 'utf8')).resolves.toContain(
         "file '",
       )
-      await fs.writeFile(mergedPath, 'merged-data', 'utf8')
+      const temporaryPath = args.at(-1)
+      expect(temporaryPath).toBeDefined()
+      if (!temporaryPath) {
+        return false
+      }
+      await fs.writeFile(temporaryPath, 'merged-data', 'utf8')
 
-      expect(args).toEqual(buildConcatMergeArgs(concatListPath, mergedPath))
+      expect(args).toEqual(buildConcatMergeArgs(concatListPath, temporaryPath))
       return true
     })
 
@@ -219,9 +243,9 @@ describe('post-process helpers', () => {
         warn: vi.fn(),
         writeFailureContext: 'segment merge',
       }),
-    ).resolves.toBe(true)
+    ).resolves.toBe(mergedPath)
 
-    expect(runFfmpeg).toHaveBeenCalledTimes(1)
+    expect(runFfmpeg).toHaveBeenCalledTimes(2)
     await expect(fs.readFile(mergedPath, 'utf8')).resolves.toBe('merged-data')
     await Promise.all(
       segmentPaths.map((segmentPath) =>
@@ -253,8 +277,11 @@ describe('post-process helpers', () => {
       ffmpegOperation: 'segment merge',
       mergedPath,
       outputDir: tempDir,
-      runFfmpeg: async () => {
-        await fs.writeFile(mergedPath, 'partial', 'utf8')
+      runFfmpeg: async (args) => {
+        const temporaryPath = args.at(-1)
+        if (temporaryPath) {
+          await fs.writeFile(temporaryPath, 'partial', 'utf8')
+        }
         return false
       },
       segmentPaths,
@@ -262,7 +289,7 @@ describe('post-process helpers', () => {
       writeFailureContext: 'segment merge',
     })
 
-    expect(merged).toBe(false)
+    expect(merged).toBeUndefined()
     await expect(fs.stat(mergedPath)).rejects.toThrow()
     await Promise.all(
       segmentPaths.map((segmentPath) =>
@@ -345,7 +372,7 @@ describe('post-process helpers', () => {
         warn,
         writeFailureContext: 'deferred merge',
       }),
-    ).resolves.toBe(false)
+    ).resolves.toBeUndefined()
 
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn.mock.calls[0]?.[0]).toContain(

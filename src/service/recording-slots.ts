@@ -10,6 +10,7 @@ import {
   systemClock,
 } from './boundaries.js'
 import {
+  GLOBAL_POST_PROCESS_SLOT_DIR_NAME,
   GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
   GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
   GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
@@ -43,6 +44,7 @@ export interface RecordingSlotSchedulerOptions {
   outputDir?: string
   recordingStartMode?: InternalRecordingStartMode
   recordingStartTimeoutMs?: number
+  resourceLabel?: 'recording' | 'post-processing'
 }
 
 export const createInProcessRecordingSlotState =
@@ -52,6 +54,7 @@ export const createInProcessRecordingSlotState =
   })
 
 const sharedInProcessState = createInProcessRecordingSlotState()
+const sharedPostProcessState = createInProcessRecordingSlotState()
 
 export class RecordingSlotScheduler {
   private readonly clock: ClockBoundary
@@ -60,6 +63,7 @@ export class RecordingSlotScheduler {
   private readonly log: ServiceLogger
   private readonly options: RecordingSlotSchedulerOptions
   private readonly process: ProcessBoundary
+  private readonly resourceLabel: 'recording' | 'post-processing'
   private globalSlotFileHandle: FileHandle | undefined
   private globalSlotHeartbeatTimer: NodeJS.Timeout | undefined
   private globalSlotPath: string | undefined
@@ -78,6 +82,7 @@ export class RecordingSlotScheduler {
     this.log = log
     this.options = options
     this.process = dependencies.process ?? nodeProcess
+    this.resourceLabel = options.resourceLabel ?? 'recording'
   }
 
   get ownsRecordingSlot(): boolean {
@@ -219,7 +224,7 @@ export class RecordingSlotScheduler {
     if (!metadataWritten) {
       this.log(
         'debug',
-        `[WdioPuppeteerVideoService] Discarding global recording slot candidate without metadata: ${slotPath}`,
+        `[WdioPuppeteerVideoService] Discarding global ${this.resourceLabel} slot candidate without metadata: ${slotPath}`,
       )
       await this.discardGlobalSlotCandidate(slotPath, fileHandle)
       return false
@@ -232,7 +237,7 @@ export class RecordingSlotScheduler {
     this.startGlobalSlotHeartbeat()
     this.log(
       'debug',
-      `[WdioPuppeteerVideoService] Acquired global recording slot: ${slotPath}`,
+      `[WdioPuppeteerVideoService] Acquired global ${this.resourceLabel} slot: ${slotPath}`,
     )
     return true
   }
@@ -293,7 +298,7 @@ export class RecordingSlotScheduler {
         if (!this.isActiveGlobalSlotFresh(lastUpdatedAtMs)) {
           this.log(
             'debug',
-            `[WdioPuppeteerVideoService] Removing stale global recording slot with expired heartbeat for pid=${parsedPid}: ${slotPath}`,
+            `[WdioPuppeteerVideoService] Removing stale global ${this.resourceLabel} slot with expired heartbeat for pid=${parsedPid}: ${slotPath}`,
           )
           await this.unlinkBestEffort(slotPath)
           return
@@ -301,14 +306,14 @@ export class RecordingSlotScheduler {
 
         this.log(
           'debug',
-          `[WdioPuppeteerVideoService] Keeping active global recording slot owned by pid=${parsedPid}: ${slotPath}`,
+          `[WdioPuppeteerVideoService] Keeping active global ${this.resourceLabel} slot owned by pid=${parsedPid}: ${slotPath}`,
         )
         return
       }
 
       this.log(
         'debug',
-        `[WdioPuppeteerVideoService] Removing stale global recording slot for exited pid=${parsedPid}: ${slotPath}`,
+        `[WdioPuppeteerVideoService] Removing stale global ${this.resourceLabel} slot for exited pid=${parsedPid}: ${slotPath}`,
       )
       await this.unlinkBestEffort(slotPath)
       return
@@ -317,14 +322,14 @@ export class RecordingSlotScheduler {
     if (!this.shouldCleanupInvalidGlobalSlot(slotStats.mtimeMs)) {
       this.log(
         'debug',
-        `[WdioPuppeteerVideoService] Keeping recent invalid global recording slot during grace window: ${slotPath}`,
+        `[WdioPuppeteerVideoService] Keeping recent invalid global ${this.resourceLabel} slot during grace window: ${slotPath}`,
       )
       return
     }
 
     this.log(
       'debug',
-      `[WdioPuppeteerVideoService] Removing stale invalid global recording slot: ${slotPath}`,
+      `[WdioPuppeteerVideoService] Removing stale invalid global ${this.resourceLabel} slot: ${slotPath}`,
     )
     await this.unlinkBestEffort(slotPath)
   }
@@ -374,7 +379,7 @@ export class RecordingSlotScheduler {
     }
     this.log(
       'debug',
-      `[WdioPuppeteerVideoService] Released in-process recording slot (${this.inProcessState.activeSlots}/${this.options.maxConcurrentRecordings ?? 0}).`,
+      `[WdioPuppeteerVideoService] Released in-process ${this.resourceLabel} slot (${this.inProcessState.activeSlots}/${this.options.maxConcurrentRecordings ?? 0}).`,
     )
 
     const nextWaiter = this.inProcessState.waiters.shift()
@@ -406,7 +411,7 @@ export class RecordingSlotScheduler {
       await this.unlinkBestEffort(lockPath)
       this.log(
         'debug',
-        `[WdioPuppeteerVideoService] Released global recording slot: ${lockPath}`,
+        `[WdioPuppeteerVideoService] Released global ${this.resourceLabel} slot: ${lockPath}`,
       )
     }
   }
@@ -432,7 +437,7 @@ export class RecordingSlotScheduler {
     if (!metadataWritten) {
       this.log(
         'trace',
-        `[WdioPuppeteerVideoService] Failed to refresh global recording slot heartbeat: ${slotPath}`,
+        `[WdioPuppeteerVideoService] Failed to refresh global ${this.resourceLabel} slot heartbeat: ${slotPath}`,
       )
     }
   }
@@ -446,7 +451,7 @@ export class RecordingSlotScheduler {
     this.ownsInProcessSlot = true
     this.log(
       'debug',
-      `[WdioPuppeteerVideoService] Acquired in-process recording slot (${this.inProcessState.activeSlots}/${maxConcurrentRecordings}).`,
+      `[WdioPuppeteerVideoService] Acquired in-process ${this.resourceLabel} slot (${this.inProcessState.activeSlots}/${maxConcurrentRecordings}).`,
     )
     return true
   }
@@ -490,5 +495,79 @@ export class RecordingSlotScheduler {
     await this.fileSystem.unlink(filePath).catch(() => {
       /* best-effort cleanup */
     })
+  }
+}
+
+export class PostProcessSlotScheduler {
+  private readonly scheduler: RecordingSlotScheduler
+
+  constructor(
+    options: {
+      globalRecordingLockDir?: string
+      maxConcurrentPostProcesses?: number
+      maxGlobalPostProcesses?: number
+      outputDir?: string
+      postProcessStartMode?: InternalRecordingStartMode
+      postProcessStartTimeoutMs?: number
+    },
+    log: ServiceLogger,
+    dependencies: RecordingSlotSchedulerDependencies = {},
+  ) {
+    const lockDir = options.globalRecordingLockDir?.trim()
+      ? path.join(options.globalRecordingLockDir, 'post-process')
+      : path.join(
+          options.outputDir ?? 'videos',
+          GLOBAL_POST_PROCESS_SLOT_DIR_NAME,
+        )
+    this.scheduler = new RecordingSlotScheduler(
+      {
+        globalRecordingLockDir: lockDir,
+        resourceLabel: 'post-processing',
+        ...(options.maxConcurrentPostProcesses === undefined
+          ? {}
+          : {
+              maxConcurrentRecordings: options.maxConcurrentPostProcesses,
+            }),
+        ...(options.maxGlobalPostProcesses === undefined
+          ? {}
+          : { maxGlobalRecordings: options.maxGlobalPostProcesses }),
+        ...(options.outputDir === undefined
+          ? {}
+          : { outputDir: options.outputDir }),
+        ...(options.postProcessStartMode === undefined
+          ? {}
+          : { recordingStartMode: options.postProcessStartMode }),
+        ...(options.postProcessStartTimeoutMs === undefined
+          ? {}
+          : {
+              recordingStartTimeoutMs: options.postProcessStartTimeoutMs,
+            }),
+      },
+      log,
+      {
+        ...dependencies,
+        inProcessState: dependencies.inProcessState ?? sharedPostProcessState,
+      },
+    )
+  }
+
+  get ownsPostProcessSlot(): boolean {
+    return this.scheduler.ownsRecordingSlot
+  }
+
+  get ownsGlobalPostProcessSlot(): boolean {
+    return this.scheduler.ownsGlobalRecordingSlot
+  }
+
+  get ownedGlobalPostProcessSlotPath(): string | undefined {
+    return this.scheduler.ownedGlobalRecordingSlotPath
+  }
+
+  acquire(): Promise<boolean> {
+    return this.scheduler.acquire()
+  }
+
+  release(): Promise<void> {
+    return this.scheduler.release()
   }
 }

@@ -4,6 +4,7 @@ import { FFMPEG_TERMINATION_GRACE_MS } from './constants.js'
 import type { ServiceLogger } from './logging.js'
 
 export interface FfmpegProcess {
+  pid?: number | undefined
   stderr?: NodeJS.ReadableStream | null
   kill(signal?: NodeJS.Signals | number): boolean
   on(event: 'close', listener: (code: number | null) => void): this
@@ -30,7 +31,13 @@ export interface FfmpegRunnerDependencies {
   clock?: ClockBoundary
   processRegistry?: FfmpegProcessRegistry
   spawnProcess?: SpawnFfmpegProcess
+  terminateProcessTree?: TerminateFfmpegProcessTree
 }
+
+export type TerminateFfmpegProcessTree = (
+  process: FfmpegProcess,
+  force: boolean,
+) => void
 
 interface RegisteredFfmpegProcess {
   terminate: () => void
@@ -63,8 +70,41 @@ export const spawnFfmpegProcess: SpawnFfmpegProcess = (
 ): ChildProcess => {
   return spawn(ffmpegPath, args, {
     stdio: ['ignore', 'ignore', 'pipe'],
+    detached: process.platform !== 'win32',
     windowsHide: true,
   })
+}
+
+export const terminateFfmpegProcessTree: TerminateFfmpegProcessTree = (
+  ffmpegProcess,
+  force,
+): void => {
+  const pid = ffmpegProcess.pid
+  if (pid && process.platform === 'win32') {
+    const terminator = spawn(
+      'taskkill',
+      ['/PID', pid.toString(), '/T', ...(force ? ['/F'] : [])],
+      {
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    )
+    terminator.on('error', () => {
+      ffmpegProcess.kill(force ? 'SIGKILL' : 'SIGTERM')
+    })
+    return
+  }
+
+  if (pid) {
+    try {
+      process.kill(-pid, force ? 'SIGKILL' : 'SIGTERM')
+      return
+    } catch {
+      /* fall back when the child is not a process-group leader */
+    }
+  }
+
+  ffmpegProcess.kill(force ? 'SIGKILL' : 'SIGTERM')
 }
 
 export const runFfmpeg = async (
@@ -81,6 +121,8 @@ export const runFfmpeg = async (
   const clock = dependencies.clock ?? systemClock
   const processRegistry = dependencies.processRegistry
   const spawnProcess = dependencies.spawnProcess ?? spawnFfmpegProcess
+  const terminateProcessTree =
+    dependencies.terminateProcessTree ?? terminateFfmpegProcessTree
 
   return new Promise<boolean>((resolve) => {
     const proc = spawnProcess(options.ffmpegPath, options.args)
@@ -113,9 +155,9 @@ export const runFfmpeg = async (
       }
 
       timedOut = true
-      proc.kill()
+      terminateProcessTree(proc, false)
       terminationTimeout = clock.setTimeout(() => {
-        proc.kill('SIGKILL')
+        terminateProcessTree(proc, true)
         settle(false)
       }, FFMPEG_TERMINATION_GRACE_MS)
       terminationTimeout.unref?.()

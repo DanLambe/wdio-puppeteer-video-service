@@ -247,11 +247,9 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   'global-concurrency': createServiceOptions({
     concurrency: {
       maxRecordingsGlobal: 1,
+      maxPostProcessesPerProcess: 1,
+      maxPostProcessesGlobal: 1,
       lockDir: globalRecordingLockDir,
-    },
-    processing: {
-      format: 'webm',
-      transcode: { enabled: false },
     },
   }),
   'ffmpeg-failure': createServiceOptions({
@@ -427,6 +425,17 @@ const assertGlobalConcurrencyMode = async (
       `[wdio:e2e:advanced] global-concurrency mode leaked recording locks: ${leakedLocks.join(', ')}`,
     )
   }
+  const postProcessLockEntries = await readdir(
+    path.join(globalRecordingLockDir, 'post-process'),
+  ).catch(() => [])
+  const leakedPostProcessLocks = postProcessLockEntries.filter((entry) =>
+    entry.endsWith('.lock'),
+  )
+  if (leakedPostProcessLocks.length > 0) {
+    throw new Error(
+      `[wdio:e2e:advanced] global-concurrency mode leaked post-processing locks: ${leakedPostProcessLocks.join(', ')}`,
+    )
+  }
 }
 
 const assertFfmpegFailureMode = (artifactNames: string[]): void => {
@@ -525,10 +534,7 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos: modeExpectsNoVideos,
       mergeSegmentsEnabled: mergedArtifactsExpected,
       fileNameStyle,
-      expectedCodec:
-        mode === 'global-concurrency' || mode === 'ffmpeg-failure'
-          ? 'vp9'
-          : 'h264',
+      expectedCodec: mode === 'ffmpeg-failure' ? 'vp9' : 'h264',
       runLabel: `advanced-${mode}`,
     })
 

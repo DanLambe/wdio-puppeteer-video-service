@@ -107,6 +107,14 @@ export interface ConcurrencyOptions {
   startMode?: RecordingStartMode
   /** @default 2500 */
   startTimeoutMs?: number
+  /** Use 0 for no explicit in-process limit. @default 0 */
+  maxPostProcessesPerProcess?: number
+  /** Use 0 to disable the cross-worker limit. The `ci` profile defaults to 1. @default 0 */
+  maxPostProcessesGlobal?: number
+  /** @default 'blocking' */
+  postProcessStartMode?: RecordingStartMode
+  /** @default 2500 */
+  postProcessStartTimeoutMs?: number
   lockDir?: string
 }
 
@@ -165,6 +173,10 @@ export interface ResolvedWdioPuppeteerVideoServiceOptions {
   maxGlobalRecordings: number
   recordingStartMode: InternalRecordingStartMode
   recordingStartTimeoutMs: number
+  maxConcurrentPostProcesses: number
+  maxGlobalPostProcesses: number
+  postProcessStartMode: InternalRecordingStartMode
+  postProcessStartTimeoutMs: number
   globalRecordingLockDir?: string
   postProcessMode: InternalPostProcessMode
   includeSpecPatterns: string[]
