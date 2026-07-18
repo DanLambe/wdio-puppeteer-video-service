@@ -28,7 +28,33 @@ export interface RunFfmpegOptions {
 
 export interface FfmpegRunnerDependencies {
   clock?: ClockBoundary
+  processRegistry?: FfmpegProcessRegistry
   spawnProcess?: SpawnFfmpegProcess
+}
+
+interface RegisteredFfmpegProcess {
+  terminate: () => void
+}
+
+export class FfmpegProcessRegistry {
+  private readonly activeProcesses = new Set<RegisteredFfmpegProcess>()
+
+  get size(): number {
+    return this.activeProcesses.size
+  }
+
+  register(process: RegisteredFfmpegProcess): () => void {
+    this.activeProcesses.add(process)
+    return () => {
+      this.activeProcesses.delete(process)
+    }
+  }
+
+  terminateAll(): void {
+    for (const process of [...this.activeProcesses]) {
+      process.terminate()
+    }
+  }
 }
 
 export const spawnFfmpegProcess: SpawnFfmpegProcess = (
@@ -53,6 +79,7 @@ export const runFfmpeg = async (
   }
 
   const clock = dependencies.clock ?? systemClock
+  const processRegistry = dependencies.processRegistry
   const spawnProcess = dependencies.spawnProcess ?? spawnFfmpegProcess
 
   return new Promise<boolean>((resolve) => {
@@ -62,6 +89,7 @@ export const runFfmpeg = async (
     let timeout: NodeJS.Timeout | undefined
     let terminationTimeout: NodeJS.Timeout | undefined
     let timedOut = false
+    let unregisterProcess = (): void => {}
 
     const settle = (value: boolean): void => {
       if (settled) {
@@ -75,22 +103,32 @@ export const runFfmpeg = async (
       if (terminationTimeout) {
         clock.clearTimeout(terminationTimeout)
       }
+      unregisterProcess()
       resolve(value)
     }
 
+    const terminate = (): void => {
+      if (settled || timedOut) {
+        return
+      }
+
+      timedOut = true
+      proc.kill()
+      terminationTimeout = clock.setTimeout(() => {
+        proc.kill('SIGKILL')
+        settle(false)
+      }, FFMPEG_TERMINATION_GRACE_MS)
+      terminationTimeout.unref?.()
+    }
+    unregisterProcess = processRegistry?.register({ terminate }) ?? (() => {})
+
     if (options.timeoutMs > 0) {
       timeout = clock.setTimeout(() => {
-        timedOut = true
         options.log(
           'warn',
           `[WdioPuppeteerVideoService] ffmpeg ${options.operation} timed out after ${options.timeoutMs.toString()}ms`,
         )
-        proc.kill()
-        terminationTimeout = clock.setTimeout(() => {
-          proc.kill('SIGKILL')
-          settle(false)
-        }, FFMPEG_TERMINATION_GRACE_MS)
-        terminationTimeout.unref?.()
+        terminate()
       }, options.timeoutMs)
       timeout.unref?.()
     }

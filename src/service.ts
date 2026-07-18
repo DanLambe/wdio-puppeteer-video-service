@@ -21,6 +21,7 @@ import {
   type MergeExecutionOptions,
   type OutputFormat,
   type PersistedSpecRetryState,
+  RECORDER_STOP_TIMEOUT_MS,
   type ResolvedRetryContext,
   type ResolvedTranscodeOptions,
   SEGMENT_SWITCH_DELAY_MS,
@@ -36,6 +37,7 @@ import { resolveServiceConfiguration } from './service/options.js'
 import * as pageLookup from './service/page-lookup.js'
 import * as artifactPaths from './service/paths.js'
 import * as postProcess from './service/post-process.js'
+import { RecordingLifecycle } from './service/recording-lifecycle.js'
 import { RecordingSlotScheduler } from './service/recording-slots.js'
 import * as retryStateHelpers from './service/retry-state.js'
 import type {
@@ -58,7 +60,7 @@ import {
 export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
-  private _browser?: Browser
+  private _browser: Browser | undefined
   private readonly _options: WdioPuppeteerVideoServiceOptions
   private _recorder: ScreenRecorder | undefined
   private _activeSegment: ActiveSegment | undefined
@@ -85,6 +87,7 @@ export default class WdioPuppeteerVideoService
   private _ffmpegInitializationTask: Promise<boolean> | undefined
   private _ffmpegInitializationCompleted = false
   private _recordingTask: Promise<void> = Promise.resolve()
+  private _teardownTask: Promise<void> | undefined
   private readonly _deferredPostProcessTasks: DeferredPostProcessTask[] = []
   private _warnedAboutMp4Compatibility = false
   private _warnedAboutMp4AutoFallback = false
@@ -93,6 +96,9 @@ export default class WdioPuppeteerVideoService
   private readonly _slugUsageCount = new Map<string, number>()
   private readonly _maxSlugLength: number
   private readonly _recordingSlotScheduler: RecordingSlotScheduler
+  private readonly _recordingLifecycle = new RecordingLifecycle()
+  private readonly _ffmpegProcessRegistry =
+    new ffmpegRunner.FfmpegProcessRegistry()
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
 
@@ -431,24 +437,67 @@ export default class WdioPuppeteerVideoService
   }
 
   async after(): Promise<void> {
-    if (!this._isRecordingActive() && !this._hasDeferredPostProcessTasks()) {
+    await this._teardownRecording('after')
+  }
+
+  async afterSession(): Promise<void> {
+    await this._teardownRecording('afterSession')
+    this._browser = undefined
+    this._isChromium = false
+  }
+
+  async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
+    await this._teardownRecording('onReload')
+    this._sessionIdToken = buildSessionIdToken(newSessionId)
+    this._sessionIdFullToken = buildFullSessionIdToken(newSessionId)
+    this._log(
+      'debug',
+      `[WdioPuppeteerVideoService] Reset recording lifecycle for session reload ${buildSessionIdToken(oldSessionId)} -> ${this._sessionIdToken}.`,
+    )
+  }
+
+  private async _teardownRecording(
+    source: 'after' | 'afterSession' | 'onReload',
+  ): Promise<void> {
+    this._ffmpegProcessRegistry.terminateAll()
+    if (this._teardownTask) {
+      await this._teardownTask
       return
     }
 
-    await this._runSerializedRecordingTask(async () => {
-      if (this._isRecordingActive()) {
-        if (this._options.specLevelRecording && this._currentTestSlug) {
-          await this._finalizeCurrentTestRecording(!this._specHadFailure)
-        } else {
-          await this._stopRecording()
+    const task = this._runSerializedRecordingTask(async () => {
+      try {
+        if (this._isRecordingActive()) {
+          if (this._options.specLevelRecording && this._currentTestSlug) {
+            await this._finalizeCurrentTestRecording(!this._specHadFailure)
+          } else {
+            await this._stopRecording()
+            await this._resetTestState()
+          }
+        }
+
+        await this._flushDeferredPostProcessTasks()
+      } finally {
+        if (
+          this._isRecordingActive() ||
+          this._recordingSlotScheduler.ownsRecordingSlot ||
+          this._recordingSlotScheduler.ownsGlobalRecordingSlot
+        ) {
           await this._resetTestState()
         }
+        this._entityAttemptCount.clear()
+        this._specHadFailure = false
+        this._log(
+          'trace',
+          `[WdioPuppeteerVideoService] Recording teardown completed from ${source}.`,
+        )
       }
-
-      await this._flushDeferredPostProcessTasks()
-      this._entityAttemptCount.clear()
-      this._specHadFailure = false
     })
+    this._teardownTask = task
+    await task
+    if (this._teardownTask === task) {
+      this._teardownTask = undefined
+    }
   }
 
   async beforeCommand(commandName: string): Promise<void> {
@@ -527,17 +576,29 @@ export default class WdioPuppeteerVideoService
       return false
     }
 
+    return this._recordingLifecycle.start(async () => {
+      return this._startRecordingOperation()
+    })
+  }
+
+  private async _startRecordingOperation(): Promise<boolean> {
+    const browser = this._browser
+    if (!browser || !this._currentTestSlug) {
+      return false
+    }
+
     const ffmpegReady = await this._ensureFfmpegReady()
     if (!ffmpegReady) {
       return false
     }
 
-    const browser = this._browser
     const acquiredRecordingSlot = await this._acquireRecordingSlotForStart()
     if (!acquiredRecordingSlot) {
       return false
     }
 
+    let pendingRecorder: ScreenRecorder | undefined
+    let pendingSegment: ActiveSegment | undefined
     try {
       const activePage = await this._prepareRecordingPage(browser)
       if (!activePage) {
@@ -553,6 +614,7 @@ export default class WdioPuppeteerVideoService
         fps: this._options.fps || 30,
         ffmpegPath,
       })
+      pendingRecorder = recorder
 
       const writeStream = createWriteStream(recordingOutput.recordingPath)
       const writeStreamDone = finished(writeStream)
@@ -591,12 +653,9 @@ export default class WdioPuppeteerVideoService
       }
       writeStream.on('error', onWriteStreamError)
       recorder.on('error', onRecorderError)
-      recorder.pipe(writeStream)
 
       const transcodeOptions = this._createResolvedTranscodeOptions()
-
-      this._recorder = recorder
-      this._activeSegment = {
+      pendingSegment = {
         recordingPath: recordingOutput.recordingPath,
         outputPath: recordingOutput.outputPath,
         outputFormat: recordingOutput.outputFormat,
@@ -609,7 +668,8 @@ export default class WdioPuppeteerVideoService
         onWriteStreamError,
         onRecorderError,
       }
-      activeSegmentRef = this._activeSegment
+      activeSegmentRef = pendingSegment
+      recorder.pipe(writeStream)
 
       this._currentWindowHandle = windowHandle
       this._log(
@@ -618,6 +678,10 @@ export default class WdioPuppeteerVideoService
       )
 
       await this._kickOffScreencastFramesIfEnabled(page)
+      this._recorder = recorder
+      this._activeSegment = pendingSegment
+      pendingRecorder = undefined
+      pendingSegment = undefined
       return true
     } catch (e) {
       this._log(
@@ -625,10 +689,68 @@ export default class WdioPuppeteerVideoService
         '[WdioPuppeteerVideoService] Failed to start recording:',
         e,
       )
+      await this._cleanupPartialRecording(pendingRecorder, pendingSegment)
       return false
     } finally {
       if (acquiredRecordingSlot && !this._recorder) {
         await this._recordingSlotScheduler.release()
+      }
+    }
+  }
+
+  private async _cleanupPartialRecording(
+    recorder: ScreenRecorder | undefined,
+    segment: ActiveSegment | undefined,
+  ): Promise<void> {
+    if (recorder) {
+      await this._stopRecorder(recorder)
+      if (!recorder.destroyed) {
+        recorder.destroy()
+      }
+    }
+
+    if (!segment) {
+      return
+    }
+
+    recorder?.off('error', segment.onRecorderError)
+    segment.writeStream.off('error', segment.onWriteStreamError)
+    if (!segment.writeStream.destroyed) {
+      segment.writeStream.destroy()
+    }
+    await this._waitForWriteStreamCompletion(segment)
+    await fs.unlink(segment.recordingPath).catch(() => {
+      /* best-effort partial recording cleanup */
+    })
+  }
+
+  private async _stopRecorder(recorder: ScreenRecorder): Promise<void> {
+    let timeout: NodeJS.Timeout | undefined
+    const timeoutTask = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new Error(
+            `Recorder stop timed out after ${RECORDER_STOP_TIMEOUT_MS.toString()}ms`,
+          ),
+        )
+      }, RECORDER_STOP_TIMEOUT_MS)
+      timeout.unref?.()
+    })
+
+    try {
+      await Promise.race([recorder.stop(), timeoutTask])
+    } catch (error) {
+      this._log(
+        'warn',
+        '[WdioPuppeteerVideoService] Error stopping recorder:',
+        error,
+      )
+      if (!recorder.destroyed) {
+        recorder.destroy()
+      }
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout)
       }
     }
   }
@@ -967,71 +1089,96 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    await this._stopRecording()
+    await this._recordingLifecycle.finalize({
+      stopRecording: async () => {
+        await this._stopRecording()
+      },
+      processArtifacts: async () => {
+        const shouldKeepRetryRecording =
+          !!this._options.recordOnRetries &&
+          this._currentRecordingRetryCount > 0
+        const shouldKeepArtifacts =
+          !passed || !!this._options.saveAllVideos || shouldKeepRetryRecording
+        this._log(
+          'debug',
+          `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
+        )
+        if (!shouldKeepArtifacts) {
+          await this._deleteSegments()
+          await this._resetTestState()
+          return
+        }
 
-    const shouldKeepRetryRecording =
-      !!this._options.recordOnRetries && this._currentRecordingRetryCount > 0
-    const shouldKeepArtifacts =
-      !passed || !!this._options.saveAllVideos || shouldKeepRetryRecording
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
-    )
-    if (!shouldKeepArtifacts) {
-      await this._deleteSegments()
-      await this._resetTestState()
-      return
-    }
+        if (this._options.mergeSegments?.enabled) {
+          if (this._shouldDeferPostProcessing()) {
+            await this._queueDeferredMergeForCurrentTest()
+          } else {
+            await this._mergeSegmentsForCurrentTest()
+          }
+        }
 
-    if (this._options.mergeSegments?.enabled) {
-      if (this._shouldDeferPostProcessing()) {
-        await this._queueDeferredMergeForCurrentTest()
-      } else {
-        await this._mergeSegmentsForCurrentTest()
-      }
-    }
-
-    await this._resetTestState()
+        await this._resetTestState()
+      },
+    })
   }
 
   private async _stopRecording(): Promise<void> {
-    const recorder = this._recorder
-    const activeSegment = this._activeSegment
-    this._recorder = undefined
-    this._activeSegment = undefined
+    let recorder: ScreenRecorder | undefined
+    let activeSegment: ActiveSegment | undefined
+    const hadWorkAtInvocation = !!this._recorder || !!this._activeSegment
+    await this._recordingLifecycle.stop({
+      hasWork: () => !!this._recorder || !!this._activeSegment,
+      stopCapture: async () => {
+        recorder = this._recorder
+        activeSegment = this._activeSegment
+        this._recorder = undefined
+        this._activeSegment = undefined
+        if (recorder) {
+          await this._stopRecorder(recorder)
+        }
+      },
+      processCapture: async () => {
+        try {
+          if (!recorder || !activeSegment) {
+            if (recorder && !recorder.destroyed) {
+              recorder.destroy()
+            }
+            await this._cleanupPartialRecording(undefined, activeSegment)
+            return
+          }
 
-    if (!recorder || !activeSegment) {
-      await this._recordingSlotScheduler.release()
-      return
-    }
-    try {
-      await recorder.stop()
-    } catch (e) {
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] Error stopping recorder:',
-        e,
-      )
-    }
+          const streamOk = await this._waitForWriteStream(activeSegment)
+          if (!streamOk) {
+            this._log(
+              'warn',
+              `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
+            )
+            this._markSegmentAsUnclean(activeSegment)
+          }
 
-    try {
-      const streamOk = await this._waitForWriteStream(activeSegment)
-      if (!streamOk) {
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
-        )
-        this._markSegmentAsUnclean(activeSegment)
-      }
+          await this._finalizeSegment(activeSegment)
+          this._log(
+            'debug',
+            `[WdioPuppeteerVideoService] Finalized segment ${this._currentSegment} (${activeSegment.outputPath})`,
+          )
+        } finally {
+          if (recorder && activeSegment) {
+            recorder.off('error', activeSegment.onRecorderError)
+            activeSegment.writeStream.off(
+              'error',
+              activeSegment.onWriteStreamError,
+            )
+          }
+          await this._recordingSlotScheduler.release()
+        }
+      },
+    })
 
-      await this._finalizeSegment(activeSegment)
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Finalized segment ${this._currentSegment} (${activeSegment.outputPath})`,
-      )
-    } finally {
-      recorder.off('error', activeSegment.onRecorderError)
-      activeSegment.writeStream.off('error', activeSegment.onWriteStreamError)
+    if (
+      !hadWorkAtInvocation &&
+      (this._recordingSlotScheduler.ownsRecordingSlot ||
+        this._recordingSlotScheduler.ownsGlobalRecordingSlot)
+    ) {
       await this._recordingSlotScheduler.release()
     }
   }
@@ -1483,22 +1630,27 @@ export default class WdioPuppeteerVideoService
     args: string[],
     operation: string,
   ): Promise<boolean> {
-    return ffmpegRunner.runFfmpeg({
-      args,
-      available: this._ffmpegAvailable,
-      ffmpegPath: this._resolveFfmpegPath(),
-      log: (level, message, details) => {
-        this._log(level, message, details)
+    return ffmpegRunner.runFfmpeg(
+      {
+        args,
+        available: this._ffmpegAvailable,
+        ffmpegPath: this._resolveFfmpegPath(),
+        log: (level, message, details) => {
+          this._log(level, message, details)
+        },
+        markUnavailable: () => {
+          this._ffmpegAvailable = false
+        },
+        operation,
+        timeoutMs: this._options.ffmpegTimeoutMs ?? 0,
+        warnMissing: (reason) => {
+          this._warnMissingFfmpeg(reason)
+        },
       },
-      markUnavailable: () => {
-        this._ffmpegAvailable = false
+      {
+        processRegistry: this._ffmpegProcessRegistry,
       },
-      operation,
-      timeoutMs: this._options.ffmpegTimeoutMs ?? 0,
-      warnMissing: (reason) => {
-        this._warnMissingFfmpeg(reason)
-      },
-    })
+    )
   }
 
   private _warnMissingFfmpeg(reason: string): void {
@@ -1789,14 +1941,16 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _resetTestState(): Promise<void> {
-    this._recorder = undefined
-    this._activeSegment = undefined
-    this._currentSegment = 0
-    this._currentTestSlug = ''
-    this._currentRecordingRetryCount = 0
-    this._currentWindowHandle = undefined
-    this._recordedSegments.clear()
-    await this._recordingSlotScheduler.release()
+    await this._recordingLifecycle.reset(async () => {
+      this._recorder = undefined
+      this._activeSegment = undefined
+      this._currentSegment = 0
+      this._currentTestSlug = ''
+      this._currentRecordingRetryCount = 0
+      this._currentWindowHandle = undefined
+      this._recordedSegments.clear()
+      await this._recordingSlotScheduler.release()
+    })
   }
 
   private _isRecordingActive(): boolean {

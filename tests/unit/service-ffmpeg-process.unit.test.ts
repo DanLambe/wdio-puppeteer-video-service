@@ -11,6 +11,7 @@ vi.mock('node:child_process', () => ({
 import { FFMPEG_TERMINATION_GRACE_MS } from '../../src/service/constants.js'
 import {
   type FfmpegProcess,
+  FfmpegProcessRegistry,
   runFfmpeg,
   spawnFfmpegProcess,
 } from '../../src/service/ffmpeg-runner.js'
@@ -152,5 +153,37 @@ describe('ffmpeg runner process handling', () => {
     ).resolves.toBe(false)
     expect(spawnProcess).not.toHaveBeenCalled()
     expect(warnMissing).toHaveBeenCalledOnce()
+  })
+
+  it('terminates registered processes during service teardown', async () => {
+    const process = new FakeFfmpegProcess()
+    const registry = new FfmpegProcessRegistry()
+    const harness = createRunnerHarness()
+
+    const resultPromise = runFfmpeg(
+      {
+        args: ['-i', 'input.webm'],
+        available: true,
+        ffmpegPath: 'ffmpeg',
+        log: () => {},
+        markUnavailable: harness.markUnavailable,
+        operation: 'merge',
+        timeoutMs: 0,
+        warnMissing: harness.warnMissing,
+      },
+      {
+        processRegistry: registry,
+        spawnProcess: () => process,
+      },
+    )
+
+    expect(registry.size).toBe(1)
+    registry.terminateAll()
+    registry.terminateAll()
+    expect(process.kill).toHaveBeenCalledOnce()
+    process.emit('close', null)
+
+    await expect(resultPromise).resolves.toBe(false)
+    expect(registry.size).toBe(0)
   })
 })

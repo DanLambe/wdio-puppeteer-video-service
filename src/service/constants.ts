@@ -86,6 +86,7 @@ export const WINDOW_SEGMENT_COMMANDS: Set<string> = new Set<string>([
 export const ACTIVE_PAGE_TIMEOUT_MS = 2_000
 export const ACTIVE_PAGE_POLL_MS = 50
 export const SEGMENT_SWITCH_DELAY_MS = 50
+export const RECORDER_STOP_TIMEOUT_MS = 5_000
 export const WRITE_STREAM_TIMEOUT_MS = 30_000
 export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 export const FFMPEG_TERMINATION_GRACE_MS = 1_000

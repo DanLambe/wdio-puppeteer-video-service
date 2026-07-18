@@ -56,6 +56,25 @@ describe('Puppeteer page lookup', () => {
     ).resolves.toBe(matchingPage)
   })
 
+  it('reads the page marker through the Puppeteer evaluation callback', async () => {
+    const globalMarker = globalThis as { _wdio_video_id?: string }
+    const previousMarker = globalMarker._wdio_video_id
+    globalMarker._wdio_video_id = 'target'
+    try {
+      const page = {
+        evaluate: async (callback: () => string | undefined) => callback(),
+      } as unknown as Page
+
+      await expect(findPageWithId([page], 'target')).resolves.toBe(page)
+    } finally {
+      if (previousMarker === undefined) {
+        delete globalMarker._wdio_video_id
+      } else {
+        globalMarker._wdio_video_id = previousMarker
+      }
+    }
+  })
+
   it('polls through the injected clock until the page appears', async () => {
     const matchingPage = createPage('target')
     const pages = vi

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeError,
+  getEffectiveMaxFilenameLength,
   isBenignStreamWriteError,
   normalizeFileNameStyle,
   normalizeMergeOptions,
   normalizeMp4Mode,
   normalizeNonNegativeInt,
   normalizeOutputFormat,
+  normalizePatternList,
   normalizePositiveInt,
   normalizeRecordingStartMode,
   normalizeTranscodeOptions,
@@ -129,5 +132,30 @@ describe('normalization helpers', () => {
         code: 'EACCES',
       }),
     ).toBe(false)
+  })
+
+  it('normalizes pattern lists and removes invalid or duplicate values', () => {
+    expect(
+      normalizePatternList([' @Smoke ', '', '  ', '@smoke', 42 as never]),
+    ).toEqual(['@smoke'])
+    expect(normalizePatternList(undefined)).toEqual([])
+  })
+
+  it('applies platform filename defaults and exhausted Windows path budgets', () => {
+    expect(getEffectiveMaxFilenameLength({ outputDir: '' }, 'linux')).toBe(255)
+    expect(
+      getEffectiveMaxFilenameLength(
+        {
+          maxFileNameLength: 100,
+          outputDir: 'x'.repeat(300),
+        },
+        'win32',
+      ),
+    ).toBe(100)
+  })
+
+  it('describes string and primitive errors without losing their value', () => {
+    expect(describeError('target closed')).toBe('target closed')
+    expect(describeError(404)).toBe('404')
   })
 })
