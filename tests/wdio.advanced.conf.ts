@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import type { WdioPuppeteerVideoServiceOptions } from '../src/types.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import {
   assertVideoArtifacts,
@@ -141,94 +142,124 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
 const fileStyleTitleToken =
   'unique_title_token_should_not_appear_for_session_style_modes'
 
-type ServiceOptions = Record<string, unknown>
+type ServiceOptions = WdioPuppeteerVideoServiceOptions
 
 const defaultServiceOptions: ServiceOptions = {
   outputDir: resultsDir,
-  saveAllVideos: true,
-  maxConcurrentRecordings: 1,
-  outputFormat: 'mp4',
-  transcode: {
-    enabled: true,
+  recording: {
+    retain: 'all',
   },
-  mergeSegments: {
-    enabled: false,
+  concurrency: {
+    maxRecordingsPerProcess: 1,
+  },
+  processing: {
+    format: 'mp4',
+    transcode: {
+      enabled: true,
+    },
+    merge: {
+      enabled: false,
+    },
   },
 }
 
 const createServiceOptions = (overrides: ServiceOptions): ServiceOptions => {
-  const transcodeOverrides = overrides.transcode as ServiceOptions | undefined
-  const mergeSegmentOverrides = overrides.mergeSegments as
-    | ServiceOptions
-    | undefined
-
   return {
     ...defaultServiceOptions,
     ...overrides,
-    transcode: {
-      ...(defaultServiceOptions.transcode as ServiceOptions),
-      ...transcodeOverrides,
+    recording: {
+      ...defaultServiceOptions.recording,
+      ...overrides.recording,
+      filters: {
+        ...defaultServiceOptions.recording?.filters,
+        ...overrides.recording?.filters,
+      },
     },
-    mergeSegments: {
-      ...(defaultServiceOptions.mergeSegments as ServiceOptions),
-      ...mergeSegmentOverrides,
+    concurrency: {
+      ...defaultServiceOptions.concurrency,
+      ...overrides.concurrency,
+    },
+    processing: {
+      ...defaultServiceOptions.processing,
+      ...overrides.processing,
+      transcode: {
+        ...defaultServiceOptions.processing?.transcode,
+        ...overrides.processing?.transcode,
+      },
+      merge: {
+        ...defaultServiceOptions.processing?.merge,
+        ...overrides.processing?.merge,
+      },
+    },
+    artifacts: {
+      ...defaultServiceOptions.artifacts,
+      ...overrides.artifacts,
+      naming: {
+        ...defaultServiceOptions.artifacts?.naming,
+        ...overrides.artifacts?.naming,
+      },
     },
   }
 }
 
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
-    saveAllVideos: false,
-    recordOnRetries: true,
+    recording: { attempts: 'retries', retain: 'retries' },
   }),
   'spec-file-retry': createServiceOptions({
-    saveAllVideos: false,
-    recordOnRetries: true,
+    recording: { attempts: 'retries', retain: 'retries' },
   }),
   'spec-level': createServiceOptions({
-    specLevelRecording: true,
-    skipViewPortKickoff: true,
+    recording: { scope: 'spec' },
+    capture: { framePriming: false },
   }),
   'no-segment': createServiceOptions({
-    segmentOnWindowSwitch: false,
+    recording: { windowChanges: 'ignore' },
   }),
   'test-full-style': createServiceOptions({
-    fileNameStyle: 'testFull',
+    artifacts: { naming: { style: 'test-full' } },
   }),
   'session-style': createServiceOptions({
-    fileNameStyle: 'session',
+    artifacts: { naming: { style: 'session' } },
   }),
   'session-full-style': createServiceOptions({
-    fileNameStyle: 'sessionFull',
+    artifacts: { naming: { style: 'session-full' } },
   }),
   'deferred-merge': createServiceOptions({
-    postProcessMode: 'deferred',
-    mergeSegments: {
-      enabled: true,
-      deleteSegments: true,
+    processing: {
+      timing: 'after-worker',
+      merge: { enabled: true, deleteSegments: true },
     },
   }),
   'include-spec': createServiceOptions({
-    includeSpecPatterns: ['*filter-spec-recording*'],
+    recording: {
+      filters: { includeSpecs: ['*filter-spec-recording*'] },
+    },
   }),
   'exclude-spec': createServiceOptions({
-    excludeSpecPatterns: ['*filter-spec-recording*'],
+    recording: {
+      filters: { excludeSpecs: ['*filter-spec-recording*'] },
+    },
   }),
   retention: createServiceOptions({
-    saveAllVideos: false,
+    recording: { retain: 'failures' },
   }),
   'global-concurrency': createServiceOptions({
-    maxGlobalRecordings: 1,
-    globalRecordingLockDir,
-    outputFormat: 'webm',
-    transcode: {
-      enabled: false,
+    concurrency: {
+      maxRecordingsGlobal: 1,
+      lockDir: globalRecordingLockDir,
+    },
+    processing: {
+      format: 'webm',
+      transcode: { enabled: false },
     },
   }),
   'ffmpeg-failure': createServiceOptions({
-    transcode: {
-      enabled: true,
-      ffmpegArgs: ['-this-option-does-not-exist'],
+    processing: {
+      transcode: {
+        enabled: true,
+        ffmpegArgs: ['-this-option-does-not-exist'],
+      },
     },
   }),
 }

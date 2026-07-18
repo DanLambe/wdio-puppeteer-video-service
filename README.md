@@ -1,25 +1,24 @@
-
 # WDIO Puppeteer Video Service
 
 [![npm version](https://img.shields.io/npm/v/wdio-puppeteer-video-service)](https://www.npmjs.com/package/wdio-puppeteer-video-service)
 [![npm downloads](https://img.shields.io/npm/dm/wdio-puppeteer-video-service)](https://www.npmjs.com/package/wdio-puppeteer-video-service)
 [![License](https://img.shields.io/npm/l/wdio-puppeteer-video-service)](./LICENSE)
-[![Publish To NPM](https://github.com/DanLambe/wdio-puppeteer-video-service/actions/workflows/publish.yaml/badge.svg)](https://github.com/DanLambe/wdio-puppeteer-video-service/actions/workflows/publish.yaml)
 [![Sonar Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=DanLambe_wdio-puppeteer-video-service&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=DanLambe_wdio-puppeteer-video-service)
-[![Sonar Security Rating](https://sonarcloud.io/api/project_badges/measure?project=DanLambe_wdio-puppeteer-video-service&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=DanLambe_wdio-puppeteer-video-service)
-[![Sonar Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=DanLambe_wdio-puppeteer-video-service&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=DanLambe_wdio-puppeteer-video-service)
 
-A WebdriverIO V9 Service to record videos using Puppeteer (CDP).
+A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
-> **Beta notice**
-> This package is currently in beta (pre-`1.0.0`). APIs, defaults, and behavior may still evolve between minor releases.
-> Use in production with caution and pin versions deliberately.
+> **Pre-1.0 notice**
+> The `1.0.0` configuration API is now represented on the release branch, but
+> the package remains prerelease until the rest of the 1.0 feature and release
+> gates are complete.
 
 Features:
 
-- **BiDi/CDP Integration**: Uses `browser.getPuppeteer()` for efficient recording.
-- **Context-Aware**: Handles multi-tab tests by creating segmented video files.
-- **Smart Lifecycle**: Automatically deletes videos for passing tests (configurable).
+- Records per test/scenario or per spec.
+- Handles multi-tab tests with optional segmented output and FFmpeg merging.
+- Supports retry-only capture and independent artifact retention rules.
+- Provides cross-worker recording limits and crash-tolerant lifecycle cleanup.
+- Uses local, deterministic Mocha, Jasmine, and Cucumber fixtures in CI.
 
 ## Installation
 
@@ -29,293 +28,266 @@ npm install wdio-puppeteer-video-service
 
 ## Configuration
 
-Add the service to your `wdio.conf.ts`:
+Add the service to `wdio.conf.ts`:
 
 ```typescript
 import { WdioPuppeteerVideoService } from 'wdio-puppeteer-video-service'
 
 export const config = {
-    // ...
-    services: [
-        [WdioPuppeteerVideoService, {
-            outputDir: 'videos',
-            saveAllVideos: false, // Save videos only for failed tests
-            videoWidth: 1280,
-            videoHeight: 720,
-            fps: 30,
-            // Record only retry attempts (attempt > 0)
-            // recordOnRetries: false,
-            // Record once per spec instead of per test/scenario
-            // specLevelRecording: false,
-            // Skip viewport resize kickoff before screencast capture
-            // skipViewPortKickoff: false,
-            // Disable per-window stop/start segmentation on window switches
-            // segmentOnWindowSwitch: true,
-            // In-process limiter for active recorders (0 = unlimited)
-            // maxConcurrentRecordings: 0,
-            // Cross-worker limiter for active recorders on same host (0 = unlimited)
-            // maxGlobalRecordings: 0,
-            // Recording start mode under slot contention
-            // recordingStartMode: 'blocking', // 'blocking' | 'fastFail'
-            // Max wait for fastFail mode before skipping a segment
-            // recordingStartTimeoutMs: 2500,
-            // Optional custom lock directory for cross-worker limiter
-            // globalRecordingLockDir: './tmp/wdio-video-locks',
-            // Run ffmpeg-heavy merge/transcode in worker `after` hook
-            // postProcessMode: 'immediate', // or 'deferred'
-            // Optional spec/tag recording filters (case-insensitive, * wildcard)
-            // includeSpecPatterns: ['*critical*'],
-            // excludeSpecPatterns: ['*legacy*'],
-            // includeTagPatterns: ['@video*'],
-            // excludeTagPatterns: ['@novideo'],
-            // Optional service log level: trace|debug|info|warn|error|silent
-            // If omitted, the service inherits WebdriverIO logLevel when available.
-            // logLevel: 'info',
-            // Optional manual profile for parallel workers:
-            // performanceProfile: 'parallel', // 'default' | 'parallel' | 'ci'
-            // Optional filename safety controls for long test titles:
-            // maxFileNameLength: 180, // defaults: 180 on Windows, 255 elsewhere
-            // fileNameStyle: 'test', // 'test' | 'testFull' | 'session' | 'sessionFull'
-            // fileNameOverflowStrategy: 'truncate', // 'truncate' | 'session'
-            outputFormat: 'webm', // or 'mp4'
-            // MP4 strategy:
-            // mp4Mode: 'auto', // 'auto' | 'direct' | 'transcode' (default: 'auto')
-            // In auto mode, direct MP4 is used only when ffmpeg compatibility probes pass.
-            // Otherwise the service falls back to WebM capture + H.264 transcode.
-
-            // For explicit H.264 MP4 compatibility, enable transcoding:
-            // outputFormat: 'mp4',
-            // transcode: { enabled: true, deleteOriginal: true, ffmpegArgs: ['-crf', '28'] },
-            // Optional: merge *_partN files into one continuous file per test.
-            // mergeSegments: { enabled: true, deleteSegments: true },
-            // ffmpegPath: '/usr/bin/ffmpeg',
-            // Kill stuck ffmpeg merge/transcode operations after this many ms
-            // ffmpegTimeoutMs: 0, // 0 disables the timeout
-        }]
+  services: [
+    [
+      WdioPuppeteerVideoService,
+      {
+        outputDir: 'videos',
+        recording: {
+          scope: 'test',
+          attempts: 'all',
+          retain: 'failures',
+          windowChanges: 'segment',
+          filters: {
+            includeSpecs: ['*critical*'],
+            excludeTags: ['@no-video'],
+          },
+        },
+        capture: {
+          width: 1280,
+          height: 720,
+          fps: 30,
+          framePriming: true,
+        },
+        processing: {
+          format: 'webm',
+          mp4Mode: 'auto',
+          timing: 'after-test',
+          ffmpeg: {
+            path: '/usr/bin/ffmpeg',
+            timeoutMs: 0,
+          },
+          transcode: {
+            enabled: false,
+            deleteOriginal: true,
+          },
+          merge: {
+            enabled: false,
+            deleteSegments: true,
+          },
+        },
+        concurrency: {
+          maxRecordingsPerProcess: 0,
+          maxRecordingsGlobal: 0,
+          startMode: 'blocking',
+          startTimeoutMs: 2500,
+        },
+        artifacts: {
+          naming: {
+            style: 'test',
+            overflow: 'truncate',
+          },
+        },
+        profile: 'default',
+        logLevel: 'warn',
+        failurePolicy: 'warn',
+      },
     ],
-    // ...
+  ],
 }
 ```
+
+Configuration is validated when the service is constructed, before a browser
+session starts. Unknown keys, invalid values, and removed 0.8 aliases throw a
+path-specific `TypeError`.
 
 ## Prerequisites
 
 - Node.js 24+
 - WebdriverIO v9 using `runner: 'local'`
-- Puppeteer Core 25.3+ (version 0.8.0 raises the peer requirement from 24.x)
-- Chromium-based browser session (Chrome or Edge)
-- FFmpeg installed by your environment team:
-  - Available as `ffmpeg` on PATH, or
-  - Referenced explicitly with `ffmpegPath`, or
-  - Exposed via `FFMPEG_PATH`
+- Puppeteer Core 25.3+
+- A Chromium-based browser session (Chrome or Edge)
+- FFmpeg supplied by the environment
 
-The service resolves FFmpeg in this order:
+FFmpeg is resolved in this order:
 
-1. `ffmpegPath` option
-2. `FFMPEG_PATH` environment variable
-3. `ffmpeg` on PATH
-4. `ffmpeg-static` if it is installed in the project
+1. `processing.ffmpeg.path`
+2. `FFMPEG_PATH`
+3. `ffmpeg` on `PATH`
+4. `ffmpeg-static` when installed by the consuming project
 
-This package does not install FFmpeg automatically for end users.
-
-Repository development and CI use Node.js 24.15+ with the npm version pinned by
-`packageManager`. Run repository npm commands through `corepack npm` so local and
-CI dependency policy stays consistent.
+This package does not install FFmpeg automatically for end users. Repository
+development uses the Node and npm versions declared in `package.json`; run npm
+commands through `corepack npm`.
 
 ## Option Reference
 
-Service options and defaults:
+Top-level options:
 
-- `outputDir` (default: `'videos'`): directory for generated artifacts.
-- `saveAllVideos` (default: `false`): keep artifacts for passing entities.
-- `videoWidth` (default: `1280`): capture width.
-- `videoHeight` (default: `720`): capture height.
-- `fps` (default: `30`): capture frames per second.
-- `recordOnRetries` (default: `false`): start recording only for retry attempts (`attempt > 0`) including WDIO `specFileRetries` worker retries.
-- `specLevelRecording` (default: `false`): record once per spec file and finalize in worker `after`.
-- `skipViewPortKickoff` (default: `false`): skip the viewport warmup resize sequence before capture.
-- `segmentOnWindowSwitch` (default: `true`): split recordings around window/tab switch commands.
-- `maxConcurrentRecordings` (default: `0`): in-process recorder slot limit (`0` means unlimited).
-- `maxGlobalRecordings` (default: `0`): cross-worker recorder slot limit on the same host (`0` means unlimited).
-- `recordingStartMode` (default: `'blocking'`): recorder-slot wait behavior (`'blocking' | 'fastFail'`).
-- `recordingStartTimeoutMs` (default: `2500`): max wait in milliseconds for `recordingStartMode: 'fastFail'`.
-- `globalRecordingLockDir` (default: `<outputDir>/.wdio-video-global-slots` when `maxGlobalRecordings > 0`): optional lock-file directory for `maxGlobalRecordings`.
-- `postProcessMode` (default: `'immediate'`): ffmpeg post-processing timing (`'immediate' | 'deferred'`).
-- `includeSpecPatterns` (default: `[]`): include-only spec path patterns for recording decisions (`*` wildcard).
-- `excludeSpecPatterns` (default: `[]`): spec path patterns to suppress recording (`*` wildcard).
-- `includeTagPatterns` (default: `[]`): include-only tag patterns for recording decisions (`*` wildcard).
-- `excludeTagPatterns` (default: `[]`): tag patterns to suppress recording (`*` wildcard).
-- `performanceProfile` (default: `'default'`): optional preset (`'parallel'` or `'ci'` lowers defaults when unset).
-- `logLevel` (default: inherits WDIO log level, fallback `'warn'`): service log verbosity.
-- `maxFileNameLength` (default: `180` on Windows, `255` elsewhere): max artifact basename length.
-- `fileNameOverflowStrategy` (default: `'truncate'`): overflow handling (`'truncate' | 'session'`).
-- `fileNameStyle` (default: `'test'`): naming style (`'test' | 'testFull' | 'session' | 'sessionFull'`).
-- `ffmpegPath` (default: unset): explicit ffmpeg binary path override.
-- `ffmpegTimeoutMs` (default: `0`): maximum milliseconds for FFmpeg merge/transcode work before killing it; `0` disables the timeout.
-- `outputFormat` (default: `'webm'`): artifact container format (`'webm' | 'mp4'`).
-- `mp4Mode` (default: `'auto'`): MP4 capture strategy (`'auto' | 'direct' | 'transcode'`).
-- `transcode.enabled` (default: `false`): force H.264 MP4 post-processing when output is MP4.
-- `transcode.deleteOriginal` (default: `true`): remove intermediate file after successful transcode.
-- `transcode.ffmpegArgs` (default: unset): additional ffmpeg args before output. Under the `ci` profile, an explicit empty array opts out of the profile's FFmpeg defaults.
-- `mergeSegments.enabled` (default: `false`): merge `_partN` artifacts to one output per entity.
-- `mergeSegments.deleteSegments` (default: `true`): delete part files after successful merge.
+- `outputDir` (default `'videos'`): generated artifact directory.
+- `profile` (`'default' | 'parallel' | 'ci'`, default `'default'`): grouped preset. Explicit values always win.
+- `logLevel` (`'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'`): inherits WDIO when omitted, with a `'warn'` fallback.
+- `failurePolicy` (`'warn' | 'error'`, default `'warn'`): reserved for consistent cleanup-first failure handling in the 1.0 processing work.
 
-### Retry and Keep Rules
+`recording`:
 
-- Default mode: record each test/scenario, keep only failed artifacts unless `saveAllVideos` is `true`.
-- `recordOnRetries: true`: first attempts are not recorded, retry attempts are recorded.
-- WDIO `specFileRetries` are treated as retry attempts for `recordOnRetries`.
-- Retry artifacts are retained even if that retry eventually passes.
-- When `recordOnRetries` is enabled, the service uses temporary retry-state files in `<outputDir>/.wdio-video-retry-state` and cleans them automatically on launcher `onPrepare`/`onComplete`.
-- `specLevelRecording: true`: one recording per spec; pass/fail keep decision is based on aggregate spec outcome.
+- `scope` (`'test' | 'spec'`, default `'test'`).
+- `attempts` (`'all' | 'retries'`, default `'all'`). WDIO `specFileRetries` worker retries count as retry attempts.
+- `retain` (`'failures' | 'retries' | 'all'`, default `'failures'`).
+- `windowChanges` (`'segment' | 'ignore'`, default `'segment'`).
+- `filters.includeSpecs`, `filters.excludeSpecs`, `filters.includeTags`, and `filters.excludeTags`: case-insensitive patterns supporting `*` wildcards.
 
-### Selective Recording Filters
+`capture`:
 
-Use filters when you only need artifacts for a subset of coverage:
+- `width` (default `1280`), `height` (default `720`), and `fps` (default `30`).
+- `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
 
-- `includeSpecPatterns`: record only matching spec paths.
-- `excludeSpecPatterns`: skip matching spec paths.
-- `includeTagPatterns`: record only tests/scenarios with matching tags.
-- `excludeTagPatterns`: skip tests/scenarios with matching tags.
+`processing`:
 
-Pattern behavior:
+- `format` (`'webm' | 'mp4'`, default `'webm'`).
+- `mp4Mode` (`'auto' | 'direct' | 'transcode'`, default `'auto'`).
+- `timing` (`'after-test' | 'after-worker'`, default `'after-test'`).
+- `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the timeout).
+- `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`.
+- `merge.enabled` (default `false`) and `deleteSegments` (default `true`).
 
-- Matching is case-insensitive.
-- `*` is supported as a wildcard.
-- Without `*`, patterns are treated as substring matches.
+`concurrency`:
 
-## Limitations
+- `maxRecordingsPerProcess` (default `0`, unlimited).
+- `maxRecordingsGlobal` (default `0`, disabled).
+- `startMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
+- `startTimeoutMs` (default `2500`) and optional `lockDir`.
 
-- Chromium only: non-Chromium browsers are skipped.
-- Window/tab changes create segmented recordings by default (`segmentOnWindowSwitch: true`).
-- When `mergeSegments.enabled` is true, segments are merged after the test completes.
-- Audio is not included in output files.
-- `outputFormat: 'mp4'` without `transcode.enabled` can produce VP9-in-MP4 files with limited player compatibility.
-- `mp4Mode: 'direct'` may be less reliable on some ffmpeg builds in CI/headless environments.
-- Extremely long test titles can still hit OS path limits, so keep `outputDir` reasonably short on Windows.
-- Resource-constrained CI runners (shared/low-CPU GitHub Actions agents) can show slower test execution and longer finalize/merge times because browser capture and ffmpeg compete for limited CPU.
-- Under heavy parallel load, recording stability depends on available CPU/RAM/IO; this service cannot fully eliminate host-level contention.
+`artifacts.naming`:
 
-## Output
+- `style` (`'test' | 'test-full' | 'session' | 'session-full'`, default `'test'`).
+- `maxLength` (default `180` on Windows and `255` elsewhere).
+- `overflow` (`'truncate' | 'session'`, default `'truncate'`).
 
-Videos are saved in the `outputDir`.
-Default naming convention: `test_title_<session>_<hash>_partN.<webm|mp4>`.
-The `<session>` token uses the first WebDriver session GUID segment when present and is capped to 12 characters.
+`integrations` is intentionally empty until an integration is implemented. An
+unknown integration is rejected instead of being silently ignored.
 
-For suite-aware naming, set `fileNameStyle: 'testFull'`. This prefers full test/scenario names such as `checkout_suite_adds_item_<hash>_partN.webm`.
+### Recording and Retention Rules
 
-For session-id-only naming, set:
+- The defaults record every test/scenario and retain failures only.
+- `attempts: 'retries'` skips first-attempt capture.
+- `retain: 'retries'` keeps retry-attempt artifacts, including a retry that passes.
+- `retain: 'all'` keeps every captured artifact.
+- Retry state is stored under `<outputDir>/.wdio-video-retry-state` and cleaned by launcher hooks.
+- `scope: 'spec'` records one artifact per spec and uses the aggregate spec result.
 
-- `fileNameStyle: 'session'` to use a short session token
-- `fileNameStyle: 'sessionFull'` to use the full session id token
+## Migrating from 0.8 to 1.0
 
-When session-only naming is used and multiple tests run in the same session, the service appends `_runN` to avoid artifact overwrites.
+The 1.0 API is clean-breaking. Deprecated aliases are not accepted, including
+from JavaScript configuration files. Use this complete mapping:
 
-When `mergeSegments.enabled` is `true`, the service writes a merged file per test:
-`test_title_<session>_<hash>.<webm|mp4>`.
+| 0.8 option | 1.0 option | Notes |
+| --- | --- | --- |
+| `outputDir` | `outputDir` | Unchanged. |
+| `saveAllVideos` | `recording.retain` | `true` becomes `'all'`; `false` becomes `'failures'`. |
+| `videoWidth` | `capture.width` | |
+| `videoHeight` | `capture.height` | |
+| `fps` | `capture.fps` | |
+| `recordOnRetries` | `recording.attempts` and `recording.retain` | For equivalent retry-only behavior, set both to `'retries'`. |
+| `specLevelRecording` | `recording.scope` | `true` becomes `'spec'`; `false` becomes `'test'`. |
+| `skipViewPortKickoff` | `capture.framePriming` | Values are inverted. |
+| `segmentOnWindowSwitch` | `recording.windowChanges` | `true` becomes `'segment'`; `false` becomes `'ignore'`. |
+| `maxConcurrentRecordings` | `concurrency.maxRecordingsPerProcess` | |
+| `maxGlobalRecordings` | `concurrency.maxRecordingsGlobal` | |
+| `recordingStartMode` | `concurrency.startMode` | `'fastFail'` becomes `'fast-fail'`. |
+| `recordingStartTimeoutMs` | `concurrency.startTimeoutMs` | |
+| `globalRecordingLockDir` | `concurrency.lockDir` | |
+| `postProcessMode` | `processing.timing` | `'immediate'` becomes `'after-test'`; `'deferred'` becomes `'after-worker'`. |
+| `includeSpecPatterns` | `recording.filters.includeSpecs` | |
+| `excludeSpecPatterns` | `recording.filters.excludeSpecs` | |
+| `includeTagPatterns` | `recording.filters.includeTags` | |
+| `excludeTagPatterns` | `recording.filters.excludeTags` | |
+| `performanceProfile` | `profile` | Values are unchanged. |
+| `logLevel` | `logLevel` | Unchanged. |
+| `maxFileNameLength` | `artifacts.naming.maxLength` | |
+| `fileNameOverflowStrategy` | `artifacts.naming.overflow` | |
+| `fileNameStyle` | `artifacts.naming.style` | `'testFull'`/`'sessionFull'` become `'test-full'`/`'session-full'`. |
+| `ffmpegPath` | `processing.ffmpeg.path` | |
+| `ffmpegTimeoutMs` | `processing.ffmpeg.timeoutMs` | |
+| `outputFormat` | `processing.format` | |
+| `mp4Mode` | `processing.mp4Mode` | |
+| `transcode` | `processing.transcode` | Nested fields are unchanged. |
+| `mergeSegments` | `processing.merge` | Nested fields are unchanged. |
 
-If `mergeSegments.deleteSegments` is `true` (default), segment part files are removed after successful merge.
-If merge fails, the original parts are kept.
+Before:
 
-### Filename Safety
+```typescript
+{
+  saveAllVideos: false,
+  recordOnRetries: true,
+  videoWidth: 1280,
+  outputFormat: 'mp4',
+  transcode: { enabled: true },
+}
+```
 
-For very long test titles/suites, the service enforces filename limits:
+After:
 
-- `maxFileNameLength`: basename limit including extension
-- `fileNameOverflowStrategy: 'truncate'` (default): keeps a shortened title token
-- `fileNameOverflowStrategy: 'session'`: falls back to session/hash-focused names
+```typescript
+{
+  recording: {
+    attempts: 'retries',
+    retain: 'retries',
+  },
+  capture: { width: 1280 },
+  processing: {
+    format: 'mp4',
+    transcode: { enabled: true },
+  },
+}
+```
 
-On Windows, the service also applies a path-aware budget based on `outputDir` to reduce path-length failures.
+## Output and Filename Safety
 
-### Framework Naming
+Videos are written beneath `outputDir`. Test-oriented naming uses
+`test_title_<session>_<hash>_partN.<webm|mp4>`. Session-only styles append
+`_runN` when needed to prevent overwrites. Successful merging removes the
+`_partN` suffix; failed merges preserve their source segments.
 
-The service is designed to work across WebdriverIO frameworks (Mocha, Jasmine, and Cucumber) by deriving file-name labels from multiple test/scenario fields, then falling back to spec/feature file names when needed.
+The service applies the configured basename limit and a Windows path-aware
+budget. Keep `outputDir` reasonably short on Windows.
 
 ## FFmpeg Error Handling
 
-If FFmpeg is missing or not executable, the service logs a warning once and skips recording for that worker.
-Your WDIO run continues, but no video artifacts are created for that worker until FFmpeg is fixed.
+If FFmpeg is missing or not executable, the service warns once and disables
+recording for that worker. Failed or timed-out merge/transcode operations retain
+source media and remove partial output. Expected teardown stream failures such
+as `EPIPE` are contained without repeated log spam.
 
-When `outputFormat: 'mp4'` and `mp4Mode: 'auto'`, the service runs a one-time ffmpeg capability probe on the first eligible recording attempt in each worker.
-If direct MP4 is not compatible, it automatically falls back to transcode mode to keep recording stable in CI/headless runs.
-
-Timed-out or failed merge/transcode operations retain their source recordings and remove partial output files. After a configured timeout, the service first asks FFmpeg to terminate and then force-stops it if it does not exit within a short grace period.
-
-If a recorder stream closes during teardown (for example, aborted worker shutdown), the service now handles expected write errors (like `EPIPE`) gracefully and prevents repeated stream-failure log spam.
-
-## Logging
-
-Set `logLevel` in service options to control service logs:
-
-- `silent`: no service logs
-- `error`: errors only
-- `warn`: warnings and errors
-- `info`: operational info, warnings, and errors
-- `debug` or `trace`: verbose internal flow details
-
-When `logLevel` is omitted, the service uses WebdriverIO `logLevel` when available and falls back to `warn`.
-
-With `recordOnRetries: true`, `debug`/`trace` logging includes retry decision context (`frameworkRetry`, `specFileRetry`, inferred entity retry), plus retry-state hydration/cleanup events for worker restarts.
+Direct MP4 compatibility is probed once per worker in `mp4Mode: 'auto'`. An
+incompatible build falls back to WebM capture plus H.264 transcode.
 
 ## Parallel Performance Tuning
 
-For CI agents running multiple WDIO workers in parallel, these settings usually provide the best speed/stability balance:
+- Use `recording.attempts: 'retries'` and `recording.retain: 'retries'` to reduce capture work.
+- Use `recording.scope: 'spec'` when one artifact per spec is sufficient.
+- Set `capture.framePriming: false` or `recording.windowChanges: 'ignore'` to reduce capture churn when those tradeoffs are acceptable.
+- Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
+- Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
+- Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
+- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, disables merging unless explicit, and pins service logging to `warn` unless explicit.
 
-- Enable `recordOnRetries: true` to skip first-attempt capture and only record retry attempts.
-- Enable `specLevelRecording: true` when one artifact per spec is acceptable and lower hook churn is preferred.
-- Enable `skipViewPortKickoff: true` to remove the per-recording viewport resize warmup.
-- Set `segmentOnWindowSwitch: false` to reduce stop/start overhead around window/tab commands when strict multi-window coverage is not required.
-- Use `maxConcurrentRecordings` to cap active recorders in the same Node.js process (`0` means unlimited).
-- Use `maxGlobalRecordings` to cap active recorders across WDIO workers on the same host (`0` means unlimited).
-- Use `recordingStartMode: 'fastFail'` with `recordingStartTimeoutMs` to skip segments quickly under heavy contention.
-- Optionally set `globalRecordingLockDir` when workers do not share a stable `outputDir` path.
-- Use `postProcessMode: 'deferred'` to move merge/transcode CPU cost out of per-test hooks and into worker teardown.
-- Use `performanceProfile: 'parallel'` for a manual opt-in baseline (`fps: 24`, `videoWidth: 1280`, `videoHeight: 720`, `outputFormat: webm` when unset).
-- Use `performanceProfile: 'ci'` for an opt-in conservative CI baseline (`fps: 24`, `webm`, `skipViewPortKickoff: true`, `segmentOnWindowSwitch: false`, `postProcessMode: 'deferred'`, `recordingStartMode: 'fastFail'`, `mergeSegments.enabled: false` when unset, and service `logLevel` pinned to `warn` unless explicitly set). If MP4 transcoding is also enabled and `transcode.ffmpegArgs` is unset, the profile uses `-preset veryfast -crf 28 -threads 1` to avoid FFmpeg oversubscribing shared CPU runners; explicit arguments always win.
-- Use spec/tag filters (`include*Patterns` / `exclude*Patterns`) to record only critical paths in large suites.
-- On low-tier/shared runners, start with fewer workers (for example `maxInstances: 1-2`) and increase only after artifacts stay stable.
-- Prefer `outputFormat: 'webm'` when MP4 output is not strictly required.
-- If MP4 is required, use `outputFormat: 'mp4'` with `mp4Mode: 'auto'` (or `transcode.enabled: true`) for safer behavior across ffmpeg builds.
-- Lower capture pressure with `fps: 20-24` and `videoWidth/videoHeight: 1280x720`.
-- Keep `mergeSegments.enabled: false` during the run if throughput is more important than one-file output (merge can be done as a post-step).
-- Set service `logLevel: 'warn'` or `error` on CI to reduce log I/O overhead.
+## Limitations
 
-When `recordOnRetries` is enabled, retry recordings are retained even when the retried attempt eventually passes.
+- Chromium only; capture requires CDP even when WDIO controls the session through BiDi.
+- Audio, Firefox, Safari, Appium/mobile, component runner, multiremote, and cloud sessions without CDP are not supported.
+- Window changes are segmented by default.
+- VP9-in-MP4 output without transcoding has limited player compatibility.
+- Host CPU, RAM, and I/O still determine stability under heavy parallel load.
 
-## E2E Mode Verification
+## Verification
 
-The repository starts an ephemeral two-origin fixture server for every E2E run, so browser coverage never depends on a public website. The fixtures cover static and animated pages, same-origin and cross-origin frames, dialogs, viewport changes, multiple tabs, and targets that close themselves.
+The repository uses an ephemeral two-origin fixture server; E2E runs never
+depend on a public website. Fixtures cover static and animated pages, same- and
+cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
-Dedicated scripts verify output modes and keep artifacts separated:
+- `npm run test:e2e:both`: multipart and merged Mocha runs.
+- `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
+- `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
+- `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
 
-- `npm run test:e2e` runs multipart mode only and writes artifacts to `tests/results/multipart`
-- `npm run test:e2e:merge` runs merged mode only and writes artifacts to `tests/results/merge`
-- `npm run test:e2e:both` runs multipart then merged mode sequentially
-- `npm run test:e2e:jasmine` runs a Jasmine WDIO config and validates filename patterns in `tests/results/jasmine`
-- `npm run test:e2e:cucumber` runs a Cucumber WDIO config and validates filename patterns in `tests/results/cucumber`
-- `npm run test:e2e:frameworks` runs both Jasmine and Cucumber validation sequentially
-- `npm run test:e2e:advanced` runs advanced option coverage in sequence:
-  - `recordOnRetries`
-  - `recordOnRetries` + WDIO `specFileRetries`
-  - `specLevelRecording`
-  - `segmentOnWindowSwitch: false`
-  - `fileNameStyle: 'session'`
-  - `fileNameStyle: 'sessionFull'`
-  - `postProcessMode: 'deferred'` with merged artifacts
-  - `includeSpecPatterns` positive-match filtering
-  - `excludeSpecPatterns` suppression filtering
-  - current Cucumber tag-filter metadata behavior
-  - pass/fail artifact retention with an expected failing test run
-  - cross-worker `maxGlobalRecordings` contention and lock cleanup
-  - failed FFmpeg transcoding with original-media preservation
-- `npm run test:e2e:advanced:retry` runs only retry-mode validation
-- `npm run test:e2e:advanced:spec-file-retry` runs only WDIO `specFileRetries` retry-mode validation
-- `npm run test:e2e:advanced:spec-level` runs only spec-level validation
-- `npm run test:e2e:advanced:no-segment` runs only no-window-segmentation validation
-- `npm run test:e2e:advanced:session-style` runs only short-session filename-style validation
-- `npm run test:e2e:advanced:session-full-style` runs only full-session filename-style validation
-- `npm run test:e2e:advanced:deferred-merge` runs only deferred post-processing merge validation
-- `npm run test:e2e:advanced:include-spec` runs only include-spec filter validation
-- `npm run test:e2e:advanced:exclude-spec` runs only exclude-spec filter validation
-Every generated artifact is decoded with FFmpeg and checked for its container, codec, dimensions, duration, frame count, and corruption. CI fails when FFmpeg is unavailable. A local browser-only run may explicitly opt out with `WDIO_ALLOW_MISSING_FFMPEG=1`; media assertions are never silently skipped.
-
-`npm test` runs unit coverage plus multipart E2E, framework E2E, and the advanced option matrix.
+Every generated artifact is decoded with FFmpeg and checked for container,
+codec, dimensions, duration, frame count, and corruption. CI fails when FFmpeg
+is unavailable. A local browser-only run may explicitly opt out with
+`WDIO_ALLOW_MISSING_FFMPEG=1`.

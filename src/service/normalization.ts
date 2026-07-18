@@ -1,14 +1,14 @@
 import path from 'node:path'
 import type {
-  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
-  WdioPuppeteerVideoServiceFileNameStyle,
-  WdioPuppeteerVideoServiceMergeOptions,
-  WdioPuppeteerVideoServiceMp4Mode,
-  WdioPuppeteerVideoServiceOptions,
-  WdioPuppeteerVideoServicePerformanceProfile,
-  WdioPuppeteerVideoServicePostProcessMode,
-  WdioPuppeteerVideoServiceRecordingStartMode,
-  WdioPuppeteerVideoServiceTranscodeOptions,
+  ArtifactNameOverflowStrategy,
+  InternalArtifactNameStyle,
+  InternalPostProcessMode,
+  InternalRecordingStartMode,
+  Mp4Mode,
+  OutputFormat,
+  ProcessingMergeOptions,
+  ProcessingTranscodeOptions,
+  ServiceProfile,
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
@@ -73,8 +73,8 @@ export const normalizeBoolean = (
 }
 
 export const normalizeOutputFormat = (
-  format: WdioPuppeteerVideoServiceOptions['outputFormat'] | undefined,
-): NonNullable<WdioPuppeteerVideoServiceOptions['outputFormat']> => {
+  format: OutputFormat | undefined,
+): OutputFormat => {
   if (format === 'mp4') {
     return 'mp4'
   }
@@ -83,10 +83,10 @@ export const normalizeOutputFormat = (
 }
 
 export const normalizeTranscodeOptions = (
-  options: WdioPuppeteerVideoServiceTranscodeOptions | undefined,
-): WdioPuppeteerVideoServiceTranscodeOptions => {
+  options: ProcessingTranscodeOptions | undefined,
+): ProcessingTranscodeOptions => {
   const optionRecord = toRecord(options)
-  const normalizedOptions: WdioPuppeteerVideoServiceTranscodeOptions = {
+  const normalizedOptions: ProcessingTranscodeOptions = {
     deleteOriginal: normalizeBoolean(
       optionRecord?.deleteOriginal as boolean | undefined,
       true,
@@ -107,10 +107,10 @@ export const normalizeTranscodeOptions = (
 }
 
 export const normalizeMergeOptions = (
-  options: WdioPuppeteerVideoServiceMergeOptions | undefined,
-): WdioPuppeteerVideoServiceMergeOptions => {
+  options: ProcessingMergeOptions | undefined,
+): ProcessingMergeOptions => {
   const optionRecord = toRecord(options)
-  const normalizedOptions: WdioPuppeteerVideoServiceMergeOptions = {
+  const normalizedOptions: ProcessingMergeOptions = {
     deleteSegments: normalizeBoolean(
       optionRecord?.deleteSegments as boolean | undefined,
       true,
@@ -150,8 +150,8 @@ export const normalizePatternList = (
 }
 
 export const normalizePostProcessMode = (
-  mode: WdioPuppeteerVideoServicePostProcessMode | undefined,
-): WdioPuppeteerVideoServicePostProcessMode => {
+  mode: InternalPostProcessMode | undefined,
+): InternalPostProcessMode => {
   if (mode === 'deferred') {
     return 'deferred'
   }
@@ -176,8 +176,8 @@ export const toNonEmptyString = (value: unknown): string | undefined => {
 }
 
 export const normalizeFileNameOverflowStrategy = (
-  strategy: WdioPuppeteerVideoServiceFileNameOverflowStrategy | undefined,
-): WdioPuppeteerVideoServiceFileNameOverflowStrategy => {
+  strategy: ArtifactNameOverflowStrategy | undefined,
+): ArtifactNameOverflowStrategy => {
   if (strategy === 'session') {
     return 'session'
   }
@@ -185,8 +185,8 @@ export const normalizeFileNameOverflowStrategy = (
 }
 
 export const normalizeFileNameStyle = (
-  style: WdioPuppeteerVideoServiceFileNameStyle | undefined,
-): WdioPuppeteerVideoServiceFileNameStyle => {
+  style: InternalArtifactNameStyle | undefined,
+): InternalArtifactNameStyle => {
   if (style === 'testFull') {
     return 'testFull'
   }
@@ -199,9 +199,7 @@ export const normalizeFileNameStyle = (
   return 'test'
 }
 
-export const normalizeMp4Mode = (
-  mode: WdioPuppeteerVideoServiceMp4Mode | undefined,
-): WdioPuppeteerVideoServiceMp4Mode => {
+export const normalizeMp4Mode = (mode: Mp4Mode | undefined): Mp4Mode => {
   if (mode === 'direct') {
     return 'direct'
   }
@@ -212,8 +210,8 @@ export const normalizeMp4Mode = (
 }
 
 export const normalizePerformanceProfile = (
-  profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
-): WdioPuppeteerVideoServicePerformanceProfile => {
+  profile: ServiceProfile | undefined,
+): ServiceProfile => {
   if (profile === 'ci') {
     return 'ci'
   }
@@ -224,8 +222,8 @@ export const normalizePerformanceProfile = (
 }
 
 export const normalizeRecordingStartMode = (
-  mode: WdioPuppeteerVideoServiceRecordingStartMode | undefined,
-): WdioPuppeteerVideoServiceRecordingStartMode => {
+  mode: InternalRecordingStartMode | undefined,
+): InternalRecordingStartMode => {
   if (mode === 'fastFail') {
     return 'fastFail'
   }
@@ -256,11 +254,13 @@ export const describeError = (error: unknown): string => {
   return String(error)
 }
 
+interface FilenamePathOptions {
+  maxFileNameLength?: number
+  outputDir?: string
+}
+
 export const getEffectiveMaxFilenameLength = (
-  options: Pick<
-    WdioPuppeteerVideoServiceOptions,
-    'maxFileNameLength' | 'outputDir'
-  >,
+  options: FilenamePathOptions,
   platform: NodeJS.Platform = process.platform,
 ): number => {
   const platformDefault =
@@ -285,10 +285,7 @@ export const getEffectiveMaxFilenameLength = (
 }
 
 export const computeMaxSlugLength = (
-  options: Pick<
-    WdioPuppeteerVideoServiceOptions,
-    'maxFileNameLength' | 'outputDir'
-  >,
+  options: FilenamePathOptions,
   platform: NodeJS.Platform = process.platform,
 ): number => {
   const effectiveMaxFilenameLength = getEffectiveMaxFilenameLength(

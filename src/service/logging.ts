@@ -1,5 +1,5 @@
 import type { Browser } from 'webdriverio'
-import type { WdioPuppeteerVideoServiceLogLevel } from '../types.js'
+import type { LogLevel } from '../types.js'
 import {
   LOG_LEVEL_PRIORITY,
   LOG_METHOD_MAP,
@@ -7,7 +7,7 @@ import {
 } from './constants.js'
 
 export type ServiceLogger = (
-  level: WdioPuppeteerVideoServiceLogLevel,
+  level: LogLevel,
   message: string,
   details?: unknown,
 ) => void
@@ -25,20 +25,15 @@ export const resolveWdioLogLevel = (browser: Browser): string | undefined => {
   )
 }
 
-export const normalizeLogLevel = (
-  level: string | undefined,
-): WdioPuppeteerVideoServiceLogLevel => {
+export const normalizeLogLevel = (level: string | undefined): LogLevel => {
   const normalized = (level || '').toLowerCase()
   if (normalized in LOG_LEVEL_PRIORITY) {
-    return normalized as WdioPuppeteerVideoServiceLogLevel
+    return normalized as LogLevel
   }
   return 'warn'
 }
 
-export const shouldLog = (
-  level: WdioPuppeteerVideoServiceLogLevel,
-  activeLevel: WdioPuppeteerVideoServiceLogLevel,
-): boolean => {
+export const shouldLog = (level: LogLevel, activeLevel: LogLevel): boolean => {
   return LOG_LEVEL_PRIORITY[level] <= LOG_LEVEL_PRIORITY[activeLevel]
 }
 
@@ -51,8 +46,8 @@ export const formatLogMessage = (message: string): string => {
 }
 
 export const writeLog = (
-  activeLevel: WdioPuppeteerVideoServiceLogLevel,
-  level: WdioPuppeteerVideoServiceLogLevel,
+  activeLevel: LogLevel,
+  level: LogLevel,
   message: string,
   details?: unknown,
 ): void => {

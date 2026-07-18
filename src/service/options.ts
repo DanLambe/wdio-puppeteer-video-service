@@ -1,5 +1,9 @@
 import type {
-  WdioPuppeteerVideoServiceLogLevel,
+  ArtifactNameStyle,
+  InternalArtifactNameStyle,
+  LogLevel,
+  ProcessingMergeOptions,
+  ResolvedWdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServiceOptions,
 } from '../types.js'
 import {
@@ -9,195 +13,104 @@ import {
 } from './constants.js'
 import { normalizeLogLevel } from './logging.js'
 import * as normalization from './normalization.js'
+import { validateServiceOptions } from './option-validation.js'
 
 export interface ResolvedServiceConfiguration {
   hasExplicitLogLevel: boolean
-  logLevel: WdioPuppeteerVideoServiceLogLevel
+  logLevel: LogLevel
   maxSlugLength: number
-  options: WdioPuppeteerVideoServiceOptions
+  options: ResolvedWdioPuppeteerVideoServiceOptions
 }
 
 export const resolveServiceConfiguration = (
   options: WdioPuppeteerVideoServiceOptions = {},
   platform: NodeJS.Platform = process.platform,
 ): ResolvedServiceConfiguration => {
-  const performanceProfile = normalization.normalizePerformanceProfile(
-    options.performanceProfile,
-  )
+  validateServiceOptions(options)
+
+  const recording = options.recording ?? {}
+  const filters = recording.filters ?? {}
+  const capture = options.capture ?? {}
+  const processing = options.processing ?? {}
+  const concurrency = options.concurrency ?? {}
+  const naming = options.artifacts?.naming ?? {}
+  const profile = options.profile ?? 'default'
+  const retain = recording.retain ?? 'failures'
+  const platformMaxFilenameLength =
+    platform === 'win32'
+      ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
+      : DEFAULT_MAX_FILENAME_LENGTH
+
   const ciPinnedWarnLogLevel =
-    performanceProfile === 'ci' && options.logLevel === undefined
+    profile === 'ci' && options.logLevel === undefined
   const hasExplicitLogLevel =
     typeof options.logLevel === 'string' || ciPinnedWarnLogLevel
   const logLevel = ciPinnedWarnLogLevel
     ? 'warn'
     : normalizeLogLevel(options.logLevel)
 
-  const mergedTranscode = normalization.normalizeTranscodeOptions(
-    options.transcode,
+  const transcode = normalization.normalizeTranscodeOptions(
+    processing.transcode,
   )
-  const mergedMergeSegments = normalization.normalizeMergeOptions(
-    options.mergeSegments,
+  const mergeSegments = resolveMergeOptions(
+    processing.merge,
+    profile !== 'default',
   )
-  const platformMaxFilenameLength =
-    platform === 'win32'
-      ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
-      : DEFAULT_MAX_FILENAME_LENGTH
-
-  let mergedOptions: WdioPuppeteerVideoServiceOptions = {
-    outputDir: 'videos',
-    saveAllVideos: false,
-    videoWidth: 1280,
-    videoHeight: 720,
-    fps: 30,
-    recordOnRetries: false,
-    specLevelRecording: false,
-    skipViewPortKickoff: false,
-    segmentOnWindowSwitch: true,
-    maxConcurrentRecordings: 0,
-    maxGlobalRecordings: 0,
-    recordingStartMode: 'blocking',
-    recordingStartTimeoutMs: DEFAULT_RECORDING_START_TIMEOUT_MS,
-    ffmpegTimeoutMs: 0,
-    postProcessMode: 'immediate',
-    includeSpecPatterns: [],
-    excludeSpecPatterns: [],
-    includeTagPatterns: [],
-    excludeTagPatterns: [],
-    outputFormat: 'webm',
-    mp4Mode: 'auto',
-    fileNameStyle: 'test',
-    fileNameOverflowStrategy: 'truncate',
-    maxFileNameLength: platformMaxFilenameLength,
-    ...options,
-    performanceProfile,
-    transcode: mergedTranscode,
-    mergeSegments: mergedMergeSegments,
-  }
-
-  if (performanceProfile === 'parallel') {
-    mergedOptions = {
-      ...mergedOptions,
-      videoWidth: options.videoWidth ?? 1280,
-      videoHeight: options.videoHeight ?? 720,
-      fps: options.fps ?? 24,
-      outputFormat: normalization.normalizeOutputFormat(options.outputFormat),
-    }
-
-    if (options.mergeSegments?.enabled === undefined) {
-      mergedOptions.mergeSegments = {
-        ...mergedMergeSegments,
-        enabled: false,
-      }
-    }
-  }
-
-  if (performanceProfile === 'ci') {
-    mergedOptions = {
-      ...mergedOptions,
-      videoWidth: options.videoWidth ?? 1280,
-      videoHeight: options.videoHeight ?? 720,
-      fps: options.fps ?? 24,
-      outputFormat: normalization.normalizeOutputFormat(options.outputFormat),
-      skipViewPortKickoff: options.skipViewPortKickoff ?? true,
-      segmentOnWindowSwitch: options.segmentOnWindowSwitch ?? false,
-      postProcessMode: options.postProcessMode ?? 'deferred',
-      recordingStartMode: options.recordingStartMode ?? 'fastFail',
-      recordingStartTimeoutMs:
-        options.recordingStartTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
-    }
-
-    if (options.mergeSegments?.enabled === undefined) {
-      mergedOptions.mergeSegments = {
-        ...mergedMergeSegments,
-        enabled: false,
-      }
-    }
-  }
-
-  const normalizedGlobalRecordingLockDir = normalization.normalizeOptionalDir(
-    mergedOptions.globalRecordingLockDir,
+  const globalRecordingLockDir = normalization.normalizeOptionalDir(
+    concurrency.lockDir,
   )
-  const resolvedOptions: WdioPuppeteerVideoServiceOptions = {
-    ...mergedOptions,
-    outputDir: normalization.normalizeOutputDir(mergedOptions.outputDir),
-    videoWidth: normalization.normalizePositiveInt(
-      mergedOptions.videoWidth,
-      1280,
-    ),
-    videoHeight: normalization.normalizePositiveInt(
-      mergedOptions.videoHeight,
-      720,
-    ),
-    fps: normalization.normalizePositiveInt(mergedOptions.fps, 30),
-    maxFileNameLength: normalization.normalizePositiveInt(
-      mergedOptions.maxFileNameLength,
-      platformMaxFilenameLength,
-    ),
-    fileNameOverflowStrategy: normalization.normalizeFileNameOverflowStrategy(
-      mergedOptions.fileNameOverflowStrategy,
-    ),
-    fileNameStyle: normalization.normalizeFileNameStyle(
-      mergedOptions.fileNameStyle,
-    ),
-    mp4Mode: normalization.normalizeMp4Mode(mergedOptions.mp4Mode),
-    outputFormat: normalization.normalizeOutputFormat(
-      mergedOptions.outputFormat,
-    ),
-    performanceProfile,
-    recordOnRetries: normalization.normalizeBoolean(
-      mergedOptions.recordOnRetries,
-    ),
-    specLevelRecording: normalization.normalizeBoolean(
-      mergedOptions.specLevelRecording,
-    ),
-    skipViewPortKickoff: normalization.normalizeBoolean(
-      mergedOptions.skipViewPortKickoff,
-    ),
-    segmentOnWindowSwitch: normalization.normalizeBoolean(
-      mergedOptions.segmentOnWindowSwitch,
-      true,
-    ),
-    maxConcurrentRecordings: normalization.normalizeNonNegativeInt(
-      mergedOptions.maxConcurrentRecordings,
-      0,
-    ),
-    maxGlobalRecordings: normalization.normalizeNonNegativeInt(
-      mergedOptions.maxGlobalRecordings,
-      0,
-    ),
-    recordingStartMode: normalization.normalizeRecordingStartMode(
-      mergedOptions.recordingStartMode,
-    ),
-    recordingStartTimeoutMs: normalization.normalizePositiveInt(
-      mergedOptions.recordingStartTimeoutMs,
-      DEFAULT_RECORDING_START_TIMEOUT_MS,
-    ),
-    ffmpegTimeoutMs: normalization.normalizeNonNegativeInt(
-      mergedOptions.ffmpegTimeoutMs,
-      0,
-    ),
-    ...(normalizedGlobalRecordingLockDir
-      ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
-      : {}),
-    transcode: normalization.normalizeTranscodeOptions(mergedOptions.transcode),
-    mergeSegments: normalization.normalizeMergeOptions(
-      mergedOptions.mergeSegments,
-    ),
-    postProcessMode: normalization.normalizePostProcessMode(
-      mergedOptions.postProcessMode,
-    ),
+  const ffmpegPath = normalization.normalizeOptionalDir(processing.ffmpeg?.path)
+
+  const resolvedOptions: ResolvedWdioPuppeteerVideoServiceOptions = {
+    outputDir: normalization.normalizeOutputDir(options.outputDir),
+    recordingRetain: retain,
+    videoWidth: capture.width ?? 1280,
+    videoHeight: capture.height ?? 720,
+    fps: capture.fps ?? (profile === 'default' ? 30 : 24),
+    recordOnRetries: recording.attempts === 'retries',
+    specLevelRecording: recording.scope === 'spec',
+    skipViewPortKickoff:
+      capture.framePriming === undefined
+        ? profile === 'ci'
+        : !capture.framePriming,
+    segmentOnWindowSwitch:
+      recording.windowChanges === undefined
+        ? profile !== 'ci'
+        : recording.windowChanges === 'segment',
+    maxConcurrentRecordings: concurrency.maxRecordingsPerProcess ?? 0,
+    maxGlobalRecordings: concurrency.maxRecordingsGlobal ?? 0,
+    recordingStartMode:
+      (concurrency.startMode ??
+        (profile === 'ci' ? 'fast-fail' : 'blocking')) === 'fast-fail'
+        ? 'fastFail'
+        : 'blocking',
+    recordingStartTimeoutMs:
+      concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
+    postProcessMode:
+      (processing.timing ??
+        (profile === 'ci' ? 'after-worker' : 'after-test')) === 'after-worker'
+        ? 'deferred'
+        : 'immediate',
     includeSpecPatterns: normalization.normalizePatternList(
-      mergedOptions.includeSpecPatterns,
+      filters.includeSpecs,
     ),
     excludeSpecPatterns: normalization.normalizePatternList(
-      mergedOptions.excludeSpecPatterns,
+      filters.excludeSpecs,
     ),
-    includeTagPatterns: normalization.normalizePatternList(
-      mergedOptions.includeTagPatterns,
-    ),
-    excludeTagPatterns: normalization.normalizePatternList(
-      mergedOptions.excludeTagPatterns,
-    ),
+    includeTagPatterns: normalization.normalizePatternList(filters.includeTags),
+    excludeTagPatterns: normalization.normalizePatternList(filters.excludeTags),
+    performanceProfile: profile,
+    failurePolicy: options.failurePolicy ?? 'warn',
+    maxFileNameLength: naming.maxLength ?? platformMaxFilenameLength,
+    fileNameOverflowStrategy: naming.overflow ?? 'truncate',
+    fileNameStyle: toInternalNameStyle(naming.style ?? 'test'),
+    ffmpegTimeoutMs: processing.ffmpeg?.timeoutMs ?? 0,
+    outputFormat: processing.format ?? 'webm',
+    mp4Mode: processing.mp4Mode ?? 'auto',
+    transcode,
+    mergeSegments,
+    ...(globalRecordingLockDir ? { globalRecordingLockDir } : {}),
+    ...(ffmpegPath ? { ffmpegPath } : {}),
   }
 
   return {
@@ -209,4 +122,27 @@ export const resolveServiceConfiguration = (
     ),
     options: resolvedOptions,
   }
+}
+
+const resolveMergeOptions = (
+  options: ProcessingMergeOptions | undefined,
+  disableByProfile: boolean,
+): ProcessingMergeOptions => {
+  const normalized = normalization.normalizeMergeOptions(options)
+  if (disableByProfile && options?.enabled === undefined) {
+    return { ...normalized, enabled: false }
+  }
+  return normalized
+}
+
+const toInternalNameStyle = (
+  style: ArtifactNameStyle,
+): InternalArtifactNameStyle => {
+  if (style === 'test-full') {
+    return 'testFull'
+  }
+  if (style === 'session-full') {
+    return 'sessionFull'
+  }
+  return style
 }

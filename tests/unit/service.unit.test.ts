@@ -7,8 +7,9 @@ import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
 import * as ffmpeg from '../../src/service/ffmpeg.js'
 import * as pageLookup from '../../src/service/page-lookup.js'
 import * as retryState from '../../src/service/retry-state.js'
-import WdioPuppeteerVideoService from '../../src/service.js'
-import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
+import WdioPuppeteerVideoService, {
+  type CharacterizedServiceOptions,
+} from './characterized-service.js'
 
 const createTest = (
   overrides: Partial<Frameworks.Test> = {},
@@ -81,7 +82,7 @@ type RecordingOutputService = {
 }
 
 const createRecordingOutputHarness = (
-  options: WdioPuppeteerVideoServiceOptions,
+  options: CharacterizedServiceOptions,
   shouldTranscode: boolean,
 ): { service: RecordingOutputService; warnMessages: string[] } => {
   const service = new WdioPuppeteerVideoService({
@@ -186,12 +187,8 @@ describe('WdioPuppeteerVideoService unit', () => {
     vi.restoreAllMocks()
   })
 
-  it('constructor applies stable defaults and normalizes invalid numbers', () => {
+  it('constructor applies stable defaults', () => {
     const service = new WdioPuppeteerVideoService({
-      outputDir: '   ',
-      videoWidth: 0,
-      videoHeight: -10,
-      fps: Number.NaN,
       outputFormat: 'mp4',
     }) as unknown as {
       _options: {
@@ -271,44 +268,13 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.mergeSegments?.deleteSegments).toBe(true)
   })
 
-  it('constructor defensively normalizes invalid runtime option values', () => {
-    const service = new WdioPuppeteerVideoService({
-      outputFormat: 'avi',
-      ffmpegTimeoutMs: -1,
-      transcode: {
-        enabled: 'yes',
-        deleteOriginal: 'no',
-        ffmpegArgs: ['-crf', 28, '-preset'],
-      },
-      mergeSegments: {
-        enabled: 'true',
-        deleteSegments: 'no',
-      },
-    } as never) as unknown as {
-      _options: {
-        outputFormat?: 'webm' | 'mp4'
-        ffmpegTimeoutMs?: number
-        transcode?: {
-          enabled?: boolean
-          deleteOriginal?: boolean
-          ffmpegArgs?: string[]
-        }
-        mergeSegments?: {
-          enabled?: boolean
-          deleteSegments?: boolean
-        }
-      }
-    }
-
-    expect(service._options.outputFormat).toBe('webm')
-    expect(service._options.ffmpegTimeoutMs).toBe(0)
-    expect(service._options.transcode).toEqual({
-      deleteOriginal: true,
-      ffmpegArgs: ['-crf', '-preset'],
-    })
-    expect(service._options.mergeSegments).toEqual({
-      deleteSegments: true,
-    })
+  it('constructor rejects invalid runtime option values', () => {
+    expect(
+      () =>
+        new WdioPuppeteerVideoService({
+          outputFormat: 'avi',
+        } as never),
+    ).toThrow('processing.format')
   })
 
   it('parallel performance profile applies conservative defaults', () => {
@@ -462,7 +428,7 @@ describe('WdioPuppeteerVideoService unit', () => {
   it('normalizes deferred post processing mode and filter pattern lists', () => {
     const service = new WdioPuppeteerVideoService({
       postProcessMode: 'deferred',
-      includeSpecPatterns: ['  TESTS/ADVANCED/*  ', 'tests/advanced/*', ''],
+      includeSpecPatterns: ['  TESTS/ADVANCED/*  ', 'tests/advanced/*'],
       excludeSpecPatterns: ['  legacy  '],
       includeTagPatterns: [' @Smoke ', '@smoke', '@video*'],
       excludeTagPatterns: [' @skip '],

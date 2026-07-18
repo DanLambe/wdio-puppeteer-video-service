@@ -41,7 +41,8 @@ import { RecordingLifecycle } from './service/recording-lifecycle.js'
 import { RecordingSlotScheduler } from './service/recording-slots.js'
 import * as retryStateHelpers from './service/retry-state.js'
 import type {
-  WdioPuppeteerVideoServiceLogLevel,
+  LogLevel,
+  ResolvedWdioPuppeteerVideoServiceOptions,
   WdioPuppeteerVideoServiceOptions,
 } from './types.js'
 import {
@@ -61,7 +62,7 @@ export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
   private _browser: Browser | undefined
-  private readonly _options: WdioPuppeteerVideoServiceOptions
+  private readonly _options: ResolvedWdioPuppeteerVideoServiceOptions
   private _recorder: ScreenRecorder | undefined
   private _activeSegment: ActiveSegment | undefined
   private _currentSegment = 0
@@ -79,7 +80,7 @@ export default class WdioPuppeteerVideoService
   private _currentWindowHandle: string | undefined
   private _sessionIdToken = ''
   private _sessionIdFullToken = ''
-  private _logLevel: WdioPuppeteerVideoServiceLogLevel = 'warn'
+  private _logLevel: LogLevel = 'warn'
   private readonly _hasExplicitLogLevel: boolean
   private _ffmpegAvailable = false
   private _resolvedFfmpegPath: string | undefined
@@ -1094,11 +1095,7 @@ export default class WdioPuppeteerVideoService
         await this._stopRecording()
       },
       processArtifacts: async () => {
-        const shouldKeepRetryRecording =
-          !!this._options.recordOnRetries &&
-          this._currentRecordingRetryCount > 0
-        const shouldKeepArtifacts =
-          !passed || !!this._options.saveAllVideos || shouldKeepRetryRecording
+        const shouldKeepArtifacts = this._shouldKeepRecording(passed)
         this._log(
           'debug',
           `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
@@ -1913,12 +1910,18 @@ export default class WdioPuppeteerVideoService
     })
   }
 
-  private _log(
-    level: WdioPuppeteerVideoServiceLogLevel,
-    message: string,
-    details?: unknown,
-  ): void {
+  private _log(level: LogLevel, message: string, details?: unknown): void {
     logging.writeLog(this._logLevel, level, message, details)
+  }
+
+  private _shouldKeepRecording(passed: boolean): boolean {
+    if (this._options.recordingRetain === 'all') {
+      return true
+    }
+    if (this._options.recordingRetain === 'retries') {
+      return this._currentRecordingRetryCount > 0
+    }
+    return !passed
   }
 
   private _canUseRecordingHooks(): boolean {

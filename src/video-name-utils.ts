@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import type {
-  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
-  WdioPuppeteerVideoServiceFileNameStyle,
+  ArtifactNameOverflowStrategy,
+  InternalArtifactNameStyle,
 } from './types.js'
 
 interface TestLikeRecord {
@@ -42,8 +42,8 @@ export interface SlugMetadata {
 
 interface BuildTestSlugOptions {
   maxSlugLength: number
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle
-  fileNameOverflowStrategy: WdioPuppeteerVideoServiceFileNameOverflowStrategy
+  fileNameStyle: InternalArtifactNameStyle
+  fileNameOverflowStrategy: ArtifactNameOverflowStrategy
   sessionIdToken: string
   sessionIdFullToken: string
 }
@@ -119,7 +119,7 @@ export const buildTestSlugFromMetadata = (
 export const collectSlugMetadata = (
   test: Frameworks.Test,
   context: unknown,
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle = 'test',
+  fileNameStyle: InternalArtifactNameStyle = 'test',
 ): SlugMetadata => {
   const testRecord = test as unknown as TestLikeRecord
   const contextRecords = collectContextRecords(context)
@@ -239,7 +239,7 @@ export const buildFullSessionIdToken = (
 }
 
 const buildSessionOnlySlug = (
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle,
+  fileNameStyle: InternalArtifactNameStyle,
   retryToken: string,
   options: BuildTestSlugOptions,
 ): string => {
@@ -332,7 +332,7 @@ const buildFileCandidates = (
 const buildNameCandidates = (
   testRecord: TestLikeRecord,
   contextRecords: ContextRecords,
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle,
+  fileNameStyle: InternalArtifactNameStyle,
 ): Array<string | undefined> => {
   const preferFullTestName = fileNameStyle === 'testFull'
 

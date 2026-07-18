@@ -1,18 +1,16 @@
 import type { WriteStream } from 'node:fs'
 import type {
-  WdioPuppeteerVideoServiceLogLevel,
-  WdioPuppeteerVideoServiceOptions,
-  WdioPuppeteerVideoServiceTranscodeOptions,
+  LogLevel,
+  OutputFormat,
+  ProcessingTranscodeOptions,
 } from '../types.js'
 
-export type OutputFormat = NonNullable<
-  WdioPuppeteerVideoServiceOptions['outputFormat']
->
-
 export type ResolvedTranscodeOptions = Required<
-  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'deleteOriginal'>
+  Pick<ProcessingTranscodeOptions, 'deleteOriginal'>
 > &
-  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
+  Pick<ProcessingTranscodeOptions, 'ffmpegArgs'>
+
+export type { OutputFormat }
 
 export interface ActiveSegment {
   recordingPath: string
@@ -117,10 +115,7 @@ export const CI_TRANSCODE_FFMPEG_ARGS = [
   '1',
 ] as const
 
-export const LOG_LEVEL_PRIORITY: Record<
-  WdioPuppeteerVideoServiceLogLevel,
-  number
-> = {
+export const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   silent: 0,
   error: 1,
   warn: 2,

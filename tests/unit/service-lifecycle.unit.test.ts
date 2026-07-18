@@ -8,7 +8,7 @@ import {
   RECORDER_STOP_TIMEOUT_MS,
 } from '../../src/service/constants.js'
 import type { RecordingLifecycle } from '../../src/service/recording-lifecycle.js'
-import WdioPuppeteerVideoService from '../../src/service.js'
+import WdioPuppeteerVideoService from './characterized-service.js'
 
 type FakeRecorder = PassThrough & {
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>

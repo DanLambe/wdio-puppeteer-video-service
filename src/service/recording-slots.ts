@@ -1,6 +1,6 @@
 import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
-import type { WdioPuppeteerVideoServiceOptions } from '../types.js'
+import type { InternalRecordingStartMode } from '../types.js'
 import {
   type ClockBoundary,
   type FileSystemBoundary,
@@ -36,15 +36,14 @@ export interface RecordingSlotSchedulerDependencies {
   process?: ProcessBoundary
 }
 
-export type RecordingSlotSchedulerOptions = Pick<
-  WdioPuppeteerVideoServiceOptions,
-  | 'globalRecordingLockDir'
-  | 'maxConcurrentRecordings'
-  | 'maxGlobalRecordings'
-  | 'outputDir'
-  | 'recordingStartMode'
-  | 'recordingStartTimeoutMs'
->
+export interface RecordingSlotSchedulerOptions {
+  globalRecordingLockDir?: string
+  maxConcurrentRecordings?: number
+  maxGlobalRecordings?: number
+  outputDir?: string
+  recordingStartMode?: InternalRecordingStartMode
+  recordingStartTimeoutMs?: number
+}
 
 export const createInProcessRecordingSlotState =
   (): InProcessRecordingSlotState => ({

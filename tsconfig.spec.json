@@ -11,5 +11,6 @@
     ],
     "noEmit": true
   },
-  "include": ["tests/**/*.ts", "src/**/*.ts", "vitest.config.ts"]
+  "include": ["tests/**/*.ts", "src/**/*.ts", "vitest.config.ts"],
+  "exclude": ["tests/package-consumer"]
 }

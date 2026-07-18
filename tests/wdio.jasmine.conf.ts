@@ -43,15 +43,21 @@ export const config: WebdriverIO.Config = {
       WdioPuppeteerVideoService,
       {
         outputDir: resultsDir,
-        saveAllVideos: true,
-        videoWidth: 1280,
-        videoHeight: 720,
-        outputFormat: 'mp4',
-        transcode: {
-          enabled: true,
+        recording: {
+          retain: 'all',
         },
-        mergeSegments: {
-          enabled: false,
+        capture: {
+          width: 1280,
+          height: 720,
+        },
+        processing: {
+          format: 'mp4',
+          transcode: {
+            enabled: true,
+          },
+          merge: {
+            enabled: false,
+          },
         },
       },
     ],

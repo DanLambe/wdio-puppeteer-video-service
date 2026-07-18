@@ -1,5 +1,4 @@
 import type { Frameworks } from '@wdio/types'
-import type { WdioPuppeteerVideoServiceOptions } from '../types.js'
 import { normalizeCandidateValue, toNonEmptyString } from './normalization.js'
 
 /**
@@ -25,14 +24,15 @@ interface TestTagLike {
   }
 }
 
+export interface RecordingFilterConfiguration {
+  includeSpecPatterns?: string[]
+  excludeSpecPatterns?: string[]
+  includeTagPatterns?: string[]
+  excludeTagPatterns?: string[]
+}
+
 export const shouldRecordForFilters = (
-  options: Pick<
-    WdioPuppeteerVideoServiceOptions,
-    | 'includeSpecPatterns'
-    | 'excludeSpecPatterns'
-    | 'includeTagPatterns'
-    | 'excludeTagPatterns'
-  >,
+  options: RecordingFilterConfiguration,
   test: Frameworks.Test,
   context: unknown,
   wildcardPatternRegexCache: Map<string, RegExp>,

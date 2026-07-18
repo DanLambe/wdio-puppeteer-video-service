@@ -17,15 +17,15 @@ type CucumberFilterMode = 'include-tag' | 'exclude-tag'
 const filterMode = process.env.WDIO_CUCUMBER_FILTER_MODE as
   | CucumberFilterMode
   | undefined
-// In 0.8, WDIO's live Cucumber hook payload does not expose feature tags in a
+// WDIO's live Cucumber hook payload does not expose feature tags in a
 // shape the service recognizes. Preserve that behavior until the filter API
 // and its framework adapters are intentionally revised in a later chunk.
 const expectZeroVideos = filterMode === 'include-tag'
 const serviceFilterOptions =
   filterMode === 'include-tag'
-    ? { includeTagPatterns: ['@recordable'] }
+    ? { includeTags: ['@recordable'] }
     : filterMode === 'exclude-tag'
-      ? { excludeTagPatterns: ['@recordable'] }
+      ? { excludeTags: ['@recordable'] }
       : {}
 
 export const config: WebdriverIO.Config = {
@@ -57,17 +57,23 @@ export const config: WebdriverIO.Config = {
       WdioPuppeteerVideoService,
       {
         outputDir: resultsDir,
-        saveAllVideos: true,
-        videoWidth: 1280,
-        videoHeight: 720,
-        outputFormat: 'mp4',
-        transcode: {
-          enabled: true,
+        recording: {
+          retain: 'all',
+          filters: serviceFilterOptions,
         },
-        mergeSegments: {
-          enabled: false,
+        capture: {
+          width: 1280,
+          height: 720,
         },
-        ...serviceFilterOptions,
+        processing: {
+          format: 'mp4',
+          transcode: {
+            enabled: true,
+          },
+          merge: {
+            enabled: false,
+          },
+        },
       },
     ],
   ],
