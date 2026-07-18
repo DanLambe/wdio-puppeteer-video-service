@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
@@ -77,7 +78,7 @@ export const config: WebdriverIO.Config = {
     ],
   ],
   framework: 'cucumber',
-  reporters: ['spec'],
+  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir: resultsDir }]],
   cucumberOpts: {
     require: [path.resolve('tests/cucumber/steps/**/*.ts')],
     timeout: 60000,

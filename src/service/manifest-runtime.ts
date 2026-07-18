@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
 import type { Frameworks } from '@wdio/types'
 import {
   MANIFEST_SCHEMA_VERSION,
@@ -32,12 +33,18 @@ const MANIFEST_LOCK_POLL_MS = 25
 
 export const MANIFEST_RUN_CONFIG_KEY =
   'wdioPuppeteerVideoServiceManifestRun' as const
+export const MANIFEST_WORKER_CONFIG_KEY =
+  'wdioPuppeteerVideoServiceManifestWorker' as const
 
 export interface ManifestRunContext {
   runId: string
   outputDir: string
   startedAt: string
   tools: ManifestToolVersions
+}
+
+export interface ManifestWorkerContext {
+  specFileRetryAttempt: number
 }
 
 export interface ManifestCaptureDimensions {
@@ -121,6 +128,13 @@ export const assignManifestRunContext = (
   Object.assign(config, { [MANIFEST_RUN_CONFIG_KEY]: context })
 }
 
+export const assignManifestWorkerContext = (
+  config: object,
+  context: ManifestWorkerContext,
+): void => {
+  Object.assign(config, { [MANIFEST_WORKER_CONFIG_KEY]: context })
+}
+
 export const readManifestRunContext = (
   config: unknown,
 ): ManifestRunContext | undefined => {
@@ -141,6 +155,23 @@ export const readManifestRunContext = (
     return undefined
   }
   return context as ManifestRunContext
+}
+
+export const readManifestWorkerContext = (
+  config: unknown,
+): ManifestWorkerContext | undefined => {
+  if (!config || typeof config !== 'object') {
+    return undefined
+  }
+  const value = (config as Record<string, unknown>)[MANIFEST_WORKER_CONFIG_KEY]
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const attempt = (value as Partial<ManifestWorkerContext>).specFileRetryAttempt
+  if (!Number.isInteger(attempt) || (attempt ?? -1) < 0) {
+    return undefined
+  }
+  return { specFileRetryAttempt: attempt as number }
 }
 
 export class ManifestWorkerRecorder {
@@ -203,7 +234,7 @@ export class ManifestWorkerRecorder {
     }
 
     const spec = normalizeManifestPath(
-      input.test?.file ?? input.specPaths[0] ?? 'unknown-spec',
+      resolveEntitySpecPath(input),
       process.cwd(),
     )
     const testName =
@@ -546,7 +577,9 @@ export const normalizeManifestPath = (
   baseDir: string,
 ): string => {
   const resolvedBase = path.resolve(baseDir)
-  const resolvedPath = path.resolve(filePath)
+  const resolvedPath = path.resolve(
+    filePath.startsWith('file:') ? fileURLToPath(filePath) : filePath,
+  )
   const relative = path.relative(resolvedBase, resolvedPath)
   if (
     relative.length === 0 ||
@@ -557,6 +590,29 @@ export const normalizeManifestPath = (
     return sanitizePathComponent(path.basename(resolvedPath) || 'unknown')
   }
   return relative.split(path.sep).map(sanitizePathComponent).join('/')
+}
+
+const resolveEntitySpecPath = (input: ManifestEntityInput): string => {
+  const observedFile = input.test?.file
+  if (observedFile) {
+    const normalizedObservedFile = normalizeManifestPath(
+      observedFile,
+      process.cwd(),
+    )
+    const matchingSpec = input.specPaths.find((specPath) => {
+      return (
+        normalizeManifestPath(specPath, process.cwd()) ===
+        normalizedObservedFile
+      )
+    })
+    if (matchingSpec) {
+      return matchingSpec
+    }
+  }
+  if (input.specPaths.length === 1) {
+    return input.specPaths[0] ?? 'unknown-spec'
+  }
+  return observedFile ?? input.specPaths[0] ?? 'unknown-spec'
 }
 
 export const hashPrivateValue = (salt: string, value: string): string => {

@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../src/types.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import {
@@ -505,7 +506,7 @@ export const config: WebdriverIO.Config = {
   specFileRetriesDeferred: false,
   services: [[WdioPuppeteerVideoService, serviceOptionsByMode[mode]]],
   framework: 'mocha',
-  reporters: ['spec'],
+  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir: resultsDir }]],
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,

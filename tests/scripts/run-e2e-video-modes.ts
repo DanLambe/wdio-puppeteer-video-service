@@ -1,9 +1,22 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
 type VideoMode = 'multipart' | 'merge'
+
+const expectedTestTitles = [
+  'should record a simple navigation',
+  'should handle iframe switching',
+  'should handle a cross-origin iframe',
+  'should handle multiple tabs and closing tabs',
+  'should tolerate a browser target closing itself',
+  'should handle alert, confirm, and prompt dialogs',
+  'should handle viewport resizing',
+  'should capture a deterministic animation',
+  'should record a longer multi-step journey',
+]
 
 const requestedMode = process.argv[2] || 'both'
 
@@ -46,6 +59,11 @@ const runWdio = async (
 
   await waitForChildProcess(child, (code) => {
     return `[e2e:modes] ${mode} run failed with code ${code}`
+  })
+  await assertStaticVideoReport({
+    resultsDir,
+    expectedTitles: expectedTestTitles,
+    runLabel: mode,
   })
 
   console.log(`[e2e:modes] Completed ${mode} run.`)

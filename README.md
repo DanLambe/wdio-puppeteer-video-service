@@ -297,6 +297,39 @@ Manifest v1 validators intentionally accept unknown fields: additive optional
 fields are minor-compatible. Removing a field, changing required semantics, or
 changing an existing enum meaning requires a package major release.
 
+## Static HTML Reporter
+
+The optional reporter writes one fragment per WDIO worker. After Manifest v1 is
+aggregated, the service joins outcomes to captures by run, worker, normalized
+spec/test identity, and attempt, then creates `outputDir/video-report.html`.
+Skipped tests and tests without retained video remain visible. The report has
+status, spec, browser, and retry filters, inline playback, diagnostics, and
+error details.
+
+```typescript
+import WdioPuppeteerVideoService from 'wdio-puppeteer-video-service'
+import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
+
+const outputDir = 'videos'
+
+export const config: WebdriverIO.Config = {
+  services: [[WdioPuppeteerVideoService, { outputDir }]],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir }],
+  ],
+}
+```
+
+Install `@wdio/reporter` alongside the reporter subpath. It is an optional peer,
+so importing the base service does not load reporter code. `reportFileName` may
+customize the HTML basename. Directory segments are rejected.
+
+The generated report copies no media and uses encoded relative links to the
+existing artifacts. It includes all CSS and JavaScript locally, escapes
+test-controlled content, and applies a restrictive Content Security Policy, so
+it can be archived or opened offline without a CDN.
+
 ## FFmpeg Error Handling
 
 If FFmpeg is missing or not executable, the service warns once and disables

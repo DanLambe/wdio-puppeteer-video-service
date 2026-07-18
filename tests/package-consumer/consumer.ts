@@ -8,6 +8,9 @@ import {
   MANIFEST_SCHEMA_VERSION,
   type VideoManifestV1,
 } from 'wdio-puppeteer-video-service/manifest'
+import WdioPuppeteerVideoReporter, {
+  type WdioPuppeteerVideoReporterOptions,
+} from 'wdio-puppeteer-video-service/reporter'
 
 const recording = {
   scope: 'test',
@@ -37,6 +40,13 @@ const options = {
 } satisfies WdioPuppeteerVideoServiceOptions
 
 export default new WdioPuppeteerVideoService(options)
+
+const reporterOptions = {
+  outputDir: 'videos',
+  reportFileName: 'video-report.html',
+} satisfies WdioPuppeteerVideoReporterOptions
+
+export const reporter = new WdioPuppeteerVideoReporter(reporterOptions)
 
 export const acceptsManifest = (
   value: unknown,

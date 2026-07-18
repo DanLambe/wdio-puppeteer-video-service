@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
@@ -106,6 +107,19 @@ const runMode = async (
     5 * 60_000,
     mode === 'retention' ? [1] : [0],
   )
+
+  const retryTitle =
+    mode === 'retry'
+      ? 'should record only when retry attempt executes'
+      : 'should record only when spec file retry worker executes'
+  if (mode === 'retry' || mode === 'spec-file-retry') {
+    await assertStaticVideoReport({
+      resultsDir,
+      expectedTitles: [retryTitle],
+      expectRetryOutcomes: true,
+      runLabel: `advanced-${mode}`,
+    })
+  }
 
   console.log(`[e2e:advanced] Completed ${mode} run.`)
 }

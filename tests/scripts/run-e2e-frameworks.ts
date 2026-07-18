@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
@@ -67,6 +68,15 @@ const runWdioFramework = async (
 
   await waitForChildProcess(child, (code) => {
     return `[e2e:frameworks] ${framework} run failed with code ${code}`
+  })
+  await assertStaticVideoReport({
+    resultsDir,
+    expectedTitles: [
+      framework === 'jasmine'
+        ? 'jasmine style should keep test name in video filename'
+        : 'cucumber style should keep scenario name in video filename',
+    ],
+    runLabel: framework,
   })
 
   console.log(`[e2e:frameworks] Completed ${framework} run.`)

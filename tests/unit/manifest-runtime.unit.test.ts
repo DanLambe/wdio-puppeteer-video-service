@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type {
   ManifestEntryV1,
@@ -577,6 +578,9 @@ describe('manifest runtime', () => {
     const outside = path.join(path.dirname(outputDir), 'secret.webm')
 
     expect(normalizeManifestPath(nested, outputDir)).toBe(
+      'nested/artifact.webm',
+    )
+    expect(normalizeManifestPath(pathToFileURL(nested).href, outputDir)).toBe(
       'nested/artifact.webm',
     )
     expect(

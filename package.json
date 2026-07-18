@@ -19,6 +19,10 @@
     "./manifest": {
       "import": "./build/manifest.js",
       "types": "./build/manifest.d.ts"
+    },
+    "./reporter": {
+      "import": "./build/reporter.js",
+      "types": "./build/reporter.d.ts"
     }
   },
   "engines": {
@@ -102,9 +106,15 @@
   },
   "license": "Apache-2.0",
   "peerDependencies": {
+    "@wdio/reporter": "^9.29.1",
     "@wdio/types": "^9.0.0",
     "puppeteer-core": "^25.3.0",
     "webdriverio": "^9.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@wdio/reporter": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.4",
@@ -119,6 +129,7 @@
     "@wdio/jasmine-framework": "^9.29.1",
     "@wdio/local-runner": "^9.29.1",
     "@wdio/mocha-framework": "^9.29.1",
+    "@wdio/reporter": "^9.29.1",
     "@wdio/spec-reporter": "^9.29.1",
     "@wdio/types": "^9.29.1",
     "expect-webdriverio": "^5.7.0",

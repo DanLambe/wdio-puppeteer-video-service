@@ -1,4 +1,4 @@
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { probeMediaFile } from './media-probe.js'
 
@@ -235,6 +235,59 @@ export const listVideoArtifacts = async (
   return files
     .filter((file) => file.endsWith('.mp4') || file.endsWith('.webm'))
     .sort((a, b) => a.localeCompare(b))
+}
+
+export const assertStaticVideoReport = async (options: {
+  resultsDir: string
+  expectedTitles: string[]
+  expectRetryOutcomes?: boolean
+  runLabel: string
+}): Promise<void> => {
+  const reportPath = path.join(options.resultsDir, 'video-report.html')
+  const report = await readFile(reportPath, 'utf8')
+  const requiredMarkup = [
+    'Content-Security-Policy',
+    "default-src 'none'",
+    'status-filter',
+    'spec-filter',
+    'browser-filter',
+    'retry-filter',
+    '<video controls preload="metadata">',
+  ]
+  for (const markup of requiredMarkup) {
+    if (!report.includes(markup)) {
+      throw new Error(`Static report is missing required markup: ${markup}`)
+    }
+  }
+  for (const title of options.expectedTitles) {
+    if (!report.includes(title)) {
+      throw new Error(`Static report is missing test outcome: ${title}`)
+    }
+  }
+  if (/https?:\/\//u.test(report) || report.includes("'unsafe-inline'")) {
+    throw new Error(
+      'Static report must not depend on external or unsafe assets',
+    )
+  }
+  if (!report.includes('src="./')) {
+    throw new Error('Static report does not contain relative media links')
+  }
+  if (report.includes('aria-label="Report diagnostics"')) {
+    throw new Error('Static report contains unexpected join diagnostics')
+  }
+  if (
+    options.expectRetryOutcomes &&
+    (!report.includes('data-retried="true"') ||
+      !report.includes('data-status="failed"') ||
+      !report.includes('data-status="passed"'))
+  ) {
+    throw new Error(
+      'Static report does not contain the expected failed and passed retry outcomes',
+    )
+  }
+  console.log(
+    `[wdio:e2e:${options.runLabel}] Verified offline static report at ${reportPath}.`,
+  )
 }
 
 export { toFileToken }

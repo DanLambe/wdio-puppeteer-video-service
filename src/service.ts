@@ -11,6 +11,7 @@ import type {
   ScreenRecorder,
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
+import { generateVideoReportForRun } from './reporter/report-generator.js'
 import * as artifactIntegrity from './service/artifact-integrity.js'
 import * as capture from './service/capture.js'
 import {
@@ -38,6 +39,7 @@ import * as logging from './service/logging.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
+  assignManifestWorkerContext,
   createManifestRunContext,
   type ManifestCaptureDimensions,
   type ManifestRunContext,
@@ -221,9 +223,9 @@ export default class WdioPuppeteerVideoService
     }
 
     if (!this._options.recordOnRetries) {
-      return
-    }
-    if (this._retryStatePersistenceUnavailable) {
+      if (args) {
+        assignManifestWorkerContext(args, { specFileRetryAttempt: 0 })
+      }
       return
     }
 
@@ -237,6 +239,12 @@ export default class WdioPuppeteerVideoService
       specRetryKey,
       specFileRetryAttempt + 1,
     )
+    if (args) {
+      assignManifestWorkerContext(args, { specFileRetryAttempt })
+    }
+    if (this._retryStatePersistenceUnavailable) {
+      return
+    }
 
     const retryState: PersistedSpecRetryState = {
       specRetryKey,
@@ -290,7 +298,18 @@ export default class WdioPuppeteerVideoService
     }
 
     if (this._manifestRunContext) {
-      await aggregateManifestRun(this._manifestRunContext, exitCode)
+      const manifestRunContext = this._manifestRunContext
+      const manifest = await aggregateManifestRun(manifestRunContext, exitCode)
+      await generateVideoReportForRun({
+        outputDir: manifestRunContext.outputDir,
+        runId: manifestRunContext.runId,
+        manifest,
+      }).catch((error) => {
+        this._log(
+          'warn',
+          `[WdioPuppeteerVideoService] Failed to generate the static video report: ${normalization.describeError(error)}.`,
+        )
+      })
       this._manifestRunContext = undefined
     }
   }
