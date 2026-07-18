@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import { FFMPEG_TERMINATION_GRACE_MS } from './constants.js'
 import type { ServiceLogger } from './logging.js'
+import { Utf8TailBuffer } from './utf8-tail-buffer.js'
 
 export interface FfmpegProcess {
   pid?: number | undefined
@@ -92,6 +93,7 @@ export const terminateFfmpegProcessTree: TerminateFfmpegProcessTree = (
     terminator.on('error', () => {
       ffmpegProcess.kill(force ? 'SIGKILL' : 'SIGTERM')
     })
+    terminator.unref()
     return
   }
 
@@ -126,7 +128,7 @@ export const runFfmpeg = async (
 
   return new Promise<boolean>((resolve) => {
     const proc = spawnProcess(options.ffmpegPath, options.args)
-    let stderr = ''
+    const stderr = new Utf8TailBuffer(32_768)
     let settled = false
     let timeout: NodeJS.Timeout | undefined
     let terminationTimeout: NodeJS.Timeout | undefined
@@ -176,8 +178,7 @@ export const runFfmpeg = async (
     }
 
     proc.stderr?.on('data', (chunk: Buffer) => {
-      const next = stderr + chunk.toString('utf8')
-      stderr = next.length > 32_768 ? next.slice(-32_768) : next
+      stderr.append(chunk)
     })
 
     proc.on('error', (error: Error) => {
@@ -214,7 +215,7 @@ export const runFfmpeg = async (
         return
       }
 
-      const details = stderr.trim()
+      const details = stderr.finish().trim()
       const suffix = details ? `: ${details}` : ''
       options.log(
         'warn',

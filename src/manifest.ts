@@ -110,6 +110,9 @@ export interface ManifestValidationResult {
   errors: string[]
 }
 
+const ISO_TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/u
+
 /**
  * Validates the stable fields and semantics of manifest v1. Unknown fields are
  * intentionally accepted so additive optional fields remain minor-compatible.
@@ -444,13 +447,50 @@ const expectIsoDate = (
   location: string,
   errors: string[],
 ): void => {
-  if (
-    typeof value !== 'string' ||
-    !Number.isFinite(Date.parse(value)) ||
-    new Date(value).toISOString() !== value
-  ) {
+  if (typeof value !== 'string' || !isIsoTimestamp(value)) {
     errors.push(`${location} must be an ISO-8601 timestamp`)
   }
+}
+
+const isIsoTimestamp = (value: string): boolean => {
+  const match = ISO_TIMESTAMP_PATTERN.exec(value)
+  if (!match || !Number.isFinite(Date.parse(value))) {
+    return false
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7])
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8])
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1]
+  return (
+    daysInMonth !== undefined &&
+    day >= 1 &&
+    day <= daysInMonth &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59
+  )
 }
 
 const expectLiteral = (

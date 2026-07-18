@@ -107,6 +107,35 @@ const firstEntry = (run: Record<string, unknown>): Record<string, unknown> => {
 }
 
 describe('manifest v1 validator', () => {
+  it('accepts ISO timestamps without milliseconds and with timezone offsets', () => {
+    const manifest = clone()
+    manifest.generatedAt = '2026-07-18T12:00:00Z'
+    const run = firstRun(manifest)
+    run.startedAt = '2026-07-18T07:00:00-05:00'
+    run.completedAt = '2026-07-18T14:00:00.125+02:00'
+
+    expect(validateVideoManifest(manifest)).toEqual({
+      valid: true,
+      errors: [],
+    })
+  })
+
+  it.each([
+    '2026-02-29T12:00:00Z',
+    '2026-07-18',
+    '2026-07-18T24:00:00Z',
+    '2026-07-18T12:60:00Z',
+    '2026-07-18T12:00:00+24:00',
+  ])('rejects non-conforming timestamp %s', (timestamp) => {
+    const manifest = clone()
+    manifest.generatedAt = timestamp
+
+    expect(validateVideoManifest(manifest)).toMatchObject({
+      valid: false,
+      errors: ['$.generatedAt must be an ISO-8601 timestamp'],
+    })
+  })
+
   it('accepts a complete manifest and additive optional fields', () => {
     const manifest = createManifest() as VideoManifestV1 & {
       futureOptionalField?: string

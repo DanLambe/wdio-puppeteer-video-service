@@ -176,6 +176,23 @@ describe('manifest runtime', () => {
         },
       }),
     ).toBeUndefined()
+    for (const invalidContext of [
+      { ...context, runId: ' ' },
+      { ...context, outputDir: 'relative-output' },
+      { ...context, startedAt: 'not-a-date' },
+      { ...context, tools: [] },
+      { ...context, tools: { ...context.tools, service: '' } },
+      { ...context, tools: { ...context.tools, node: '' } },
+      { ...context, tools: { ...context.tools, webdriverio: '' } },
+      { ...context, tools: { ...context.tools, puppeteer: '' } },
+      { ...context, tools: { ...context.tools, ffmpeg: '' } },
+    ]) {
+      expect(
+        readManifestRunContext({
+          [MANIFEST_RUN_CONFIG_KEY]: invalidContext,
+        }),
+      ).toBeUndefined()
+    }
     expect(context.tools.node).toBe(process.version)
     expect(context.tools.service).not.toBe('unknown')
     expect(context.tools.webdriverio).not.toBe('unknown')

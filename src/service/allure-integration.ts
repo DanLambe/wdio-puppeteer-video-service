@@ -38,6 +38,7 @@ type IntegrationLogger = (
 ) => void
 
 type ReadVideo = (filePath: string) => Promise<Buffer>
+type ReadVideoSize = (filePath: string) => Promise<number>
 
 const MIME_TYPES = new Map([
   ['.mp4', 'video/mp4'],
@@ -48,6 +49,9 @@ const loadAllureModule: AllureModuleLoader = () =>
   import('@wdio/allure-reporter')
 
 const readVideo: ReadVideo = (filePath) => fs.readFile(filePath)
+const readVideoSize: ReadVideoSize = async (filePath) => {
+  return (await fs.stat(filePath)).size
+}
 
 export class AllureVideoIntegration {
   private apiTask: Promise<AllureAttachmentApi> | undefined
@@ -55,17 +59,20 @@ export class AllureVideoIntegration {
   private readonly log: IntegrationLogger
   private readonly loadModule: AllureModuleLoader
   private readonly readFile: ReadVideo
+  private readonly readFileSize: ReadVideoSize
 
   constructor(
     options: AllureVideoIntegrationOptions,
     log: IntegrationLogger,
     loadModule: AllureModuleLoader = loadAllureModule,
     readFile: ReadVideo = readVideo,
+    readFileSize: ReadVideoSize = readVideoSize,
   ) {
     this.options = options
     this.log = log
     this.loadModule = loadModule
     this.readFile = readFile
+    this.readFileSize = readFileSize
   }
 
   async attachRetainedVideos(
@@ -99,18 +106,18 @@ export class AllureVideoIntegration {
     for (const [index, media] of supportedMedia.entries()) {
       const { filePath, mimeType } = media
       try {
-        const content = await this.readFile(filePath)
-        if (
-          this.options.maxBytes !== undefined &&
-          content.byteLength > this.options.maxBytes
-        ) {
-          this.log(
-            'warn',
-            `[WdioPuppeteerVideoService] Skipped Allure video attachment ${filePath}: ${content.byteLength.toString()} bytes exceeds integrations.allure.maxBytes (${this.options.maxBytes.toString()}).`,
-          )
-          continue
+        if (this.options.maxBytes !== undefined) {
+          const fileSize = await this.readFileSize(filePath)
+          if (fileSize > this.options.maxBytes) {
+            this.log(
+              'warn',
+              `[WdioPuppeteerVideoService] Skipped Allure video attachment ${filePath}: ${fileSize.toString()} bytes exceeds integrations.allure.maxBytes (${this.options.maxBytes.toString()}).`,
+            )
+            continue
+          }
         }
 
+        const content = await this.readFile(filePath)
         const partLabel =
           supportedMedia.length > 1
             ? ` (${(index + 1).toString()}/${supportedMedia.length.toString()})`

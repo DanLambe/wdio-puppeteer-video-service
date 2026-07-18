@@ -21,6 +21,7 @@ class FakeFfmpegProcess extends EventEmitter implements FfmpegProcess {
   pid: number | undefined
   stderr: PassThrough | null = new PassThrough()
   kill = vi.fn((_signal?: NodeJS.Signals | number) => true)
+  unref = vi.fn(() => this)
 }
 
 const createRunnerHarness = (timeoutMs = 0) => {
@@ -96,6 +97,22 @@ describe('ffmpeg runner process handling', () => {
     await expect(resultPromise).resolves.toBe(false)
     expect(harness.warnMessages).toHaveLength(1)
     expect(harness.warnMessages[0]).toContain('muxer failed')
+  })
+
+  it('preserves UTF-8 characters split across stderr chunks', async () => {
+    const process = new FakeFfmpegProcess()
+    const harness = createRunnerHarness()
+    const diagnostic = Buffer.from('muxer 🚨 failed')
+    const marker = diagnostic.indexOf(Buffer.from('🚨'))
+
+    const resultPromise = harness.run(process)
+    process.stderr?.write(diagnostic.subarray(0, marker + 2))
+    process.stderr?.write(diagnostic.subarray(marker + 2))
+    process.emit('close', 1)
+
+    await expect(resultPromise).resolves.toBe(false)
+    expect(harness.warnMessages[0]).toContain('muxer 🚨 failed')
+    expect(harness.warnMessages[0]).not.toContain('\uFFFD')
   })
 
   it('kills and fails timed out operations', async () => {
@@ -202,6 +219,7 @@ describe('ffmpeg runner process handling', () => {
         ['/PID', '4321', '/T', '/F'],
         { stdio: 'ignore', windowsHide: true },
       )
+      expect(terminator.unref).toHaveBeenCalledOnce()
       return
     }
 

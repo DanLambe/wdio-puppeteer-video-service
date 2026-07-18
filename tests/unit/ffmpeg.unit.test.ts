@@ -136,6 +136,24 @@ describe('ffmpeg helpers', () => {
     expect(onProbeFailure).toHaveBeenCalledWith('muxer failed')
   })
 
+  it('preserves UTF-8 characters split across probe stderr chunks', async () => {
+    const probeProcess = new FakeProbeProcess()
+    const onProbeFailure = vi.fn()
+    const diagnostic = Buffer.from('muxer 🚨 failed')
+    const marker = diagnostic.indexOf(Buffer.from('🚨'))
+    const supportPromise = probeDirectMp4Support('/custom/ffmpeg', {
+      onProbeFailure,
+      spawnProcess: () => probeProcess,
+    })
+
+    probeProcess.stderr?.write(diagnostic.subarray(0, marker + 2))
+    probeProcess.stderr?.write(diagnostic.subarray(marker + 2))
+    probeProcess.emit('close', 1)
+
+    await expect(supportPromise).resolves.toBe(false)
+    expect(onProbeFailure).toHaveBeenCalledWith('muxer 🚨 failed')
+  })
+
   it('fails the direct MP4 probe when it times out', async () => {
     vi.useFakeTimers()
     try {

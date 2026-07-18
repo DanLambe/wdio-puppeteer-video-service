@@ -27,14 +27,25 @@ const createHarness = (
   const readFile = vi.fn(async (filePath: string) =>
     Buffer.from(`media:${filePath}`),
   )
+  const readFileSize = vi.fn(async (filePath: string) =>
+    Buffer.byteLength(`media:${filePath}`),
+  )
   const log = vi.fn()
   const integration = new AllureVideoIntegration(
     options,
     log,
     loadModule,
     readFile,
+    readFileSize,
   )
-  return { addAttachment, integration, loadModule, log, readFile }
+  return {
+    addAttachment,
+    integration,
+    loadModule,
+    log,
+    readFile,
+    readFileSize,
+  }
 }
 
 describe('Allure video integration', () => {
@@ -86,6 +97,8 @@ describe('Allure video integration', () => {
       harness.integration.attachRetainedVideos(['large.mp4'], true),
     ).resolves.toEqual({ attachedPaths: [] })
     expect(harness.addAttachment).not.toHaveBeenCalled()
+    expect(harness.readFile).not.toHaveBeenCalled()
+    expect(harness.readFileSize).toHaveBeenCalledWith('large.mp4')
     expect(harness.log).toHaveBeenCalledWith(
       'warn',
       expect.stringContaining('exceeds integrations.allure.maxBytes'),

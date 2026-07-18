@@ -153,16 +153,43 @@ export const readManifestRunContext = (
   if (!value || typeof value !== 'object') {
     return undefined
   }
-  const context = value as Partial<ManifestRunContext>
+  const context = value as Record<string, unknown>
   if (
-    typeof context.runId !== 'string' ||
-    typeof context.outputDir !== 'string' ||
-    typeof context.startedAt !== 'string' ||
-    !context.tools
+    !isNonEmptyString(context.runId) ||
+    !isNonEmptyString(context.outputDir) ||
+    !path.isAbsolute(context.outputDir) ||
+    !isNonEmptyString(context.startedAt) ||
+    !Number.isFinite(Date.parse(context.startedAt)) ||
+    !isManifestToolVersions(context.tools)
   ) {
     return undefined
   }
-  return context as ManifestRunContext
+  return {
+    runId: context.runId,
+    outputDir: context.outputDir,
+    startedAt: context.startedAt,
+    tools: context.tools,
+  }
+}
+
+const isNonEmptyString = (value: unknown): value is string => {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+const isManifestToolVersions = (
+  value: unknown,
+): value is ManifestToolVersions => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const tools = value as Record<string, unknown>
+  return (
+    isNonEmptyString(tools.service) &&
+    isNonEmptyString(tools.node) &&
+    isNonEmptyString(tools.webdriverio) &&
+    isNonEmptyString(tools.puppeteer) &&
+    (tools.ffmpeg === undefined || isNonEmptyString(tools.ffmpeg))
+  )
 }
 
 export const readManifestWorkerContext = (

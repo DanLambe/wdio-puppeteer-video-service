@@ -4,6 +4,7 @@ import {
   FFMPEG_CHECK_TIMEOUT_MS,
   MP4_DIRECT_PROBE_TIMEOUT_MS,
 } from './constants.js'
+import { Utf8TailBuffer } from './utf8-tail-buffer.js'
 
 const require = createRequire(import.meta.url)
 
@@ -190,7 +191,7 @@ export const probeDirectMp4Support = async (
 
   return await new Promise<boolean>((resolve) => {
     const proc = spawnProcess(ffmpegPath, args)
-    let stderr = ''
+    const stderr = new Utf8TailBuffer(8_192)
     let settled = false
     const settle = (value: boolean) => {
       if (settled) {
@@ -207,8 +208,7 @@ export const probeDirectMp4Support = async (
     }, MP4_DIRECT_PROBE_TIMEOUT_MS)
 
     proc.stderr?.on('data', (chunk) => {
-      const next = stderr + chunk.toString('utf8')
-      stderr = next.length > 8_192 ? next.slice(-8_192) : next
+      stderr.append(chunk)
     })
 
     proc.on('error', () => {
@@ -223,7 +223,7 @@ export const probeDirectMp4Support = async (
         return
       }
 
-      const details = stderr.trim()
+      const details = stderr.finish().trim()
       if (details.length > 0) {
         options?.onProbeFailure?.(details)
       }
