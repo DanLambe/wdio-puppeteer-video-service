@@ -12,12 +12,17 @@ export const runWindowSwitchingJourney = async (): Promise<void> => {
   )
 
   const handles = await browser.getWindowHandles()
-  await browser.switchToWindow(handles[1])
+  const [originalHandle, newHandle] = handles
+  if (originalHandle === undefined || newHandle === undefined) {
+    throw new Error(`Expected two window handles but found ${handles.length}`)
+  }
+
+  await browser.switchToWindow(newHandle)
   await expect($('h3')).toHaveText('New Window')
   await browser.pause(900)
 
   await browser.closeWindow()
-  await browser.switchToWindow(handles[0])
+  await browser.switchToWindow(originalHandle)
   await expect($('h3')).toHaveText('Opening a new window')
   await browser.pause(900)
 }

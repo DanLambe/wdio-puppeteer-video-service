@@ -186,40 +186,43 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
 }
 
 const assertRetryMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] retry mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].includes('_retry1')) {
+  if (!artifactName.includes('_retry1')) {
     throw new Error(
-      `[wdio:e2e:advanced] retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] retry mode expected retry token in artifact name, got ${artifactName}`,
     )
   }
 }
 
 const assertSpecFileRetryMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] spec-file-retry mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].includes('_retry1')) {
+  if (!artifactName.includes('_retry1')) {
     throw new Error(
-      `[wdio:e2e:advanced] spec-file-retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] spec-file-retry mode expected retry token in artifact name, got ${artifactName}`,
     )
   }
 }
 
 const assertSpecLevelMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] spec-level mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].startsWith('spec_level_recording_spec_')) {
+  if (!artifactName.startsWith('spec_level_recording_spec_')) {
     throw new Error(
-      `[wdio:e2e:advanced] spec-level artifact should use spec token prefix, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] spec-level artifact should use spec token prefix, got ${artifactName}`,
     )
   }
 }

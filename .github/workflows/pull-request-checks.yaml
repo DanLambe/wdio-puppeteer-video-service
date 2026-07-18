@@ -37,7 +37,13 @@ jobs:
         run: corepack npm run typecheck
 
       - name: Run Unit Tests
-        run: corepack npm run test:unit
+        run: corepack npm run test:coverage
+
+      - name: Run SonarQube PR Analysis
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       - name: Build Package
         run: corepack npm run clean && corepack npm run build

@@ -1788,7 +1788,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         ],
       })
       expect(
-        service._deferredPostProcessTasks[0].transcodeToMp4?.outputPath,
+        service._deferredPostProcessTasks[0]?.transcodeToMp4?.outputPath,
       ).toBe(path.join(tempDir, 'merge_test.mp4'))
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true })
@@ -2348,12 +2348,11 @@ describe('WdioPuppeteerVideoService unit', () => {
         rejectWriteStreamDone?.(error)
       },
     }
-    const segment = {
+    const segment: Parameters<typeof service._waitForWriteStream>[0] = {
       recordingPath: 'timed-out.webm',
       writeStream,
       writeStreamDone,
       writeStreamErrored: false,
-      writeStreamErrorMessage: undefined,
     }
 
     await expect(service._waitForWriteStream(segment)).resolves.toBe(false)
