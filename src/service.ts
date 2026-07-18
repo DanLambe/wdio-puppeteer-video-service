@@ -1,6 +1,4 @@
-import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import type { FileHandle } from 'node:fs/promises'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
@@ -13,23 +11,13 @@ import type {
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import {
-  ACTIVE_PAGE_POLL_MS,
-  ACTIVE_PAGE_TIMEOUT_MS,
   type ActiveSegment,
   CI_TRANSCODE_FFMPEG_ARGS,
-  DEFAULT_MAX_FILENAME_LENGTH,
   DEFAULT_OUTPUT_DIR,
   DEFAULT_RECORDING_START_TIMEOUT_MS,
   type DeferredMergeTask,
   type DeferredPostProcessTask,
   type DeferredTranscodeTask,
-  FFMPEG_TERMINATION_GRACE_MS,
-  GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
-  GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
-  GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
-  GLOBAL_RECORDING_SLOT_POLL_MS,
-  GLOBAL_RECORDING_SLOT_TIMEOUT_MS,
-  IN_PROCESS_RECORDING_SLOT_POLL_MS,
   type MergeExecutionOptions,
   type OutputFormat,
   type PersistedSpecRetryState,
@@ -37,28 +25,22 @@ import {
   type ResolvedTranscodeOptions,
   SEGMENT_SWITCH_DELAY_MS,
   WINDOW_SEGMENT_COMMANDS,
-  WINDOWS_DEFAULT_MAX_FILENAME_LENGTH,
   WRITE_STREAM_TIMEOUT_MS,
 } from './service/constants.js'
 import * as ffmpeg from './service/ffmpeg.js'
+import * as ffmpegRunner from './service/ffmpeg-runner.js'
 import * as filtering from './service/filtering.js'
 import * as logging from './service/logging.js'
 import * as normalization from './service/normalization.js'
+import { resolveServiceConfiguration } from './service/options.js'
+import * as pageLookup from './service/page-lookup.js'
 import * as artifactPaths from './service/paths.js'
 import * as postProcess from './service/post-process.js'
-import type { GlobalRecordingSlotMetadata } from './service/retry-state.js'
-import * as retryState from './service/retry-state.js'
+import { RecordingSlotScheduler } from './service/recording-slots.js'
+import * as retryStateHelpers from './service/retry-state.js'
 import type {
-  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
-  WdioPuppeteerVideoServiceFileNameStyle,
   WdioPuppeteerVideoServiceLogLevel,
-  WdioPuppeteerVideoServiceMergeOptions,
-  WdioPuppeteerVideoServiceMp4Mode,
   WdioPuppeteerVideoServiceOptions,
-  WdioPuppeteerVideoServicePerformanceProfile,
-  WdioPuppeteerVideoServicePostProcessMode,
-  WdioPuppeteerVideoServiceRecordingStartMode,
-  WdioPuppeteerVideoServiceTranscodeOptions,
 } from './types.js'
 import {
   buildFullSessionIdToken,
@@ -76,9 +58,6 @@ import {
 export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
-  private static _activeRecordingSlots = 0
-  private static readonly _recordingSlotWaiters: Array<() => void> = []
-
   private _browser?: Browser
   private readonly _options: WdioPuppeteerVideoServiceOptions
   private _recorder: ScreenRecorder | undefined
@@ -113,182 +92,22 @@ export default class WdioPuppeteerVideoService
   private _forceMp4Transcode = false
   private readonly _slugUsageCount = new Map<string, number>()
   private readonly _maxSlugLength: number
-  private _ownsRecordingSlot = false
-  private _ownsGlobalRecordingSlot = false
-  private _globalRecordingSlotPath: string | undefined
-  private _globalRecordingSlotFileHandle: FileHandle | undefined
-  private _globalRecordingSlotHeartbeatTimer: NodeJS.Timeout | undefined
-  private _globalRecordingSlotStartedAt: number | undefined
+  private readonly _recordingSlotScheduler: RecordingSlotScheduler
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
 
   constructor(options: WdioPuppeteerVideoServiceOptions = {}) {
-    const performanceProfile = this._normalizePerformanceProfile(
-      options.performanceProfile,
+    const resolvedConfiguration = resolveServiceConfiguration(options)
+    this._hasExplicitLogLevel = resolvedConfiguration.hasExplicitLogLevel
+    this._logLevel = resolvedConfiguration.logLevel
+    this._maxSlugLength = resolvedConfiguration.maxSlugLength
+    this._options = resolvedConfiguration.options
+    this._recordingSlotScheduler = new RecordingSlotScheduler(
+      this._options,
+      (level, message, details) => {
+        this._log(level, message, details)
+      },
     )
-    const ciPinnedWarnLogLevel =
-      performanceProfile === 'ci' && options.logLevel === undefined
-    this._hasExplicitLogLevel =
-      typeof options.logLevel === 'string' || ciPinnedWarnLogLevel
-    this._logLevel = ciPinnedWarnLogLevel
-      ? 'warn'
-      : this._normalizeLogLevel(options.logLevel)
-
-    const mergedTranscode = this._normalizeTranscodeOptions(options.transcode)
-    const mergedMergeSegments = this._normalizeMergeOptions(
-      options.mergeSegments,
-    )
-
-    let mergedOptions: WdioPuppeteerVideoServiceOptions = {
-      outputDir: 'videos',
-      saveAllVideos: false,
-      videoWidth: 1280,
-      videoHeight: 720,
-      fps: 30,
-      recordOnRetries: false,
-      specLevelRecording: false,
-      skipViewPortKickoff: false,
-      segmentOnWindowSwitch: true,
-      maxConcurrentRecordings: 0,
-      maxGlobalRecordings: 0,
-      recordingStartMode: 'blocking',
-      recordingStartTimeoutMs: DEFAULT_RECORDING_START_TIMEOUT_MS,
-      ffmpegTimeoutMs: 0,
-      postProcessMode: 'immediate',
-      includeSpecPatterns: [],
-      excludeSpecPatterns: [],
-      includeTagPatterns: [],
-      excludeTagPatterns: [],
-      outputFormat: 'webm',
-      mp4Mode: 'auto',
-      fileNameStyle: 'test',
-      fileNameOverflowStrategy: 'truncate',
-      maxFileNameLength:
-        process.platform === 'win32'
-          ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
-          : DEFAULT_MAX_FILENAME_LENGTH,
-      ...options,
-      performanceProfile,
-      transcode: mergedTranscode,
-      mergeSegments: mergedMergeSegments,
-    }
-
-    if (performanceProfile === 'parallel') {
-      mergedOptions = {
-        ...mergedOptions,
-        videoWidth: options.videoWidth ?? 1280,
-        videoHeight: options.videoHeight ?? 720,
-        fps: options.fps ?? 24,
-        outputFormat: this._normalizeOutputFormat(options.outputFormat),
-      }
-
-      if (options.mergeSegments?.enabled === undefined) {
-        mergedOptions.mergeSegments = {
-          ...mergedMergeSegments,
-          enabled: false,
-        }
-      }
-    }
-
-    if (performanceProfile === 'ci') {
-      mergedOptions = {
-        ...mergedOptions,
-        videoWidth: options.videoWidth ?? 1280,
-        videoHeight: options.videoHeight ?? 720,
-        fps: options.fps ?? 24,
-        outputFormat: this._normalizeOutputFormat(options.outputFormat),
-        skipViewPortKickoff: options.skipViewPortKickoff ?? true,
-        segmentOnWindowSwitch: options.segmentOnWindowSwitch ?? false,
-        postProcessMode: options.postProcessMode ?? 'deferred',
-        recordingStartMode: options.recordingStartMode ?? 'fastFail',
-        recordingStartTimeoutMs:
-          options.recordingStartTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
-      }
-
-      if (options.mergeSegments?.enabled === undefined) {
-        mergedOptions.mergeSegments = {
-          ...mergedMergeSegments,
-          enabled: false,
-        }
-      }
-    }
-
-    const normalizedGlobalRecordingLockDir = this._normalizeOptionalDir(
-      mergedOptions.globalRecordingLockDir,
-    )
-
-    this._options = {
-      ...mergedOptions,
-      outputDir: this._normalizeOutputDir(mergedOptions.outputDir),
-      videoWidth: this._normalizePositiveInt(mergedOptions.videoWidth, 1280),
-      videoHeight: this._normalizePositiveInt(mergedOptions.videoHeight, 720),
-      fps: this._normalizePositiveInt(mergedOptions.fps, 30),
-      maxFileNameLength: this._normalizePositiveInt(
-        mergedOptions.maxFileNameLength,
-        process.platform === 'win32'
-          ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
-          : DEFAULT_MAX_FILENAME_LENGTH,
-      ),
-      fileNameOverflowStrategy: this._normalizeFileNameOverflowStrategy(
-        mergedOptions.fileNameOverflowStrategy,
-      ),
-      fileNameStyle: this._normalizeFileNameStyle(mergedOptions.fileNameStyle),
-      mp4Mode: this._normalizeMp4Mode(mergedOptions.mp4Mode),
-      outputFormat: this._normalizeOutputFormat(mergedOptions.outputFormat),
-      performanceProfile,
-      recordOnRetries: this._normalizeBoolean(mergedOptions.recordOnRetries),
-      specLevelRecording: this._normalizeBoolean(
-        mergedOptions.specLevelRecording,
-      ),
-      skipViewPortKickoff: this._normalizeBoolean(
-        mergedOptions.skipViewPortKickoff,
-      ),
-      segmentOnWindowSwitch: this._normalizeBoolean(
-        mergedOptions.segmentOnWindowSwitch,
-        true,
-      ),
-      maxConcurrentRecordings: this._normalizeNonNegativeInt(
-        mergedOptions.maxConcurrentRecordings,
-        0,
-      ),
-      maxGlobalRecordings: this._normalizeNonNegativeInt(
-        mergedOptions.maxGlobalRecordings,
-        0,
-      ),
-      recordingStartMode: this._normalizeRecordingStartMode(
-        mergedOptions.recordingStartMode,
-      ),
-      recordingStartTimeoutMs: this._normalizePositiveInt(
-        mergedOptions.recordingStartTimeoutMs,
-        DEFAULT_RECORDING_START_TIMEOUT_MS,
-      ),
-      ffmpegTimeoutMs: this._normalizeNonNegativeInt(
-        mergedOptions.ffmpegTimeoutMs,
-        0,
-      ),
-      ...(normalizedGlobalRecordingLockDir
-        ? { globalRecordingLockDir: normalizedGlobalRecordingLockDir }
-        : {}),
-      transcode: this._normalizeTranscodeOptions(mergedOptions.transcode),
-      mergeSegments: this._normalizeMergeOptions(mergedOptions.mergeSegments),
-      postProcessMode: this._normalizePostProcessMode(
-        mergedOptions.postProcessMode,
-      ),
-      includeSpecPatterns: this._normalizePatternList(
-        mergedOptions.includeSpecPatterns,
-      ),
-      excludeSpecPatterns: this._normalizePatternList(
-        mergedOptions.excludeSpecPatterns,
-      ),
-      includeTagPatterns: this._normalizePatternList(
-        mergedOptions.includeTagPatterns,
-      ),
-      excludeTagPatterns: this._normalizePatternList(
-        mergedOptions.excludeTagPatterns,
-      ),
-    }
-
-    this._maxSlugLength = this._computeMaxSlugLength()
   }
 
   async onPrepare(): Promise<void> {
@@ -300,13 +119,15 @@ export default class WdioPuppeteerVideoService
     this._launcherSpecRetryAttemptCount.clear()
     this._specFileRetryAttempt = 0
 
-    const retryStateDir = this._getSpecRetryStateDirPath()
+    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
+      this._options.outputDir,
+    )
     await fs
       .rm(retryStateDir, { recursive: true, force: true })
       .catch((error) => {
         this._log(
           'trace',
-          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onPrepare (${retryStateDir}): ${this._describeError(error)}`,
+          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onPrepare (${retryStateDir}): ${normalization.describeError(error)}`,
         )
       })
     const retryStateDirReady = await fs
@@ -316,7 +137,7 @@ export default class WdioPuppeteerVideoService
         this._retryStatePersistenceUnavailable = true
         this._log(
           'warn',
-          `[WdioPuppeteerVideoService] Failed to initialize retry-state tracking at ${retryStateDir}: ${this._describeError(error)}. Falling back to framework and inferred retry detection only.`,
+          `[WdioPuppeteerVideoService] Failed to initialize retry-state tracking at ${retryStateDir}: ${normalization.describeError(error)}. Falling back to framework and inferred retry detection only.`,
         )
         return false
       })
@@ -341,7 +162,10 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const specRetryKey = this._buildSpecRetryKey(specs, capabilities)
+    const specRetryKey = retryStateHelpers.buildSpecRetryKey(
+      specs,
+      capabilities,
+    )
     const specFileRetryAttempt =
       this._launcherSpecRetryAttemptCount.get(specRetryKey) ?? 0
     this._launcherSpecRetryAttemptCount.set(
@@ -385,13 +209,15 @@ export default class WdioPuppeteerVideoService
     this._launcherSpecRetryAttemptCount.clear()
     this._specFileRetryAttempt = 0
 
-    const retryStateDir = this._getSpecRetryStateDirPath()
+    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
+      this._options.outputDir,
+    )
     await fs
       .rm(retryStateDir, { recursive: true, force: true })
       .catch((error) => {
         this._log(
           'trace',
-          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${this._describeError(error)}`,
+          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${normalization.describeError(error)}`,
         )
       })
     this._retryStatePersistenceUnavailable = false
@@ -421,7 +247,10 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const expectedRetryKey = this._buildSpecRetryKey(specs, capabilities)
+    const expectedRetryKey = retryStateHelpers.buildSpecRetryKey(
+      specs,
+      capabilities,
+    )
     if (retryState.specRetryKey !== expectedRetryKey) {
       this._log(
         'trace',
@@ -449,12 +278,12 @@ export default class WdioPuppeteerVideoService
     this._entityAttemptCount.clear()
 
     if (!this._hasExplicitLogLevel) {
-      const inheritedLogLevel = this._resolveWdioLogLevel(browser)
-      this._logLevel = this._normalizeLogLevel(inheritedLogLevel)
+      const inheritedLogLevel = logging.resolveWdioLogLevel(browser)
+      this._logLevel = logging.normalizeLogLevel(inheritedLogLevel)
     }
 
-    this._sessionIdToken = this._buildSessionIdToken(browser.sessionId)
-    this._sessionIdFullToken = this._buildFullSessionIdToken(browser.sessionId)
+    this._sessionIdToken = buildSessionIdToken(browser.sessionId)
+    this._sessionIdFullToken = buildFullSessionIdToken(browser.sessionId)
     const caps = browser.capabilities
     const browserName = caps.browserName?.toLowerCase()
     this._isChromium =
@@ -482,7 +311,7 @@ export default class WdioPuppeteerVideoService
       .catch((error) => {
         this._log(
           'warn',
-          `[WdioPuppeteerVideoService] Failed to create output directory (${this._options.outputDir ?? DEFAULT_OUTPUT_DIR}): ${this._describeError(error)}`,
+          `[WdioPuppeteerVideoService] Failed to create output directory (${this._options.outputDir ?? DEFAULT_OUTPUT_DIR}): ${normalization.describeError(error)}`,
         )
         this._disableRecordingForWorker('output directory is unavailable')
       })
@@ -732,12 +561,12 @@ export default class WdioPuppeteerVideoService
         if (activeSegmentRef?.writeStreamErrored) {
           return
         }
-        const writeErrorMessage = this._describeError(error)
+        const writeErrorMessage = normalization.describeError(error)
         if (activeSegmentRef) {
           activeSegmentRef.writeStreamErrored = true
           activeSegmentRef.writeStreamErrorMessage = writeErrorMessage
         }
-        if (this._isBenignStreamWriteError(error)) {
+        if (normalization.isBenignStreamWriteError(error)) {
           this._log(
             'debug',
             `[WdioPuppeteerVideoService] Recording stream closed while recorder was still flushing (${writeErrorMessage}).`,
@@ -757,7 +586,7 @@ export default class WdioPuppeteerVideoService
         recorderErrorLogged = true
         this._log(
           'warn',
-          `[WdioPuppeteerVideoService] Recorder stream error: ${this._describeError(error)}`,
+          `[WdioPuppeteerVideoService] Recorder stream error: ${normalization.describeError(error)}`,
         )
       }
       writeStream.on('error', onWriteStreamError)
@@ -799,13 +628,13 @@ export default class WdioPuppeteerVideoService
       return false
     } finally {
       if (acquiredRecordingSlot && !this._recorder) {
-        await this._releaseRecordingSlot()
+        await this._recordingSlotScheduler.release()
       }
     }
   }
 
   private async _acquireRecordingSlotForStart(): Promise<boolean> {
-    const acquiredSlot = await this._acquireRecordingSlot()
+    const acquiredSlot = await this._recordingSlotScheduler.acquire()
     if (acquiredSlot) {
       return true
     }
@@ -841,7 +670,7 @@ export default class WdioPuppeteerVideoService
       win._wdio_video_id = id
     }, targetId)
 
-    const page = await this._findActivePage(puppeteerBrowser, targetId)
+    const page = await pageLookup.findActivePage(puppeteerBrowser, targetId)
     if (!page) {
       this._log(
         'warn',
@@ -888,9 +717,19 @@ export default class WdioPuppeteerVideoService
 
     return {
       outputFormat,
-      outputPath: this._getSegmentPath(outputFormat),
+      outputPath: artifactPaths.getSegmentPath(
+        this._options.outputDir,
+        this._currentTestSlug,
+        this._currentSegment,
+        outputFormat,
+      ),
       recordingFormat,
-      recordingPath: this._getSegmentPath(recordingFormat),
+      recordingPath: artifactPaths.getSegmentPath(
+        this._options.outputDir,
+        this._currentTestSlug,
+        this._currentSegment,
+        recordingFormat,
+      ),
       transcodeEnabled,
     }
   }
@@ -905,7 +744,7 @@ export default class WdioPuppeteerVideoService
     }
 
     const metadata = this._applyRetryCountToMetadata(
-      this._collectSlugMetadata(test, context),
+      collectSlugMetadata(test, context, this._options.fileNameStyle),
       retryCount,
     )
     await this._startRecordingForMetadata(metadata, retryCount)
@@ -919,7 +758,7 @@ export default class WdioPuppeteerVideoService
   private _buildSpecLevelSlugMetadata(retryCount: number): SlugMetadata {
     const firstSpecPath = this._specPaths[0] || 'spec'
     const parsedSpecName = path.parse(firstSpecPath).name
-    const specToken = this._sanitizeFileToken(parsedSpecName, 120) || 'spec'
+    const specToken = sanitizeFileToken(parsedSpecName, 120) || 'spec'
     const specNameToken = specToken.endsWith('_spec')
       ? specToken
       : `${specToken}_spec`
@@ -948,7 +787,11 @@ export default class WdioPuppeteerVideoService
     )
 
     const baseSlug = this._buildTestSlugFromMetadata(metadata)
-    this._currentTestSlug = this._reserveUniqueSlug(baseSlug)
+    this._currentTestSlug = reserveUniqueSlug(
+      baseSlug,
+      this._maxSlugLength,
+      this._slugUsageCount,
+    )
     this._currentSegment = 1
     this._currentRecordingRetryCount = retryCount
     this._recordedSegments.clear()
@@ -972,7 +815,11 @@ export default class WdioPuppeteerVideoService
     let inferredEntityRetry: number | undefined
 
     if (this._options.recordOnRetries) {
-      const metadata = this._collectSlugMetadata(test, context)
+      const metadata = collectSlugMetadata(
+        test,
+        context,
+        this._options.fileNameStyle,
+      )
       const retryTrackingKey = `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
       inferredEntityRetry = this._entityAttemptCount.get(retryTrackingKey) ?? 0
       this._entityAttemptCount.set(retryTrackingKey, inferredEntityRetry + 1)
@@ -1063,7 +910,10 @@ export default class WdioPuppeteerVideoService
     entityLabel: string,
     shouldRecord: boolean,
   ): void {
-    if (!this._options.recordOnRetries || !this._isLogLevelEnabled('trace')) {
+    if (
+      !this._options.recordOnRetries ||
+      !logging.shouldLog('trace', this._logLevel)
+    ) {
       return
     }
 
@@ -1077,7 +927,10 @@ export default class WdioPuppeteerVideoService
     retryContext: ResolvedRetryContext,
     entityLabel: string,
   ): void {
-    if (!this._options.recordOnRetries || !this._isLogLevelEnabled('debug')) {
+    if (
+      !this._options.recordOnRetries ||
+      !logging.shouldLog('debug', this._logLevel)
+    ) {
       return
     }
 
@@ -1148,7 +1001,7 @@ export default class WdioPuppeteerVideoService
     this._activeSegment = undefined
 
     if (!recorder || !activeSegment) {
-      await this._releaseRecordingSlot()
+      await this._recordingSlotScheduler.release()
       return
     }
     try {
@@ -1179,7 +1032,7 @@ export default class WdioPuppeteerVideoService
     } finally {
       recorder.off('error', activeSegment.onRecorderError)
       activeSegment.writeStream.off('error', activeSegment.onWriteStreamError)
-      await this._releaseRecordingSlot()
+      await this._recordingSlotScheduler.release()
     }
   }
 
@@ -1201,15 +1054,21 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const segmentPaths = this._collectCurrentTestSegmentPaths()
+    const segmentPaths = artifactPaths.collectCurrentTestSegmentPaths(
+      this._currentTestSlug,
+      this._recordedSegments,
+    )
     if (segmentPaths.length === 0) {
       return
     }
 
     const deleteSegments = this._options.mergeSegments?.deleteSegments ?? true
-    const mergedFormat = this._resolveMergeFormat(
+    const mergedFormat = artifactPaths.resolveMergeFormat(
       segmentPaths,
       'deferred merge',
+      (message) => {
+        this._log('warn', message)
+      },
     )
     if (!mergedFormat) {
       return
@@ -1217,7 +1076,12 @@ export default class WdioPuppeteerVideoService
 
     const mergeTask = postProcess.createDeferredMergeTask({
       deleteSegments,
-      getMergedOutputPath: (format) => this._getMergedOutputPath(format),
+      getMergedOutputPath: (format) =>
+        artifactPaths.getMergedOutputPath(
+          this._options.outputDir,
+          this._currentTestSlug,
+          format,
+        ),
       mergedFormat,
       outputFormat: this._options.outputFormat ?? 'webm',
       segmentPaths,
@@ -1238,19 +1102,32 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const segmentPaths = this._collectCurrentTestSegmentPaths()
+    const segmentPaths = artifactPaths.collectCurrentTestSegmentPaths(
+      this._currentTestSlug,
+      this._recordedSegments,
+    )
 
     if (segmentPaths.length === 0) {
       return
     }
 
     const deleteSegments = this._options.mergeSegments?.deleteSegments ?? true
-    const mergedFormat = this._resolveMergeFormat(segmentPaths, 'merge')
+    const mergedFormat = artifactPaths.resolveMergeFormat(
+      segmentPaths,
+      'merge',
+      (message) => {
+        this._log('warn', message)
+      },
+    )
     if (!mergedFormat) {
       return
     }
 
-    const mergedPath = this._getMergedOutputPath(mergedFormat)
+    const mergedPath = artifactPaths.getMergedOutputPath(
+      this._options.outputDir,
+      this._currentTestSlug,
+      mergedFormat,
+    )
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Attempting merge for ${segmentPaths.length} segments into ${mergedPath}`,
@@ -1275,19 +1152,6 @@ export default class WdioPuppeteerVideoService
     }
   }
 
-  private _resolveMergeFormat(
-    segmentPaths: string[],
-    operationName: string,
-  ): OutputFormat | undefined {
-    return artifactPaths.resolveMergeFormat(
-      segmentPaths,
-      operationName,
-      (message) => {
-        this._log('warn', message)
-      },
-    )
-  }
-
   private async _mergeSegmentPathsToOutput(
     options: MergeExecutionOptions,
   ): Promise<boolean> {
@@ -1299,34 +1163,6 @@ export default class WdioPuppeteerVideoService
         this._log('warn', message)
       },
     })
-  }
-
-  private _collectCurrentTestSegmentPaths(): string[] {
-    return artifactPaths.collectCurrentTestSegmentPaths(
-      this._currentTestSlug,
-      this._recordedSegments,
-    )
-  }
-
-  private _getSegmentPath(format?: OutputFormat): string {
-    return artifactPaths.getSegmentPath(
-      this._options.outputDir,
-      this._currentTestSlug,
-      this._currentSegment,
-      format ?? this._options.outputFormat,
-    )
-  }
-
-  private _getMergedOutputPath(format?: OutputFormat): string {
-    return artifactPaths.getMergedOutputPath(
-      this._options.outputDir,
-      this._currentTestSlug,
-      format ?? this._options.outputFormat,
-    )
-  }
-
-  private _extractPartNumber(filePath: string): number {
-    return artifactPaths.extractPartNumber(filePath)
   }
 
   private _createResolvedTranscodeOptions(): ResolvedTranscodeOptions {
@@ -1367,8 +1203,11 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _initializeFfmpeg(): Promise<boolean> {
-    this._ffmpegCandidates = this._getFfmpegCandidates()
-    this._resolvedFfmpegPath = await this._resolveAvailableFfmpegPath(
+    this._ffmpegCandidates = ffmpeg.getFfmpegCandidates(
+      this._options.ffmpegPath?.trim(),
+      process.env.FFMPEG_PATH?.trim(),
+    )
+    this._resolvedFfmpegPath = await ffmpeg.resolveAvailableFfmpegPath(
       this._ffmpegCandidates,
     )
     this._ffmpegAvailable = !!this._resolvedFfmpegPath
@@ -1421,7 +1260,14 @@ export default class WdioPuppeteerVideoService
     }
 
     const ffmpegPath = this._resolveFfmpegPath()
-    const supportsDirectMp4 = await this._supportsDirectMp4(ffmpegPath)
+    const supportsDirectMp4 = await ffmpeg.probeDirectMp4Support(ffmpegPath, {
+      onProbeFailure: (details) => {
+        this._log(
+          'debug',
+          `[WdioPuppeteerVideoService] Direct MP4 probe failed: ${details}`,
+        )
+      },
+    })
     if (supportsDirectMp4) {
       this._log(
         'info',
@@ -1446,26 +1292,6 @@ export default class WdioPuppeteerVideoService
         '[WdioPuppeteerVideoService] Direct MP4 compatibility probe failed. Falling back to MP4 transcode mode (`mp4Mode: auto`).',
       )
     }
-  }
-
-  private async _findActivePage(
-    puppeteerBrowser: PuppeteerBrowser,
-    targetId: string,
-  ): Promise<Page | undefined> {
-    const startedAt = Date.now()
-
-    while (Date.now() - startedAt < ACTIVE_PAGE_TIMEOUT_MS) {
-      const pages = await puppeteerBrowser
-        .pages()
-        .catch(() => [] /* browser may be closing */)
-      const page = await this._findPageWithId(pages, targetId)
-      if (page) {
-        return page
-      }
-      await delay(ACTIVE_PAGE_POLL_MS)
-    }
-
-    return undefined
   }
 
   private async _kickOffScreencastFrames(page: Page): Promise<void> {
@@ -1657,142 +1483,20 @@ export default class WdioPuppeteerVideoService
     args: string[],
     operation: string,
   ): Promise<boolean> {
-    if (!this._ffmpegAvailable) {
-      this._warnMissingFfmpeg(
-        `Skipping ffmpeg ${operation} because ffmpeg is unavailable.`,
-      )
-      return false
-    }
-
-    const ffmpegPath = this._resolveFfmpegPath()
-
-    return new Promise<boolean>((resolve) => {
-      const proc = this._spawnFfmpegProcess(ffmpegPath, args)
-      let stderr = ''
-      let settled = false
-      let timeout: NodeJS.Timeout | undefined
-      let terminationTimeout: NodeJS.Timeout | undefined
-      let timedOut = false
-
-      const settle = (value: boolean) => {
-        if (settled) {
-          return
-        }
-
-        settled = true
-        if (timeout) {
-          clearTimeout(timeout)
-        }
-        if (terminationTimeout) {
-          clearTimeout(terminationTimeout)
-        }
-        resolve(value)
-      }
-
-      const timeoutMs = this._options.ffmpegTimeoutMs ?? 0
-      if (timeoutMs > 0) {
-        timeout = setTimeout(() => {
-          timedOut = true
-          this._log(
-            'warn',
-            `[WdioPuppeteerVideoService] ffmpeg ${operation} timed out after ${timeoutMs.toString()}ms`,
-          )
-          proc.kill()
-          terminationTimeout = setTimeout(() => {
-            proc.kill('SIGKILL')
-            settle(false)
-          }, FFMPEG_TERMINATION_GRACE_MS)
-          terminationTimeout.unref?.()
-        }, timeoutMs)
-        timeout.unref?.()
-      }
-
-      proc.stderr?.on('data', (chunk) => {
-        const next = stderr + chunk.toString('utf8')
-        stderr = next.length > 32_768 ? next.slice(-32_768) : next
-      })
-
-      proc.on('error', (error) => {
-        if (settled) {
-          return
-        }
-        if (timedOut) {
-          settle(false)
-          return
-        }
-
+    return ffmpegRunner.runFfmpeg({
+      args,
+      available: this._ffmpegAvailable,
+      ffmpegPath: this._resolveFfmpegPath(),
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      markUnavailable: () => {
         this._ffmpegAvailable = false
-        this._warnMissingFfmpeg(
-          `ffmpeg ${operation} failed to start: ${error.message}`,
-        )
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Failed to spawn ffmpeg for ${operation}: ${error.message}`,
-        )
-        settle(false)
-      })
-
-      proc.on('close', (code) => {
-        if (settled) {
-          return
-        }
-        if (timedOut) {
-          settle(false)
-          return
-        }
-
-        if (code === 0) {
-          settle(true)
-          return
-        }
-
-        const details = stderr.trim()
-        if (details) {
-          this._log(
-            'warn',
-            `[WdioPuppeteerVideoService] ffmpeg ${operation} exited with code ${code}: ${details}`,
-          )
-        } else {
-          this._log(
-            'warn',
-            `[WdioPuppeteerVideoService] ffmpeg ${operation} exited with code ${code}`,
-          )
-        }
-        settle(false)
-      })
-    })
-  }
-
-  private _spawnFfmpegProcess(
-    ffmpegPath: string,
-    args: string[],
-  ): ReturnType<typeof spawn> {
-    return spawn(ffmpegPath, args, {
-      stdio: ['ignore', 'ignore', 'pipe'],
-      windowsHide: true,
-    })
-  }
-
-  private async _resolveAvailableFfmpegPath(
-    candidates: string[],
-  ): Promise<string | undefined> {
-    return ffmpeg.resolveAvailableFfmpegPath(candidates)
-  }
-
-  private _getFfmpegCandidates(): string[] {
-    return ffmpeg.getFfmpegCandidates(
-      this._options.ffmpegPath?.trim(),
-      process.env.FFMPEG_PATH?.trim(),
-    )
-  }
-
-  private async _supportsDirectMp4(ffmpegPath: string): Promise<boolean> {
-    return ffmpeg.probeDirectMp4Support(ffmpegPath, {
-      onProbeFailure: (details) => {
-        this._log(
-          'debug',
-          `[WdioPuppeteerVideoService] Direct MP4 probe failed: ${details}`,
-        )
+      },
+      operation,
+      timeoutMs: this._options.ffmpegTimeoutMs ?? 0,
+      warnMissing: (reason) => {
+        this._warnMissingFfmpeg(reason)
       },
     })
   }
@@ -1814,26 +1518,6 @@ export default class WdioPuppeteerVideoService
       'warn',
       `[WdioPuppeteerVideoService] FFmpeg is required but unavailable. ${configuredPath}${candidateList} Install FFmpeg and make it available on PATH, set \`ffmpegPath\`, or install \`ffmpeg-static\` in your project. ${reason}`,
     )
-  }
-
-  private async _findPageWithId(
-    pages: Page[],
-    targetId: string,
-  ): Promise<Page | undefined> {
-    for (const page of pages) {
-      try {
-        const id = await page.evaluate(() => {
-          const win = globalThis as unknown as { _wdio_video_id?: string }
-          return win._wdio_video_id
-        })
-        if (id === targetId) {
-          return page
-        }
-      } catch {
-        // access denied or other error on page
-      }
-    }
-    return undefined
   }
 
   private async _runSerializedRecordingTask(
@@ -1981,340 +1665,6 @@ export default class WdioPuppeteerVideoService
     this._deferredPostProcessTasks.push(...filteredTasks)
   }
 
-  private async _acquireRecordingSlot(): Promise<boolean> {
-    if (
-      this._ownsRecordingSlot &&
-      ((this._options.maxGlobalRecordings ?? 0) <= 0 ||
-        this._ownsGlobalRecordingSlot)
-    ) {
-      return true
-    }
-
-    const startTimeoutMs = this._getRecordingStartTimeoutMs()
-    const inProcessSlotAcquired =
-      await this._acquireInProcessRecordingSlot(startTimeoutMs)
-    if (!inProcessSlotAcquired) {
-      return false
-    }
-
-    const globalSlotAcquired =
-      await this._acquireGlobalRecordingSlot(startTimeoutMs)
-    if (globalSlotAcquired) {
-      return true
-    }
-
-    this._releaseInProcessRecordingSlot()
-    return false
-  }
-
-  private async _acquireInProcessRecordingSlot(
-    timeoutMs: number | undefined,
-  ): Promise<boolean> {
-    const maxConcurrentRecordings = this._options.maxConcurrentRecordings ?? 0
-    if (maxConcurrentRecordings <= 0 || this._ownsRecordingSlot) {
-      return true
-    }
-
-    if (timeoutMs !== undefined) {
-      const deadline = Date.now() + Math.max(0, timeoutMs)
-      while (Date.now() <= deadline) {
-        if (
-          WdioPuppeteerVideoService._activeRecordingSlots <
-          maxConcurrentRecordings
-        ) {
-          WdioPuppeteerVideoService._activeRecordingSlots += 1
-          this._ownsRecordingSlot = true
-          this._log(
-            'debug',
-            `[WdioPuppeteerVideoService] Acquired in-process recording slot (${WdioPuppeteerVideoService._activeRecordingSlots}/${maxConcurrentRecordings}).`,
-          )
-          return true
-        }
-        await delay(IN_PROCESS_RECORDING_SLOT_POLL_MS)
-      }
-
-      return false
-    }
-
-    await new Promise<void>((resolve) => {
-      const tryAcquire = () => {
-        if (
-          WdioPuppeteerVideoService._activeRecordingSlots <
-          maxConcurrentRecordings
-        ) {
-          WdioPuppeteerVideoService._activeRecordingSlots += 1
-          this._ownsRecordingSlot = true
-          this._log(
-            'debug',
-            `[WdioPuppeteerVideoService] Acquired in-process recording slot (${WdioPuppeteerVideoService._activeRecordingSlots}/${maxConcurrentRecordings}).`,
-          )
-          resolve()
-          return
-        }
-
-        WdioPuppeteerVideoService._recordingSlotWaiters.push(tryAcquire)
-      }
-
-      tryAcquire()
-    })
-
-    return true
-  }
-
-  private async _acquireGlobalRecordingSlot(
-    timeoutMs: number | undefined,
-  ): Promise<boolean> {
-    const maxGlobalRecordings = this._options.maxGlobalRecordings ?? 0
-    if (maxGlobalRecordings <= 0 || this._ownsGlobalRecordingSlot) {
-      return true
-    }
-
-    const lockDir = this._resolveGlobalRecordingLockDir()
-    await fs.mkdir(lockDir, { recursive: true }).catch(() => {
-      /* best-effort lock-dir creation */
-    })
-
-    const timeout = timeoutMs ?? GLOBAL_RECORDING_SLOT_TIMEOUT_MS
-    const deadline = Date.now() + Math.max(0, timeout)
-    while (Date.now() <= deadline) {
-      const acquired = await this._tryAcquireGlobalRecordingSlot(
-        lockDir,
-        maxGlobalRecordings,
-      )
-      if (acquired) {
-        return true
-      }
-
-      if (Date.now() >= deadline) {
-        break
-      }
-
-      await delay(GLOBAL_RECORDING_SLOT_POLL_MS)
-    }
-
-    return false
-  }
-
-  private _getRecordingStartTimeoutMs(): number | undefined {
-    if ((this._options.recordingStartMode ?? 'blocking') !== 'fastFail') {
-      return undefined
-    }
-
-    return this._options.recordingStartTimeoutMs
-  }
-
-  private async _tryAcquireGlobalRecordingSlot(
-    lockDir: string,
-    maxGlobalRecordings: number,
-  ): Promise<boolean> {
-    for (let slotIndex = 1; slotIndex <= maxGlobalRecordings; slotIndex += 1) {
-      const slotPath = path.join(lockDir, `slot-${slotIndex}.lock`)
-      try {
-        const acquired = await this._openOwnedGlobalRecordingSlot(slotPath)
-        if (acquired) {
-          return true
-        }
-      } catch (error) {
-        const slotError = error as NodeJS.ErrnoException
-        if (slotError.code === 'EEXIST') {
-          await this._cleanupStaleGlobalRecordingSlot(slotPath)
-        }
-      }
-    }
-
-    return false
-  }
-
-  private async _openOwnedGlobalRecordingSlot(
-    slotPath: string,
-  ): Promise<boolean> {
-    const fileHandle = await fs.open(slotPath, 'wx')
-    const startedAt = Date.now()
-    const metadataWritten = await this._writeGlobalRecordingSlotMetadata(
-      fileHandle,
-      startedAt,
-    )
-    if (!metadataWritten) {
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Discarding global recording slot candidate without metadata: ${slotPath}`,
-      )
-      await this._discardGlobalRecordingSlotCandidate(slotPath, fileHandle)
-      return false
-    }
-
-    this._ownsGlobalRecordingSlot = true
-    this._globalRecordingSlotPath = slotPath
-    this._globalRecordingSlotFileHandle = fileHandle
-    this._globalRecordingSlotStartedAt = startedAt
-    this._startGlobalRecordingSlotHeartbeat()
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Acquired global recording slot: ${slotPath}`,
-    )
-    return true
-  }
-
-  private async _writeGlobalRecordingSlotMetadata(
-    fileHandle: FileHandle,
-    startedAt: number,
-  ): Promise<boolean> {
-    const metadata = Buffer.from(
-      JSON.stringify({
-        pid: process.pid,
-        startedAt,
-        lastUpdatedAt: Date.now(),
-      }),
-      'utf8',
-    )
-
-    try {
-      await fileHandle.truncate(0)
-      let bytesWritten = 0
-      while (bytesWritten < metadata.length) {
-        const writeResult = await fileHandle.write(
-          metadata,
-          bytesWritten,
-          metadata.length - bytesWritten,
-          bytesWritten,
-        )
-        if (writeResult.bytesWritten <= 0) {
-          return false
-        }
-        bytesWritten += writeResult.bytesWritten
-      }
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  private async _discardGlobalRecordingSlotCandidate(
-    slotPath: string,
-    fileHandle: FileHandle,
-  ): Promise<void> {
-    await fileHandle.close().catch(() => {
-      /* best-effort slot close */
-    })
-    await fs.unlink(slotPath).catch(() => {
-      /* best-effort candidate cleanup */
-    })
-  }
-
-  private async _cleanupStaleGlobalRecordingSlot(
-    slotPath: string,
-  ): Promise<void> {
-    const slotStats = await fs.stat(slotPath).catch(() => undefined)
-    if (!slotStats) {
-      return
-    }
-
-    const fileContents = await fs.readFile(slotPath, 'utf8').catch(() => '')
-    const slotMetadata = this._parseGlobalRecordingSlotMetadata(fileContents)
-    const parsedPid = slotMetadata?.pid
-    if (parsedPid) {
-      const lastUpdatedAtMs = this._resolveGlobalRecordingSlotLastUpdatedAtMs(
-        slotMetadata,
-        slotStats.mtimeMs,
-      )
-      if (this._isProcessAlive(parsedPid)) {
-        if (!this._isGlobalRecordingSlotFresh(lastUpdatedAtMs)) {
-          this._log(
-            'debug',
-            `[WdioPuppeteerVideoService] Removing stale global recording slot with expired heartbeat for pid=${parsedPid}: ${slotPath}`,
-          )
-          await fs.unlink(slotPath).catch(() => {
-            /* best-effort stale-slot cleanup */
-          })
-          return
-        }
-
-        this._log(
-          'debug',
-          `[WdioPuppeteerVideoService] Keeping active global recording slot owned by pid=${parsedPid}: ${slotPath}`,
-        )
-        return
-      }
-
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Removing stale global recording slot for exited pid=${parsedPid}: ${slotPath}`,
-      )
-      await fs.unlink(slotPath).catch(() => {
-        /* best-effort stale-slot cleanup */
-      })
-      return
-    }
-
-    if (!this._shouldCleanupInvalidGlobalRecordingSlot(slotStats.mtimeMs)) {
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Keeping recent invalid global recording slot during grace window: ${slotPath}`,
-      )
-      return
-    }
-
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Removing stale invalid global recording slot: ${slotPath}`,
-    )
-    await fs.unlink(slotPath).catch(() => {
-      /* best-effort stale-slot cleanup */
-    })
-  }
-
-  private _shouldCleanupInvalidGlobalRecordingSlot(
-    lastUpdatedAtMs: number,
-  ): boolean {
-    return (
-      Date.now() - lastUpdatedAtMs >= GLOBAL_RECORDING_SLOT_INVALID_STALE_MS
-    )
-  }
-
-  private _isGlobalRecordingSlotFresh(lastUpdatedAtMs: number): boolean {
-    return Date.now() - lastUpdatedAtMs < GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS
-  }
-
-  private _resolveGlobalRecordingSlotLastUpdatedAtMs(
-    slotMetadata: GlobalRecordingSlotMetadata | undefined,
-    fallbackLastUpdatedAtMs: number,
-  ): number {
-    return (
-      slotMetadata?.lastUpdatedAt ??
-      slotMetadata?.startedAt ??
-      fallbackLastUpdatedAtMs
-    )
-  }
-
-  private _extractPidFromSlotFile(fileContents: string): number | undefined {
-    return retryState.extractPidFromSlotFile(fileContents)
-  }
-
-  private _parseGlobalRecordingSlotMetadata(
-    fileContents: string,
-  ): GlobalRecordingSlotMetadata | undefined {
-    return retryState.parseGlobalRecordingSlotMetadata(fileContents)
-  }
-
-  private _isProcessAlive(pid: number): boolean {
-    return retryState.isProcessAlive(pid)
-  }
-
-  private _getSpecRetryStateDirPath(): string {
-    return retryState.getSpecRetryStateDirPath(this._options.outputDir)
-  }
-
-  private _getSpecRetryStatePathForCid(cid: string): string {
-    return retryState.getSpecRetryStatePathForCid(this._options.outputDir, cid)
-  }
-
-  private _buildSpecRetryKey(
-    specs: string[],
-    capabilities: WebdriverIO.Capabilities,
-  ): string {
-    return retryState.buildSpecRetryKey(specs, capabilities)
-  }
-
   private async _writeSpecRetryState(
     cid: string,
     retryState: PersistedSpecRetryState,
@@ -2323,10 +1673,15 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const retryStateDir = this._getSpecRetryStateDirPath()
+    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
+      this._options.outputDir,
+    )
     try {
       await fs.mkdir(retryStateDir, { recursive: true })
-      const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+      const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
+        this._options.outputDir,
+        cid,
+      )
       await fs.writeFile(retryStatePath, JSON.stringify(retryState), 'utf8')
       this._log(
         'trace',
@@ -2336,7 +1691,7 @@ export default class WdioPuppeteerVideoService
       this._retryStatePersistenceUnavailable = true
       this._log(
         'warn',
-        `[WdioPuppeteerVideoService] Failed to persist retry state for cid=${cid}: ${this._describeError(error)}. Falling back to framework and inferred retry detection only.`,
+        `[WdioPuppeteerVideoService] Failed to persist retry state for cid=${cid}: ${normalization.describeError(error)}. Falling back to framework and inferred retry detection only.`,
       )
     }
   }
@@ -2344,7 +1699,10 @@ export default class WdioPuppeteerVideoService
   private async _readSpecRetryState(
     cid: string,
   ): Promise<PersistedSpecRetryState | undefined> {
-    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+    const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
+      this._options.outputDir,
+      cid,
+    )
     try {
       const rawValue = await fs.readFile(retryStatePath, 'utf8')
       const parsedValue = JSON.parse(
@@ -2380,14 +1738,17 @@ export default class WdioPuppeteerVideoService
       }
       this._log(
         'warn',
-        `[WdioPuppeteerVideoService] Failed to read retry state for cid=${cid}: ${this._describeError(error)}`,
+        `[WdioPuppeteerVideoService] Failed to read retry state for cid=${cid}: ${normalization.describeError(error)}`,
       )
       return undefined
     }
   }
 
   private async _deleteSpecRetryState(cid: string): Promise<void> {
-    const retryStatePath = this._getSpecRetryStatePathForCid(cid)
+    const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
+      this._options.outputDir,
+      cid,
+    )
     await fs.unlink(retryStatePath).catch((error) => {
       const retryStateError = error as NodeJS.ErrnoException
       if (retryStateError.code === 'ENOENT') {
@@ -2395,132 +1756,9 @@ export default class WdioPuppeteerVideoService
       }
       this._log(
         'trace',
-        `[WdioPuppeteerVideoService] Failed to delete retry state for cid=${cid}: ${this._describeError(error)}`,
+        `[WdioPuppeteerVideoService] Failed to delete retry state for cid=${cid}: ${normalization.describeError(error)}`,
       )
     })
-  }
-
-  private _resolveGlobalRecordingLockDir(): string {
-    return retryState.resolveGlobalRecordingLockDir(
-      this._options.outputDir,
-      this._options.globalRecordingLockDir,
-    )
-  }
-
-  private async _releaseRecordingSlot(): Promise<void> {
-    await this._releaseGlobalRecordingSlot()
-    this._releaseInProcessRecordingSlot()
-  }
-
-  private _releaseInProcessRecordingSlot(): void {
-    if (!this._ownsRecordingSlot) {
-      return
-    }
-
-    this._ownsRecordingSlot = false
-    if (WdioPuppeteerVideoService._activeRecordingSlots > 0) {
-      WdioPuppeteerVideoService._activeRecordingSlots -= 1
-    }
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Released in-process recording slot (${WdioPuppeteerVideoService._activeRecordingSlots}/${this._options.maxConcurrentRecordings ?? 0}).`,
-    )
-
-    const nextWaiter = WdioPuppeteerVideoService._recordingSlotWaiters.shift()
-    if (nextWaiter) {
-      queueMicrotask(nextWaiter)
-    }
-  }
-
-  private async _releaseGlobalRecordingSlot(): Promise<void> {
-    if (!this._ownsGlobalRecordingSlot) {
-      return
-    }
-
-    const lockPath = this._globalRecordingSlotPath
-    const lockFileHandle = this._globalRecordingSlotFileHandle
-    this._stopGlobalRecordingSlotHeartbeat()
-    this._ownsGlobalRecordingSlot = false
-    this._globalRecordingSlotPath = undefined
-    this._globalRecordingSlotFileHandle = undefined
-    this._globalRecordingSlotStartedAt = undefined
-
-    if (!lockFileHandle) {
-      return
-    }
-    await lockFileHandle.close().catch(() => {
-      /* best-effort slot close */
-    })
-    if (lockPath) {
-      await fs.unlink(lockPath).catch(() => {
-        /* best-effort slot cleanup */
-      })
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Released global recording slot: ${lockPath}`,
-      )
-    }
-  }
-
-  private _startGlobalRecordingSlotHeartbeat(): void {
-    if (
-      !this._ownsGlobalRecordingSlot ||
-      !this._globalRecordingSlotPath ||
-      this._globalRecordingSlotStartedAt === undefined ||
-      this._globalRecordingSlotHeartbeatTimer
-    ) {
-      return
-    }
-
-    this._globalRecordingSlotHeartbeatTimer = setInterval(() => {
-      void this._refreshGlobalRecordingSlotHeartbeat()
-    }, GLOBAL_RECORDING_SLOT_HEARTBEAT_MS)
-    this._globalRecordingSlotHeartbeatTimer.unref?.()
-  }
-
-  private _stopGlobalRecordingSlotHeartbeat(): void {
-    if (!this._globalRecordingSlotHeartbeatTimer) {
-      return
-    }
-
-    clearInterval(this._globalRecordingSlotHeartbeatTimer)
-    this._globalRecordingSlotHeartbeatTimer = undefined
-  }
-
-  private async _refreshGlobalRecordingSlotHeartbeat(): Promise<void> {
-    const slotPath = this._globalRecordingSlotPath
-    const fileHandle = this._globalRecordingSlotFileHandle
-    const startedAt = this._globalRecordingSlotStartedAt
-
-    if (
-      !this._ownsGlobalRecordingSlot ||
-      !slotPath ||
-      !fileHandle ||
-      startedAt === undefined
-    ) {
-      return
-    }
-
-    const metadataWritten = await this._writeGlobalRecordingSlotMetadata(
-      fileHandle,
-      startedAt,
-    )
-    if (!metadataWritten) {
-      this._log(
-        'trace',
-        `[WdioPuppeteerVideoService] Failed to refresh global recording slot heartbeat: ${slotPath}`,
-      )
-    }
-  }
-
-  private _resolveWdioLogLevel(browser: Browser): string | undefined {
-    return logging.resolveWdioLogLevel(browser)
-  }
-
-  private _normalizeLogLevel(
-    level: string | undefined,
-  ): WdioPuppeteerVideoServiceLogLevel {
-    return logging.normalizeLogLevel(level)
   }
 
   private _log(
@@ -2529,12 +1767,6 @@ export default class WdioPuppeteerVideoService
     details?: unknown,
   ): void {
     logging.writeLog(this._logLevel, level, message, details)
-  }
-
-  private _isLogLevelEnabled(
-    level: WdioPuppeteerVideoServiceLogLevel,
-  ): boolean {
-    return logging.shouldLog(level, this._logLevel)
   }
 
   private _canUseRecordingHooks(): boolean {
@@ -2564,7 +1796,7 @@ export default class WdioPuppeteerVideoService
     this._currentRecordingRetryCount = 0
     this._currentWindowHandle = undefined
     this._recordedSegments.clear()
-    await this._releaseRecordingSlot()
+    await this._recordingSlotScheduler.release()
   }
 
   private _isRecordingActive(): boolean {
@@ -2573,13 +1805,17 @@ export default class WdioPuppeteerVideoService
 
   /** @internal Exposed for unit testing only. */
   private _buildTestSlug(test: Frameworks.Test, context?: unknown): string {
-    const metadata = this._collectSlugMetadata(test, context)
+    const metadata = collectSlugMetadata(
+      test,
+      context,
+      this._options.fileNameStyle,
+    )
     return this._buildTestSlugFromMetadata(metadata)
   }
 
   private _buildTestSlugFromMetadata(metadata: SlugMetadata): string {
     return buildTestSlugFromMetadata(metadata, {
-      maxSlugLength: this._getMaxSlugLength(),
+      maxSlugLength: this._maxSlugLength,
       fileNameStyle: this._options.fileNameStyle ?? 'test',
       fileNameOverflowStrategy:
         this._options.fileNameOverflowStrategy ?? 'truncate',
@@ -2588,149 +1824,10 @@ export default class WdioPuppeteerVideoService
     })
   }
 
-  private _collectSlugMetadata(
-    test: Frameworks.Test,
-    context: unknown,
-  ): SlugMetadata {
-    return collectSlugMetadata(test, context, this._options.fileNameStyle)
-  }
-
-  private _reserveUniqueSlug(baseSlug: string): string {
-    return reserveUniqueSlug(
-      baseSlug,
-      this._getMaxSlugLength(),
-      this._slugUsageCount,
-    )
-  }
-
-  private _getMaxSlugLength(): number {
-    return this._maxSlugLength
-  }
-
-  private _computeMaxSlugLength(): number {
-    return normalization.computeMaxSlugLength(this._options)
-  }
-
-  private _getEffectiveMaxFilenameLength(): number {
-    return normalization.getEffectiveMaxFilenameLength(this._options)
-  }
-
-  private _sanitizeFileToken(
-    value: string | undefined,
-    maxLength: number,
-  ): string {
-    return sanitizeFileToken(value, maxLength)
-  }
-
-  private _normalizeOutputDir(outputDir: string | undefined): string {
-    return normalization.normalizeOutputDir(outputDir)
-  }
-
-  private _normalizeOptionalDir(
-    dirPath: string | undefined,
-  ): string | undefined {
-    return normalization.normalizeOptionalDir(dirPath)
-  }
-
-  private _normalizePositiveInt(
-    value: number | undefined,
-    fallback: number,
-  ): number {
-    return normalization.normalizePositiveInt(value, fallback)
-  }
-
-  private _normalizeNonNegativeInt(
-    value: number | undefined,
-    fallback: number,
-  ): number {
-    return normalization.normalizeNonNegativeInt(value, fallback)
-  }
-
-  private _normalizeBoolean(
-    value: boolean | undefined,
-    fallback = false,
-  ): boolean {
-    return normalization.normalizeBoolean(value, fallback)
-  }
-
-  private _normalizePatternList(patterns: string[] | undefined): string[] {
-    return normalization.normalizePatternList(patterns)
-  }
-
-  private _normalizePostProcessMode(
-    mode: WdioPuppeteerVideoServicePostProcessMode | undefined,
-  ): WdioPuppeteerVideoServicePostProcessMode {
-    return normalization.normalizePostProcessMode(mode)
-  }
-
-  private _normalizeOutputFormat(
-    format: WdioPuppeteerVideoServiceOptions['outputFormat'] | undefined,
-  ): NonNullable<WdioPuppeteerVideoServiceOptions['outputFormat']> {
-    return normalization.normalizeOutputFormat(format)
-  }
-
-  private _normalizeTranscodeOptions(
-    options: WdioPuppeteerVideoServiceTranscodeOptions | undefined,
-  ): WdioPuppeteerVideoServiceTranscodeOptions {
-    return normalization.normalizeTranscodeOptions(options)
-  }
-
-  private _normalizeMergeOptions(
-    options: WdioPuppeteerVideoServiceMergeOptions | undefined,
-  ): WdioPuppeteerVideoServiceMergeOptions {
-    return normalization.normalizeMergeOptions(options)
-  }
-
-  private _normalizeFileNameOverflowStrategy(
-    strategy: WdioPuppeteerVideoServiceFileNameOverflowStrategy | undefined,
-  ): WdioPuppeteerVideoServiceFileNameOverflowStrategy {
-    return normalization.normalizeFileNameOverflowStrategy(strategy)
-  }
-
-  private _normalizeFileNameStyle(
-    style: WdioPuppeteerVideoServiceFileNameStyle | undefined,
-  ): WdioPuppeteerVideoServiceFileNameStyle {
-    return normalization.normalizeFileNameStyle(style)
-  }
-
-  private _normalizeMp4Mode(
-    mode: WdioPuppeteerVideoServiceMp4Mode | undefined,
-  ): WdioPuppeteerVideoServiceMp4Mode {
-    return normalization.normalizeMp4Mode(mode)
-  }
-
-  private _normalizePerformanceProfile(
-    profile: WdioPuppeteerVideoServicePerformanceProfile | undefined,
-  ): WdioPuppeteerVideoServicePerformanceProfile {
-    return normalization.normalizePerformanceProfile(profile)
-  }
-
-  private _normalizeRecordingStartMode(
-    mode: WdioPuppeteerVideoServiceRecordingStartMode | undefined,
-  ): WdioPuppeteerVideoServiceRecordingStartMode {
-    return normalization.normalizeRecordingStartMode(mode)
-  }
-
-  private _isBenignStreamWriteError(error: NodeJS.ErrnoException): boolean {
-    return normalization.isBenignStreamWriteError(error)
-  }
-
-  private _describeError(error: unknown): string {
-    return normalization.describeError(error)
-  }
-
   private _nextPageMarkerId(): string {
     this._pageMarkerCounter += 1
     const sessionToken =
       this._sessionIdToken || this._sessionIdFullToken || 'session'
     return `wdio-video-${sessionToken}-${Date.now().toString(36)}-${this._pageMarkerCounter.toString(36)}`
-  }
-
-  private _buildSessionIdToken(sessionId: string | undefined): string {
-    return buildSessionIdToken(sessionId)
-  }
-
-  private _buildFullSessionIdToken(sessionId: string | undefined): string {
-    return buildFullSessionIdToken(sessionId)
   }
 }

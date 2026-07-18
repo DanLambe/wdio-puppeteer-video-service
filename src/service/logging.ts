@@ -6,6 +6,12 @@ import {
   SERVICE_LOG_PREFIX,
 } from './constants.js'
 
+export type ServiceLogger = (
+  level: WdioPuppeteerVideoServiceLogLevel,
+  message: string,
+  details?: unknown,
+) => void
+
 export const resolveWdioLogLevel = (browser: Browser): string | undefined => {
   const browserWithOptions = browser as Browser & {
     options?: { logLevel?: string }

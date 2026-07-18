@@ -261,9 +261,10 @@ export const getEffectiveMaxFilenameLength = (
     WdioPuppeteerVideoServiceOptions,
     'maxFileNameLength' | 'outputDir'
   >,
+  platform: NodeJS.Platform = process.platform,
 ): number => {
   const platformDefault =
-    process.platform === 'win32'
+    platform === 'win32'
       ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
       : DEFAULT_MAX_FILENAME_LENGTH
   const configuredMax = options.maxFileNameLength
@@ -271,7 +272,7 @@ export const getEffectiveMaxFilenameLength = (
     : platformDefault
 
   let effectiveMax = configuredMax
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     const absoluteOutputDir = path.resolve(options.outputDir || 'videos')
     const remainingPathBudget =
       WINDOWS_MAX_PATH_LENGTH - absoluteOutputDir.length - 1
@@ -288,8 +289,12 @@ export const computeMaxSlugLength = (
     WdioPuppeteerVideoServiceOptions,
     'maxFileNameLength' | 'outputDir'
   >,
+  platform: NodeJS.Platform = process.platform,
 ): number => {
-  const effectiveMaxFilenameLength = getEffectiveMaxFilenameLength(options)
+  const effectiveMaxFilenameLength = getEffectiveMaxFilenameLength(
+    options,
+    platform,
+  )
   return Math.max(16, effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH)
 }
 

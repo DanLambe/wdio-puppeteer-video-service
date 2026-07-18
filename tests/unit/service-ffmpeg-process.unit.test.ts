@@ -9,114 +9,105 @@ vi.mock('node:child_process', () => ({
 }))
 
 import { FFMPEG_TERMINATION_GRACE_MS } from '../../src/service/constants.js'
-import WdioPuppeteerVideoService from '../../src/service.js'
-import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
+import {
+  type FfmpegProcess,
+  runFfmpeg,
+  spawnFfmpegProcess,
+} from '../../src/service/ffmpeg-runner.js'
 
-class FakeFfmpegProcess extends EventEmitter {
+class FakeFfmpegProcess extends EventEmitter implements FfmpegProcess {
   stderr: PassThrough | null = new PassThrough()
-  kill = vi.fn((_signal?: NodeJS.Signals) => true)
+  kill = vi.fn((_signal?: NodeJS.Signals | number) => true)
 }
 
-type FfmpegRunnerService = {
-  _ffmpegAvailable: boolean
-  _log: (level: string, message: string) => void
-  _resolvedFfmpegPath: string | undefined
-  _runFfmpeg: (args: string[], operation: string) => Promise<boolean>
-  _warnMissingFfmpeg: (reason: string) => void
-}
-
-const createFfmpegHarness = (
-  options?: WdioPuppeteerVideoServiceOptions,
-): { service: FfmpegRunnerService; warnMessages: string[] } => {
-  const service = new WdioPuppeteerVideoService(
-    options,
-  ) as unknown as FfmpegRunnerService
+const createRunnerHarness = (timeoutMs = 0) => {
   const warnMessages: string[] = []
-  service._ffmpegAvailable = true
-  service._resolvedFfmpegPath = 'ffmpeg'
-  service._warnMissingFfmpeg = () => {}
-  service._log = (level, message) => {
-    if (level === 'warn') {
-      warnMessages.push(message)
-    }
-  }
+  const warnMissing = vi.fn()
+  const markUnavailable = vi.fn()
+  const run = (process: FakeFfmpegProcess) =>
+    runFfmpeg(
+      {
+        args: ['-i', 'input.webm'],
+        available: true,
+        ffmpegPath: 'ffmpeg',
+        log: (level, message) => {
+          if (level === 'warn') {
+            warnMessages.push(message)
+          }
+        },
+        markUnavailable,
+        operation: 'merge',
+        timeoutMs,
+        warnMissing,
+      },
+      {
+        spawnProcess: () => process,
+      },
+    )
 
-  return { service, warnMessages }
+  return { markUnavailable, run, warnMessages, warnMissing }
 }
 
-describe('WdioPuppeteerVideoService ffmpeg process handling', () => {
+describe('ffmpeg runner process handling', () => {
   afterEach(() => {
     spawnMock.mockReset()
     vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
-  it('_spawnFfmpegProcess hides Windows console windows', () => {
+  it('hides Windows console windows when spawning ffmpeg', () => {
     const process = new FakeFfmpegProcess()
     spawnMock.mockReturnValue(process)
-    const service = new WdioPuppeteerVideoService() as unknown as {
-      _spawnFfmpegProcess: (
-        ffmpegPath: string,
-        args: string[],
-      ) => FakeFfmpegProcess
-    }
 
-    expect(service._spawnFfmpegProcess('ffmpeg', ['-version'])).toBe(process)
+    expect(spawnFfmpegProcess('ffmpeg', ['-version'])).toBe(process)
     expect(spawnMock).toHaveBeenCalledWith('ffmpeg', ['-version'], {
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
     })
   })
 
-  it('_runFfmpeg resolves once when a process error is followed by close', async () => {
+  it('resolves once when a process error is followed by close', async () => {
     const process = new FakeFfmpegProcess()
-    spawnMock.mockReturnValue(process)
-    const { service, warnMessages } = createFfmpegHarness()
-    const warnMissingFfmpeg = vi.fn()
-    service._warnMissingFfmpeg = warnMissingFfmpeg
+    const harness = createRunnerHarness()
 
-    const resultPromise = service._runFfmpeg(['-version'], 'probe')
+    const resultPromise = harness.run(process)
     process.emit('error', new Error('spawn failed'))
     process.emit('close', 1)
 
     await expect(resultPromise).resolves.toBe(false)
-    expect(service._ffmpegAvailable).toBe(false)
-    expect(warnMissingFfmpeg).toHaveBeenCalledTimes(1)
-    expect(warnMessages).toHaveLength(1)
-    expect(warnMessages[0]).toContain('Failed to spawn ffmpeg')
+    expect(harness.markUnavailable).toHaveBeenCalledTimes(1)
+    expect(harness.warnMissing).toHaveBeenCalledTimes(1)
+    expect(harness.warnMessages).toHaveLength(1)
+    expect(harness.warnMessages[0]).toContain('Failed to spawn ffmpeg')
   })
 
-  it('_runFfmpeg includes captured stderr when ffmpeg exits nonzero', async () => {
+  it('includes captured stderr when ffmpeg exits nonzero', async () => {
     const process = new FakeFfmpegProcess()
-    spawnMock.mockReturnValue(process)
-    const { service, warnMessages } = createFfmpegHarness()
+    const harness = createRunnerHarness()
 
-    const resultPromise = service._runFfmpeg(['-i', 'input.webm'], 'merge')
+    const resultPromise = harness.run(process)
     process.stderr?.write('muxer failed')
     process.emit('close', 1)
 
     await expect(resultPromise).resolves.toBe(false)
-    expect(warnMessages).toHaveLength(1)
-    expect(warnMessages[0]).toContain('muxer failed')
+    expect(harness.warnMessages).toHaveLength(1)
+    expect(harness.warnMessages[0]).toContain('muxer failed')
   })
 
-  it('_runFfmpeg kills and fails timed out operations', async () => {
+  it('kills and fails timed out operations', async () => {
     vi.useFakeTimers()
     try {
       const process = new FakeFfmpegProcess()
-      spawnMock.mockReturnValue(process)
-      const { service, warnMessages } = createFfmpegHarness({
-        ffmpegTimeoutMs: 25,
-      })
+      const harness = createRunnerHarness(25)
 
-      const resultPromise = service._runFfmpeg(['-i', 'input.webm'], 'merge')
+      const resultPromise = harness.run(process)
       await vi.advanceTimersByTimeAsync(25)
 
       expect(process.kill).toHaveBeenCalledTimes(1)
       process.emit('close', 0)
 
       await expect(resultPromise).resolves.toBe(false)
-      expect(warnMessages).toEqual([
+      expect(harness.warnMessages).toEqual([
         '[WdioPuppeteerVideoService] ffmpeg merge timed out after 25ms',
       ])
     } finally {
@@ -124,16 +115,13 @@ describe('WdioPuppeteerVideoService ffmpeg process handling', () => {
     }
   })
 
-  it('_runFfmpeg force-kills a timed out process that does not close', async () => {
+  it('force-kills a timed out process that does not close', async () => {
     vi.useFakeTimers()
     try {
       const process = new FakeFfmpegProcess()
-      spawnMock.mockReturnValue(process)
-      const { service } = createFfmpegHarness({
-        ffmpegTimeoutMs: 25,
-      })
+      const harness = createRunnerHarness(25)
 
-      const resultPromise = service._runFfmpeg(['-i', 'input.webm'], 'merge')
+      const resultPromise = harness.run(process)
       await vi.advanceTimersByTimeAsync(25 + FFMPEG_TERMINATION_GRACE_MS)
 
       await expect(resultPromise).resolves.toBe(false)
@@ -141,5 +129,28 @@ describe('WdioPuppeteerVideoService ffmpeg process handling', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('does not spawn when ffmpeg is unavailable', async () => {
+    const warnMissing = vi.fn()
+    const spawnProcess = vi.fn()
+
+    await expect(
+      runFfmpeg(
+        {
+          args: [],
+          available: false,
+          ffmpegPath: 'ffmpeg',
+          log: () => {},
+          markUnavailable: () => {},
+          operation: 'merge',
+          timeoutMs: 0,
+          warnMissing,
+        },
+        { spawnProcess },
+      ),
+    ).resolves.toBe(false)
+    expect(spawnProcess).not.toHaveBeenCalled()
+    expect(warnMissing).toHaveBeenCalledOnce()
   })
 })
