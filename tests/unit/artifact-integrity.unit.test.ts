@@ -163,6 +163,58 @@ describe('artifact integrity', () => {
     )
   })
 
+  it('surfaces non-collision reservation errors', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const blockedDirectory = path.join(tempDir, 'blocked')
+    await fs.writeFile(blockedDirectory, 'not-a-directory', 'utf8')
+
+    await expect(
+      reserveArtifactPath(path.join(blockedDirectory, 'final.webm')),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/ENOTDIR|EEXIST/u) })
+  })
+
+  it('uses the next output name when completed media already exists', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'existing.webm')
+    await fs.writeFile(desiredPath, 'original', 'utf8')
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'replacement', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(path.join(tempDir, 'existing_run2.webm'))
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe('original')
+  })
+
+  it('treats output removed by a producer as empty and cleans the reservation', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'removed.webm')
+    const warn = vi.fn()
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'temporary', 'utf8')
+          await fs.unlink(temporaryPath)
+          return true
+        },
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to publish an empty artifact'),
+    )
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
   it('does not reclaim a recent malformed reservation', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'malformed.webm')
@@ -180,6 +232,62 @@ describe('artifact integrity', () => {
       }),
     ).resolves.toBe(path.join(tempDir, 'malformed_run2.webm'))
     await expect(fs.stat(`${desiredPath}.wdio-reserve`)).resolves.toBeDefined()
+  })
+
+  it('does not reclaim a reservation owned by a live worker', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'live.webm')
+    await fs.writeFile(
+      `${desiredPath}.wdio-reserve`,
+      JSON.stringify({
+        createdAt: Date.now(),
+        outputPath: desiredPath,
+        pid: 222,
+        temporaryPath: path.join(tempDir, '.live.wdio-222-active.webm'),
+      }),
+      'utf8',
+    )
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        process: {
+          environment: () => undefined,
+          isAlive: (pid) => pid === 222,
+          pid: 333,
+          platform: 'linux',
+        },
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(path.join(tempDir, 'live_run2.webm'))
+    await expect(fs.stat(`${desiredPath}.wdio-reserve`)).resolves.toBeDefined()
+  })
+
+  it('reclaims an expired malformed reservation', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'expired.webm')
+    const reservationPath = `${desiredPath}.wdio-reserve`
+    await fs.writeFile(reservationPath, '{', 'utf8')
+    const expired = new Date(0)
+    await fs.utimes(reservationPath, expired, expired)
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'media', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(desiredPath)
+    await expect(fs.stat(reservationPath)).rejects.toThrow()
   })
 
   it('recovers reservations and temporary output left by a killed worker', async () => {

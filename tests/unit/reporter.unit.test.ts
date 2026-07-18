@@ -184,6 +184,71 @@ afterEach(async () => {
 })
 
 describe('WdioPuppeteerVideoReporter', () => {
+  it('uses stderr as the default diagnostic stream', async () => {
+    const outputDir = await createTempDir()
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    try {
+      const reporter = new WdioPuppeteerVideoReporter({ outputDir })
+      reporter.write('reporter diagnostic')
+      expect(stderr).toHaveBeenCalledWith('reporter diagnostic')
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+
+  it('keeps event hooks safe before runner initialization', () => {
+    const reporter = new WdioPuppeteerVideoReporter({
+      writeStream: { write: () => true },
+    })
+    const test = {
+      uid: 'early-test',
+      title: 'early test',
+      state: 'passed',
+      duration: 1,
+    } as unknown as TestStats
+    const runner = {} as RunnerStats
+
+    expect(reporter.onTestPass(test)).toBeUndefined()
+    expect(reporter.onTestFail(test)).toBeUndefined()
+    expect(reporter.onTestSkip(test)).toBeUndefined()
+    expect(reporter.onTestPending(test)).toBeUndefined()
+    expect(reporter.onTestEnd(test)).toBeUndefined()
+    expect(reporter.onRunnerEnd(runner)).toBeUndefined()
+    expect(reporter.isSynchronised).toBe(true)
+  })
+
+  it('reports asynchronous fragment write failures without blocking WDIO', async () => {
+    const tempDir = await createTempDir()
+    const blockedOutput = path.join(tempDir, 'blocked')
+    const write = vi.fn(() => true)
+    const reporter = new WdioPuppeteerVideoReporter({
+      outputDir: blockedOutput,
+      writeStream: { write },
+    })
+    const runner = {
+      cid: 'failed-flush',
+      config: { specFileRetries: -1 },
+      specs: [path.resolve('tests/specs/failed-flush.ts')],
+      capabilities: { browserName: 'chrome', version: '139.0.0' },
+      start: new Date('2026-07-18T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    reporter.onRunnerStart(runner)
+    await fs.rm(blockedOutput, { recursive: true, force: true })
+    await fs.writeFile(blockedOutput, 'not-a-directory', 'utf8')
+    reporter.onTestPass({
+      uid: 'passed-test',
+      title: 'passes',
+      state: 'passed',
+      duration: 1.9,
+    } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+    expect(write).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to flush reporter fragment'),
+    )
+  })
+
   it('captures retries, final outcomes, and skipped tests before one final flush', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)

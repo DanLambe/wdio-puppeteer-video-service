@@ -1,0 +1,221 @@
+name: Release Candidate Validation
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core (${{ matrix.os }}, ${{ matrix.dependencies }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        dependencies:
+          - minimum
+          - latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Minimum Supported Peers
+        if: matrix.dependencies == 'minimum'
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9.29.1 puppeteer-core@25.3.0
+          @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
+          @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
+          @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
+          @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
+          @wdio/spec-reporter@9.29.1 @wdio/types@9.29.1
+
+      - name: Install Latest Supported Peers
+        if: matrix.dependencies == 'latest'
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9 puppeteer-core@25
+          @wdio/allure-reporter@9 @wdio/cli@9
+          @wdio/cucumber-framework@9 @wdio/globals@9
+          @wdio/jasmine-framework@9 @wdio/local-runner@9
+          @wdio/mocha-framework@9 @wdio/reporter@9
+          @wdio/spec-reporter@9 @wdio/types@9
+
+      - name: Verify Supported Peer Versions
+        run: corepack npm ls webdriverio puppeteer-core
+
+      - name: Rebuild Required Binary Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Run Release Checks
+        run: corepack npm run release:check
+
+      - name: Upload Coverage And SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quality-${{ matrix.os }}-${{ matrix.dependencies }}
+          path: |
+            coverage/lcov.info
+            sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  chrome-protocol:
+    name: Chrome ${{ matrix.protocol }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        protocol:
+          - bidi
+          - classic
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Latest Supported Browser Stack
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
+          @wdio/spec-reporter@9 @wdio/types@9
+
+      - name: Rebuild Browser Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Run Chrome Protocol Tests
+        run: corepack npm run test:e2e:capture:${{ matrix.protocol }}
+
+  support-floor:
+    name: Minimum WDIO And Puppeteer E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Minimum Supported Stack
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9.29.1 puppeteer-core@25.3.0
+          @wdio/cli@9.29.1 @wdio/globals@9.29.1
+          @wdio/local-runner@9.29.1 @wdio/mocha-framework@9.29.1
+          @wdio/reporter@9.29.1 @wdio/spec-reporter@9.29.1
+          @wdio/types@9.29.1
+
+      - name: Rebuild Browser Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Run Classic Chrome Capture
+        run: corepack npm run test:e2e:capture:classic
+
+  frameworks:
+    name: ${{ matrix.framework }} framework
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: mocha
+            command: test:e2e:both
+          - framework: jasmine
+            command: test:e2e:jasmine
+          - framework: cucumber
+            command: test:e2e:cucumber
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Latest Supported Framework Stack
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9 puppeteer-core@25 @wdio/cli@9
+          @wdio/cucumber-framework@9 @wdio/globals@9
+          @wdio/jasmine-framework@9 @wdio/local-runner@9
+          @wdio/mocha-framework@9 @wdio/reporter@9
+          @wdio/spec-reporter@9 @wdio/types@9
+
+      - name: Rebuild Browser Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Run Framework Tests
+        run: corepack npm run ${{ matrix.command }}
+
+  edge:
+    name: Edge smoke (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Latest Supported Edge Stack
+        run: >-
+          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
+          @wdio/spec-reporter@9 @wdio/types@9
+
+      - name: Rebuild Edge Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static edgedriver
+
+      - name: Run Edge Capture Smoke Test
+        run: corepack npm run test:e2e:capture:edge

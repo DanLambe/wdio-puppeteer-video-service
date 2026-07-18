@@ -1,0 +1,103 @@
+import { describe, expect, it } from 'vitest'
+import {
+  assertPackageMetadata,
+  parsePackResult,
+} from '../../scripts/check-packed-consumer.js'
+import { assertCycloneDxBom } from '../../scripts/generate-sbom.js'
+
+describe('release package validation', () => {
+  it('accepts the exact ESM export map', () => {
+    expect(() =>
+      assertPackageMetadata({
+        type: 'module',
+        exports: {
+          '.': {
+            types: './build/index.d.ts',
+            import: './build/index.js',
+          },
+          './manifest': {
+            types: './build/manifest.d.ts',
+            import: './build/manifest.js',
+          },
+          './reporter': {
+            types: './build/reporter.d.ts',
+            import: './build/reporter.js',
+          },
+        },
+      }),
+    ).not.toThrow()
+  })
+
+  it('rejects CommonJS, missing, and unexpected export targets', () => {
+    expect(() => assertPackageMetadata(null)).toThrow('must be an object')
+    expect(() => assertPackageMetadata({ type: 'commonjs' })).toThrow(
+      'ESM-only',
+    )
+    expect(() =>
+      assertPackageMetadata({ type: 'module', exports: {} }),
+    ).toThrow('Unexpected package exports')
+    expect(() =>
+      assertPackageMetadata({
+        type: 'module',
+        exports: {
+          '.': {
+            types: './build/index.d.ts',
+            import: './build/index.js',
+            require: './build/index.cjs',
+          },
+          './manifest': {
+            types: './build/manifest.d.ts',
+            import: './build/manifest.js',
+          },
+          './reporter': {
+            types: './build/reporter.d.ts',
+            import: './build/reporter.js',
+          },
+        },
+      }),
+    ).toThrow('CommonJS')
+  })
+
+  it('parses npm pack JSON and rejects malformed output', () => {
+    expect(parsePackResult('[{"filename":"package-1.0.0.tgz"}]')).toBe(
+      'package-1.0.0.tgz',
+    )
+    expect(
+      parsePackResult(
+        '{"wdio-puppeteer-video-service":{"filename":"package-1.0.0.tgz"}}',
+      ),
+    ).toBe('package-1.0.0.tgz')
+    expect(() => parsePackResult('{}')).toThrow('package metadata')
+    expect(() => parsePackResult('[{}]')).toThrow('tarball filename')
+  })
+
+  it('validates npm CycloneDX metadata', () => {
+    const expectedPackage = { name: 'package', version: '1.0.0' }
+    expect(() =>
+      assertCycloneDxBom(
+        {
+          bomFormat: 'CycloneDX',
+          specVersion: '1.6',
+          metadata: {
+            component: { type: 'library', ...expectedPackage },
+          },
+        },
+        expectedPackage,
+      ),
+    ).not.toThrow()
+    expect(() => assertCycloneDxBom([], expectedPackage)).toThrow('JSON object')
+    expect(() =>
+      assertCycloneDxBom({ bomFormat: 'SPDX' }, expectedPackage),
+    ).toThrow('valid CycloneDX')
+    expect(() =>
+      assertCycloneDxBom(
+        {
+          bomFormat: 'CycloneDX',
+          specVersion: '1.6',
+          metadata: { component: { type: 'application' } },
+        },
+        expectedPackage,
+      ),
+    ).toThrow('does not match')
+  })
+})

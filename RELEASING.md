@@ -1,0 +1,58 @@
+# Releasing
+
+Releases are prepared by Changesets and published manually from a tested npm
+tarball. A merge to `master` never publishes to npm by itself.
+
+## One-time npm setup
+
+Configure an npm trusted publisher for:
+
+- GitHub owner: `DanLambe`
+- Repository: `wdio-puppeteer-video-service`
+- Workflow filename: `publish.yaml`
+- GitHub environment: `npm`
+
+Create the matching protected `npm` environment in GitHub if approval is
+required. The publish job grants only `contents: read` and `id-token: write`;
+it does not use a long-lived npm token. Keep the repository URL in
+`package.json` synchronized with the trusted-publisher configuration.
+
+## Prepare a release
+
+1. Add a consumer-facing changeset with `npm run changeset` for each relevant
+   pull request. Internal-only work may use an empty changeset.
+2. Merge changes to `master`. The Changesets workflow creates or updates the
+   package-version release pull request.
+3. Review the version, changelog, migration notes, support policy, and packed
+   file list before merging the release pull request.
+4. For a prerelease series, use Changesets prerelease mode and the `rc` tag;
+   prerelease packages are published under npm's `next` distribution tag.
+
+## Validate and publish
+
+1. Dispatch `Release Candidate Validation` twice for the exact release commit.
+2. Require both independent runs to pass on Ubuntu and Windows, including the
+   minimum/latest peer checks, Chrome BiDi/classic capture, Edge smoke, all
+   three WDIO frameworks, package validation, coverage, and SBOM generation.
+3. Dispatch `Publish To npm` from `master` and provide both successful run IDs.
+   The workflow rejects duplicate runs, failed runs, other workflows, and runs
+   for a different commit.
+4. Approve the protected `npm` environment when prompted. The workflow
+   publishes the already-tested tarball with npm provenance, then creates the
+   matching GitHub release with the tarball and CycloneDX SBOM attached.
+
+The workflow uses `next` for versions containing a prerelease suffix and
+`latest` for stable versions. Do not promote `1.0.0` until the release-candidate
+validation has completed cleanly twice and the generated artifacts have been
+reviewed.
+
+## Local release gates
+
+```bash
+npm run release:check
+npm run changeset:status
+```
+
+`release:check` regenerates `coverage/lcov.info`, validates the compiled ESM
+exports through a temporary packed consumer, and writes `sbom.cdx.json`. Both
+generated paths are ignored by Git.

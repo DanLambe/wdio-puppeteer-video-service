@@ -7,10 +7,10 @@
 
 A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
-> **Pre-1.0 notice**
-> The `1.0.0` configuration API is now represented on the release branch, but
-> the package remains prerelease until the rest of the 1.0 feature and release
-> gates are complete.
+> **1.0 release candidate**
+> `1.0.0-rc.1` is the polished release-candidate surface. Install the `next`
+> tag while it completes two independent Ubuntu/Windows validation runs. The
+> same package becomes `latest` only after those release gates remain clean.
 
 Features:
 
@@ -19,12 +19,19 @@ Features:
 - Supports retry-only capture and independent artifact retention rules.
 - Provides cross-worker recording limits and crash-tolerant lifecycle cleanup.
 - Uses local, deterministic Mocha, Jasmine, and Cucumber fixtures in CI.
+- Produces a crash-tolerant Manifest v1 and an offline static HTML report.
 - Optionally attaches retained recordings to the active Allure test.
 
 ## Installation
 
 ```bash
 npm install wdio-puppeteer-video-service
+```
+
+To evaluate the release candidate before `1.0.0` is promoted:
+
+```bash
+npm install wdio-puppeteer-video-service@next
 ```
 
 Install `@wdio/allure-reporter` separately when using the optional Allure
@@ -122,8 +129,8 @@ path-specific `TypeError`.
 ## Prerequisites
 
 - Node.js 24+
-- WebdriverIO v9 using `runner: 'local'`
-- Puppeteer Core 25.3+
+- WebdriverIO `>=9.29.1 <10` using `runner: 'local'`
+- Puppeteer Core `>=25.3.0 <26`
 - A Chromium-based browser session (Chrome or Edge)
 - FFmpeg supplied by the environment
 
@@ -413,8 +420,19 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 - `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, and Edge smoke.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
+- `npm run test:coverage`: runs the deterministic unit/integration suite with 90% statements, lines, and functions plus 85% branch gates.
+- `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.
+- `npm run release:check`: combines lint, typecheck, coverage, package, and validated CycloneDX SBOM gates.
 
 Every generated artifact is decoded with FFmpeg and checked for container,
 codec, dimensions, duration, frame count, and corruption. CI fails when FFmpeg
 is unavailable. A local browser-only run may explicitly opt out with
 `WDIO_ALLOW_MISSING_FFMPEG=1`.
+
+## Release and support documentation
+
+- [0.8 to 1.0 migration](./MIGRATION.md)
+- [Support policy](./SUPPORT.md)
+- [Troubleshooting](./TROUBLESHOOTING.md)
+- [Maintainer release procedure](./RELEASING.md)
+- [Changelog](./CHANGELOG.md)

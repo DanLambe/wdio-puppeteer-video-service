@@ -1,28 +1,34 @@
 {
   "name": "wdio-puppeteer-video-service",
-  "version": "0.8.1",
+  "version": "1.0.0-rc.1",
   "description": "WebdriverIO Service to record videos using Puppeteer",
   "type": "module",
+  "sideEffects": false,
   "packageManager": "npm@12.0.1",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
   "files": [
     "build",
     "README.md",
+    "CHANGELOG.md",
+    "MIGRATION.md",
+    "RELEASING.md",
+    "SUPPORT.md",
+    "TROUBLESHOOTING.md",
     "LICENSE"
   ],
   "exports": {
     ".": {
-      "import": "./build/index.js",
-      "types": "./build/index.d.ts"
+      "types": "./build/index.d.ts",
+      "import": "./build/index.js"
     },
     "./manifest": {
-      "import": "./build/manifest.js",
-      "types": "./build/manifest.d.ts"
+      "types": "./build/manifest.d.ts",
+      "import": "./build/manifest.js"
     },
     "./reporter": {
-      "import": "./build/reporter.js",
-      "types": "./build/reporter.d.ts"
+      "types": "./build/reporter.d.ts",
+      "import": "./build/reporter.js"
     }
   },
   "engines": {
@@ -79,11 +85,15 @@
     "test:e2e:advanced:exclude-spec": "tsx tests/scripts/run-e2e-advanced-options.ts exclude-spec",
     "test:unit": "vitest run --dir tests/unit",
     "test:coverage": "vitest run --dir tests/unit --coverage",
-    "test:consumer": "corepack npm run clean && corepack npm run build && tsc -p tests/package-consumer/tsconfig.json",
+    "test:consumer": "corepack npm run clean && corepack npm run build && tsc -p tests/package-consumer/tsconfig.json && tsx scripts/check-packed-consumer.ts",
     "typecheck": "tsc -p tsconfig.spec.json",
-    "package:check": "corepack npm run clean && corepack npm run build && tsc -p tests/package-consumer/tsconfig.json && corepack npm pack --dry-run --ignore-scripts --allow-directory=all",
+    "package:check": "corepack npm run clean && corepack npm run build && tsc -p tests/package-consumer/tsconfig.json && publint --strict --pack=false && tsx scripts/check-packed-consumer.ts",
     "pr:check": "corepack npm run lint && corepack npm run typecheck && corepack npm run test && corepack npm run package:check",
-    "release:check": "corepack npm run lint && corepack npm run typecheck && corepack npm run test:coverage && corepack npm run package:check",
+    "release:check": "corepack npm run lint && corepack npm run typecheck && corepack npm run test:coverage && corepack npm run package:check && corepack npm run sbom",
+    "changeset": "changeset",
+    "changeset:status": "changeset status",
+    "version-packages": "changeset version",
+    "sbom": "tsx scripts/generate-sbom.ts sbom.cdx.json",
     "release:notes": "tsx scripts/preview-release-notes.ts",
     "audit": "corepack npm audit",
     "audit:signatures": "corepack npm audit signatures",
@@ -106,11 +116,11 @@
   },
   "license": "Apache-2.0",
   "peerDependencies": {
-    "@wdio/allure-reporter": "^9.29.1",
-    "@wdio/reporter": "^9.29.1",
-    "@wdio/types": "^9.0.0",
-    "puppeteer-core": "^25.3.0",
-    "webdriverio": "^9.0.0"
+    "@wdio/allure-reporter": ">=9.29.1 <10",
+    "@wdio/reporter": ">=9.29.1 <10",
+    "@wdio/types": ">=9.29.1 <10",
+    "puppeteer-core": ">=25.3.0 <26",
+    "webdriverio": ">=9.29.1 <10"
   },
   "peerDependenciesMeta": {
     "@wdio/allure-reporter": {
@@ -121,7 +131,9 @@
     }
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@biomejs/biome": "^2.5.4",
+    "@changesets/cli": "^2.31.1",
     "@cucumber/cucumber": "^13.1.0",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^24.13.3",
@@ -140,6 +152,7 @@
     "expect-webdriverio": "^5.7.0",
     "ffmpeg-static": "^5.3.0",
     "fs-extra": "^11.3.6",
+    "publint": "^0.3.21",
     "puppeteer-core": "^25.3.0",
     "rimraf": "^6.1.3",
     "semver": "^7.8.5",
