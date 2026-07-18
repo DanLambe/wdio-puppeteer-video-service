@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const expectVideos = !['0', 'false', 'no'].includes(
@@ -15,6 +16,7 @@ const expectedTestTitles = [
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: ['./jasmine/specs/**/*.spec.ts'],
   maxInstances: 1,
@@ -68,6 +70,7 @@ export const config: WebdriverIO.Config = {
       expectedTitles: expectedTestTitles,
       expectVideos,
       fileNameStyle: 'test',
+      expectedCodec: 'h264',
       runLabel: 'jasmine',
     })
   },

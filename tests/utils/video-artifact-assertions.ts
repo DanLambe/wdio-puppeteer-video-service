@@ -1,5 +1,6 @@
 import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
+import { probeMediaFile } from './media-probe.js'
 
 type VideoFileNameStyle = 'test' | 'testFull' | 'session' | 'sessionFull'
 
@@ -10,6 +11,9 @@ interface VideoArtifactAssertionOptions {
   expectZeroVideos?: boolean
   mergeSegmentsEnabled?: boolean
   fileNameStyle?: VideoFileNameStyle
+  expectedCodec?: string
+  expectedWidth?: number
+  expectedHeight?: number
   runLabel: string
 }
 
@@ -94,6 +98,58 @@ const warnSmallFiles = async (
   }
 }
 
+const assertMediaIntegrity = async (
+  mediaFiles: string[],
+  resultsDir: string,
+  expectedCodec: string | undefined,
+  expectedWidth: number | undefined,
+  expectedHeight: number | undefined,
+): Promise<void> => {
+  const ffmpegPath = process.env.FFMPEG_PATH?.trim()
+  if (!ffmpegPath) {
+    throw new Error(
+      'FFMPEG_PATH is required when video artifact assertions are enabled',
+    )
+  }
+
+  for (const file of mediaFiles) {
+    const filePath = path.join(resultsDir, file)
+    const probe = await probeMediaFile(ffmpegPath, filePath)
+    const expectedContainer = file.endsWith('.mp4') ? 'mp4' : 'webm'
+
+    if (probe.container !== expectedContainer) {
+      throw new Error(
+        `Expected ${file} to contain ${expectedContainer} media, but FFmpeg detected ${probe.container}`,
+      )
+    }
+    if (expectedCodec && probe.codec !== expectedCodec) {
+      throw new Error(
+        `Expected ${file} to use ${expectedCodec}, but FFmpeg detected ${probe.codec}`,
+      )
+    }
+    if (expectedWidth !== undefined && probe.width !== expectedWidth) {
+      throw new Error(
+        `Expected ${file} width ${expectedWidth.toString()}, but FFmpeg detected ${probe.width.toString()}`,
+      )
+    }
+    if (expectedHeight !== undefined && probe.height !== expectedHeight) {
+      throw new Error(
+        `Expected ${file} height ${expectedHeight.toString()}, but FFmpeg detected ${probe.height.toString()}`,
+      )
+    }
+    if (
+      probe.width <= 0 ||
+      probe.height <= 0 ||
+      probe.durationSeconds <= 0 ||
+      probe.frameCount <= 0
+    ) {
+      throw new Error(
+        `Expected ${file} to contain decodable video, but dimensions=${probe.width.toString()}x${probe.height.toString()}, duration=${probe.durationSeconds.toString()}s, and frames=${probe.frameCount.toString()}`,
+      )
+    }
+  }
+}
+
 export const assertVideoArtifacts = async ({
   resultsDir,
   expectedTitles,
@@ -101,6 +157,9 @@ export const assertVideoArtifacts = async ({
   expectZeroVideos = false,
   mergeSegmentsEnabled = false,
   fileNameStyle = 'test',
+  expectedCodec,
+  expectedWidth,
+  expectedHeight,
   runLabel,
 }: VideoArtifactAssertionOptions): Promise<void> => {
   const files = await readdir(resultsDir).catch(() => [])
@@ -132,6 +191,13 @@ export const assertVideoArtifacts = async ({
   }
 
   await warnSmallFiles(mediaFiles, resultsDir, runLabel)
+  await assertMediaIntegrity(
+    mediaFiles,
+    resultsDir,
+    expectedCodec,
+    expectedWidth,
+    expectedHeight,
+  )
 
   const missingTitles: string[] = []
   for (const title of expectedTitles) {

@@ -283,7 +283,9 @@ When `recordOnRetries` is enabled, retry recordings are retained even when the r
 
 ## E2E Mode Verification
 
-The repository includes dedicated scripts to verify both output modes and keep artifacts separated:
+The repository starts an ephemeral two-origin fixture server for every E2E run, so browser coverage never depends on a public website. The fixtures cover static and animated pages, same-origin and cross-origin frames, dialogs, viewport changes, multiple tabs, and targets that close themselves.
+
+Dedicated scripts verify output modes and keep artifacts separated:
 
 - `npm run test:e2e` runs multipart mode only and writes artifacts to `tests/results/multipart`
 - `npm run test:e2e:merge` runs merged mode only and writes artifacts to `tests/results/merge`
@@ -301,6 +303,10 @@ The repository includes dedicated scripts to verify both output modes and keep a
   - `postProcessMode: 'deferred'` with merged artifacts
   - `includeSpecPatterns` positive-match filtering
   - `excludeSpecPatterns` suppression filtering
+  - current Cucumber tag-filter metadata behavior
+  - pass/fail artifact retention with an expected failing test run
+  - cross-worker `maxGlobalRecordings` contention and lock cleanup
+  - failed FFmpeg transcoding with original-media preservation
 - `npm run test:e2e:advanced:retry` runs only retry-mode validation
 - `npm run test:e2e:advanced:spec-file-retry` runs only WDIO `specFileRetries` retry-mode validation
 - `npm run test:e2e:advanced:spec-level` runs only spec-level validation
@@ -310,7 +316,6 @@ The repository includes dedicated scripts to verify both output modes and keep a
 - `npm run test:e2e:advanced:deferred-merge` runs only deferred post-processing merge validation
 - `npm run test:e2e:advanced:include-spec` runs only include-spec filter validation
 - `npm run test:e2e:advanced:exclude-spec` runs only exclude-spec filter validation
-
-If FFmpeg is not detected during these local E2E scripts, browser assertions still run and artifact assertions are skipped with a warning.
+Every generated artifact is decoded with FFmpeg and checked for its container, codec, dimensions, duration, frame count, and corruption. CI fails when FFmpeg is unavailable. A local browser-only run may explicitly opt out with `WDIO_ALLOW_MISSING_FFMPEG=1`; media assertions are never silently skipped.
 
 `npm test` runs unit coverage plus multipart E2E, framework E2E, and the advanced option matrix.

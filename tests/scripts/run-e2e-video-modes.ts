@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { waitForChildProcess } from './child-process.js'
-import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
+import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
 type VideoMode = 'multipart' | 'merge'
 
@@ -25,7 +25,7 @@ if (modeOrder.length === 0) {
 
 const runWdio = async (
   mode: VideoMode,
-  ffmpegDetection: FfmpegDetectionResult,
+  environment: E2eEnvironment,
 ): Promise<void> => {
   const nodeCommand = process.execPath
   const wdioCliPath = path.resolve('node_modules/@wdio/cli/bin/wdio.js')
@@ -37,16 +37,11 @@ const runWdio = async (
   const child = spawn(nodeCommand, [wdioCliPath, 'run', 'tests/wdio.conf.ts'], {
     stdio: 'inherit',
     windowsHide: true,
-    env: {
-      ...process.env,
-      ...(ffmpegDetection.resolvedPath
-        ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
-        : {}),
+    env: environment.childEnvironment({
       WDIO_MERGE_SEGMENTS: mergeEnabled,
       WDIO_VIDEO_MODE: mode,
       WDIO_RESULTS_DIR: resultsDir,
-      WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
-    },
+    }),
   })
 
   await waitForChildProcess(child, (code) => {
@@ -56,16 +51,14 @@ const runWdio = async (
   console.log(`[e2e:modes] Completed ${mode} run.`)
 }
 
-const ffmpegDetection = await detectFfmpeg()
-if (!ffmpegDetection.available) {
-  console.warn(
-    `[e2e:modes] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
-  )
-}
-
-for (const mode of modeOrder) {
-  // Sequential runs preserve distinct artifact folders for each mode.
-  await runWdio(mode, ffmpegDetection)
+const environment = await startE2eEnvironment()
+try {
+  for (const mode of modeOrder) {
+    // Sequential runs preserve distinct artifact folders for each mode.
+    await runWdio(mode, environment)
+  }
+} finally {
+  await environment.close()
 }
 
 console.log('[e2e:modes] All requested runs completed successfully.')

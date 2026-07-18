@@ -9,8 +9,8 @@ const retryMarkerPath = path.resolve(
 
 describe('Advanced E2E - Spec File Retry Recording', () => {
   it('should record only when spec file retry worker executes', async () => {
-    await browser.url('https://the-internet.herokuapp.com/')
-    await expect(browser).toHaveTitle('The Internet')
+    await browser.url('/static')
+    await expect(browser).toHaveTitle('Static Video Fixture')
     await browser.pause(1200)
 
     const markerExists = await fs

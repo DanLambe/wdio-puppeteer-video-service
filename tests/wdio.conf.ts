@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const mergeSegmentsEnabled = ['1', 'true', 'yes'].includes(
@@ -25,8 +26,12 @@ const maxInstances =
 const expectedTestTitles = [
   'should record a simple navigation',
   'should handle iframe switching',
+  'should handle a cross-origin iframe',
   'should handle multiple tabs and closing tabs',
+  'should tolerate a browser target closing itself',
+  'should handle alert, confirm, and prompt dialogs',
   'should handle viewport resizing',
+  'should capture a deterministic animation',
   'should record a longer multi-step journey',
 ]
 
@@ -36,6 +41,7 @@ export const config: WebdriverIO.Config = {
   // Runner Configuration
   // ====================
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   //
   // ==================
@@ -106,6 +112,7 @@ export const config: WebdriverIO.Config = {
       expectVideos,
       mergeSegmentsEnabled,
       fileNameStyle: 'test',
+      expectedCodec: 'h264',
       runLabel: runMode,
     })
   },

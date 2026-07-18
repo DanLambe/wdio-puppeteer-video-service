@@ -6,8 +6,8 @@ describe('Advanced E2E - Retry Recording', function () {
   it('should record only when retry attempt executes', async () => {
     retryAttempt += 1
 
-    await browser.url('https://the-internet.herokuapp.com/')
-    await expect(browser).toHaveTitle('The Internet')
+    await browser.url('/static')
+    await expect(browser).toHaveTitle('Static Video Fixture')
     await browser.pause(1200)
 
     if (retryAttempt === 1) {

@@ -6,6 +6,7 @@ export const waitForChildProcess = async (
   child: ChildProcess,
   describeFailure: (code: number | null) => string,
   timeoutMs = DEFAULT_CHILD_PROCESS_TIMEOUT_MS,
+  expectedExitCodes: readonly (number | null)[] = [0],
 ): Promise<void> => {
   await new Promise<void>((resolve, reject) => {
     let settled = false
@@ -34,7 +35,7 @@ export const waitForChildProcess = async (
     })
 
     child.once('close', (code) => {
-      if (code === 0) {
+      if (expectedExitCodes.includes(code)) {
         settle()
         return
       }

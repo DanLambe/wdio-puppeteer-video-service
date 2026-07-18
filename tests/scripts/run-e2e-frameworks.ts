@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { waitForChildProcess } from './child-process.js'
-import { detectFfmpeg, type FfmpegDetectionResult } from './ffmpeg-detection.js'
+import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
 type FrameworkMode = 'jasmine' | 'cucumber'
 
@@ -45,7 +45,7 @@ const frameworkConfigMap: Record<
 
 const runWdioFramework = async (
   framework: FrameworkMode,
-  ffmpegDetection: FfmpegDetectionResult,
+  environment: E2eEnvironment,
 ): Promise<void> => {
   const target = frameworkConfigMap[framework]
   const nodeCommand = process.execPath
@@ -60,14 +60,9 @@ const runWdioFramework = async (
   const child = spawn(nodeCommand, [wdioCliPath, 'run', configPath], {
     stdio: 'inherit',
     windowsHide: true,
-    env: {
-      ...process.env,
-      ...(ffmpegDetection.resolvedPath
-        ? { FFMPEG_PATH: ffmpegDetection.resolvedPath }
-        : {}),
+    env: environment.childEnvironment({
       WDIO_RESULTS_DIR: resultsDir,
-      WDIO_EXPECT_VIDEOS: ffmpegDetection.available ? '1' : '0',
-    },
+    }),
   })
 
   await waitForChildProcess(child, (code) => {
@@ -77,16 +72,14 @@ const runWdioFramework = async (
   console.log(`[e2e:frameworks] Completed ${framework} run.`)
 }
 
-const ffmpegDetection = await detectFfmpeg()
-if (!ffmpegDetection.available) {
-  console.warn(
-    `[e2e:frameworks] FFmpeg was not detected (${ffmpegDetection.checkedCandidates.join(', ') || 'no candidates'}). WDIO will run, but video artifact assertions are skipped.`,
-  )
-}
-
-for (const framework of frameworkOrder) {
-  // Run sequentially so results and logs stay isolated per framework.
-  await runWdioFramework(framework, ffmpegDetection)
+const environment = await startE2eEnvironment()
+try {
+  for (const framework of frameworkOrder) {
+    // Run sequentially so results and logs stay isolated per framework.
+    await runWdioFramework(framework, environment)
+  }
+} finally {
+  await environment.close()
 }
 
 console.log('[e2e:frameworks] All requested framework runs completed.')

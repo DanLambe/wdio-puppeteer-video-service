@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoService from '../src/index.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const expectVideos = !['0', 'false', 'no'].includes(
@@ -12,9 +13,24 @@ const resultsDir = path.resolve(
 const expectedScenarioTitles = [
   'cucumber style should keep scenario name in video filename',
 ]
+type CucumberFilterMode = 'include-tag' | 'exclude-tag'
+const filterMode = process.env.WDIO_CUCUMBER_FILTER_MODE as
+  | CucumberFilterMode
+  | undefined
+// In 0.8, WDIO's live Cucumber hook payload does not expose feature tags in a
+// shape the service recognizes. Preserve that behavior until the filter API
+// and its framework adapters are intentionally revised in a later chunk.
+const expectZeroVideos = filterMode === 'include-tag'
+const serviceFilterOptions =
+  filterMode === 'include-tag'
+    ? { includeTagPatterns: ['@recordable'] }
+    : filterMode === 'exclude-tag'
+      ? { excludeTagPatterns: ['@recordable'] }
+      : {}
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: [path.resolve('tests/cucumber/features/**/*.feature')],
   maxInstances: 1,
@@ -51,6 +67,7 @@ export const config: WebdriverIO.Config = {
         mergeSegments: {
           enabled: false,
         },
+        ...serviceFilterOptions,
       },
     ],
   ],
@@ -66,10 +83,12 @@ export const config: WebdriverIO.Config = {
   onComplete: async () => {
     await assertVideoArtifacts({
       resultsDir,
-      expectedTitles: expectedScenarioTitles,
-      expectVideos,
+      expectedTitles: expectZeroVideos ? [] : expectedScenarioTitles,
+      expectVideos: expectVideos && !expectZeroVideos,
+      expectZeroVideos,
       fileNameStyle: 'test',
-      runLabel: 'cucumber',
+      expectedCodec: 'h264',
+      runLabel: filterMode ? `advanced-${filterMode}` : 'cucumber',
     })
   },
 }
