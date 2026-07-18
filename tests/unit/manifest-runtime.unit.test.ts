@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   ManifestEntryV1,
   ManifestRunV1,
@@ -74,6 +74,7 @@ const firstString = (values: string[]): string => {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(
     tempDirs
       .splice(0)
@@ -82,6 +83,66 @@ afterEach(async () => {
 })
 
 describe('manifest runtime', () => {
+  it('warns and recovers when a journal append fails', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const onJournalError = vi.fn()
+    const recorder = new ManifestWorkerRecorder({
+      context,
+      cid: 'policy-warn',
+      framework: 'mocha',
+      failurePolicy: 'warn',
+      onJournalError,
+    })
+    const appendFile = vi
+      .spyOn(fs, 'appendFile')
+      .mockRejectedValueOnce(new Error('journal unavailable'))
+
+    await expect(
+      recorder.beginEntity({
+        test: { title: 'warning policy', file: 'specs/warning.ts' },
+        scope: 'test',
+        specPaths: [],
+      }),
+    ).resolves.toEqual(expect.any(String))
+    expect(onJournalError).toHaveBeenCalledWith(
+      'write the worker manifest journal',
+      expect.objectContaining({ message: 'journal unavailable' }),
+    )
+
+    appendFile.mockRestore()
+    await recorder.completeCurrent({
+      decision: 'skipped',
+      result: 'passed',
+    })
+    await expect(recorder.flush()).resolves.toBeUndefined()
+  })
+
+  it('surfaces a journal append failure under the error policy', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const onJournalError = vi.fn()
+    const recorder = new ManifestWorkerRecorder({
+      context,
+      cid: 'policy-error',
+      framework: 'mocha',
+      failurePolicy: 'error',
+      onJournalError,
+    })
+    vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(
+      new Error('journal unavailable'),
+    )
+
+    await expect(
+      recorder.beginEntity({
+        test: { title: 'error policy', file: 'specs/error.ts' },
+        scope: 'test',
+        specPaths: [],
+      }),
+    ).rejects.toThrow('journal unavailable')
+    expect(onJournalError).toHaveBeenCalledOnce()
+  })
+
   it('passes launcher context through worker config without global state', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)

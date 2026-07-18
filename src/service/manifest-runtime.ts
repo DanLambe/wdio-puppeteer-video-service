@@ -189,15 +189,21 @@ export class ManifestWorkerRecorder {
   private _current: ManifestEntryDraft | undefined
   private _lastCompletedEntryId: string | undefined
   private _writeTask: Promise<void> = Promise.resolve()
+  private readonly _failurePolicy: 'error' | 'warn'
+  private readonly _onJournalError: (operation: string, error: unknown) => void
 
   constructor(options: {
     context: ManifestRunContext
     cid: string
     framework: ManifestFramework
+    failurePolicy?: 'error' | 'warn'
+    onJournalError?: (operation: string, error: unknown) => void
   }) {
     this._context = options.context
     this._cid = options.cid
     this._framework = options.framework
+    this._failurePolicy = options.failurePolicy ?? 'warn'
+    this._onJournalError = options.onJournalError ?? (() => undefined)
     this._journalPath = path.join(
       getJournalDir(options.context),
       `${sanitizeJournalToken(options.cid)}-${process.pid.toString()}.jsonl`,
@@ -512,8 +518,19 @@ export class ManifestWorkerRecorder {
         'utf8',
       )
     }
-    this._writeTask = this._writeTask.then(write, write)
-    await this._writeTask
+    const writeTask = this._writeTask.then(write, write)
+    this._writeTask = writeTask
+    try {
+      await writeTask
+    } catch (error) {
+      if (this._writeTask === writeTask) {
+        this._writeTask = Promise.resolve()
+      }
+      this._onJournalError('write the worker manifest journal', error)
+      if (this._failurePolicy === 'error') {
+        throw error
+      }
+    }
   }
 }
 

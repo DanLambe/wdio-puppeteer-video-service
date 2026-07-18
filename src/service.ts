@@ -173,15 +173,10 @@ export default class WdioPuppeteerVideoService
   }
 
   async onPrepare(): Promise<void> {
-    this._manifestRunContext = await createManifestRunContext(
-      this._options.outputDir,
-    ).catch((error) => {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to initialize manifest journaling: ${normalization.describeError(error)}.`,
-      )
-      return undefined
-    })
+    this._manifestRunContext = await this._runManifestTask(
+      'initialize manifest journaling',
+      () => createManifestRunContext(this._options.outputDir),
+    )
 
     if (!this._options.recordOnRetries) {
       return
@@ -307,19 +302,27 @@ export default class WdioPuppeteerVideoService
       )
     }
 
-    if (this._manifestRunContext) {
-      const manifestRunContext = this._manifestRunContext
-      const manifest = await aggregateManifestRun(manifestRunContext, exitCode)
-      await generateVideoReportForRun({
-        outputDir: manifestRunContext.outputDir,
-        runId: manifestRunContext.runId,
-        manifest,
-      }).catch((error) => {
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Failed to generate the static video report: ${normalization.describeError(error)}.`,
-        )
-      })
+    if (!this._manifestRunContext) {
+      return
+    }
+
+    const manifestRunContext = this._manifestRunContext
+    try {
+      const manifest = await this._runManifestTask(
+        'aggregate manifest journals',
+        () => aggregateManifestRun(manifestRunContext, exitCode),
+      )
+      if (!manifest) {
+        return
+      }
+      await this._runManifestTask('generate the static video report', () =>
+        generateVideoReportForRun({
+          outputDir: manifestRunContext.outputDir,
+          runId: manifestRunContext.runId,
+          manifest,
+        }),
+      )
+    } finally {
       this._manifestRunContext = undefined
     }
   }
@@ -338,6 +341,13 @@ export default class WdioPuppeteerVideoService
           framework: normalizeManifestFramework(
             (config as { framework?: unknown } | undefined)?.framework,
           ),
+          failurePolicy: this._options.failurePolicy,
+          onJournalError: (operation, error) => {
+            this._log(
+              'warn',
+              `[WdioPuppeteerVideoService] Failed to ${operation}: ${normalization.describeError(error)}.`,
+            )
+          },
         })
       : undefined
     this._specFileRetryAttempt = 0
@@ -509,10 +519,10 @@ export default class WdioPuppeteerVideoService
     _context: unknown,
     result: Frameworks.TestResult,
   ): Promise<void> {
-    await this._manifestRecorder?.recordResult(
+    await this._recordManifestResultAndFinalize(
       test.pending ? 'skipped' : result.passed ? 'passed' : 'failed',
+      result.passed,
     )
-    await this._afterTestOrScenario(result.passed)
   }
 
   async beforeScenario(
@@ -604,10 +614,27 @@ export default class WdioPuppeteerVideoService
     _world: Frameworks.World,
     result: Frameworks.PickleResult,
   ): Promise<void> {
-    await this._manifestRecorder?.recordResult(
+    await this._recordManifestResultAndFinalize(
       result.passed ? 'passed' : 'failed',
+      result.passed,
     )
-    await this._afterTestOrScenario(result.passed)
+  }
+
+  private async _recordManifestResultAndFinalize(
+    result: 'failed' | 'passed' | 'skipped',
+    passed: boolean,
+  ): Promise<void> {
+    let manifestFailure: { error: unknown } | undefined
+    try {
+      await this._manifestRecorder?.recordResult(result)
+    } catch (error) {
+      manifestFailure = { error }
+    }
+
+    await this._afterTestOrScenario(passed)
+    if (manifestFailure) {
+      throw manifestFailure.error
+    }
   }
 
   private async _afterTestOrScenario(passed: boolean): Promise<void> {
@@ -626,12 +653,25 @@ export default class WdioPuppeteerVideoService
   }
 
   async afterSession(): Promise<void> {
-    await this._teardownRecording('afterSession')
-    await this._manifestRecorder?.flush()
-    this._browser = undefined
-    this._isChromium = false
-    this._puppeteerBrowser = undefined
-    this._sessionProtocol = 'unsupported'
+    let failure: { error: unknown } | undefined
+    try {
+      await this._teardownRecording('afterSession')
+    } catch (error) {
+      failure = { error }
+    }
+    try {
+      await this._manifestRecorder?.flush()
+    } catch (error) {
+      failure ??= { error }
+    } finally {
+      this._browser = undefined
+      this._isChromium = false
+      this._puppeteerBrowser = undefined
+      this._sessionProtocol = 'unsupported'
+    }
+    if (failure) {
+      throw failure.error
+    }
   }
 
   async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
@@ -1228,14 +1268,17 @@ export default class WdioPuppeteerVideoService
 
     const started = await this._startRecording()
     if (!started) {
-      await this._manifestRecorder?.completeCurrent({
-        decision: 'failed',
-        result: 'unknown',
-        reason: this._recordingDisabledReason ?? 'recording-start-failed',
-        processingOutcome: 'failed',
-        processingOperation: 'capture',
-      })
-      await this._resetTestState()
+      try {
+        await this._manifestRecorder?.completeCurrent({
+          decision: 'failed',
+          result: 'unknown',
+          reason: this._recordingDisabledReason ?? 'recording-start-failed',
+          processingOutcome: 'failed',
+          processingOperation: 'capture',
+        })
+      } finally {
+        await this._resetTestState()
+      }
     }
   }
 
@@ -1463,13 +1506,15 @@ export default class WdioPuppeteerVideoService
       )
       allureError = allureResult?.error
     } catch (error) {
-      await this._manifestRecorder?.completeCurrent({
-        decision: 'failed',
-        result: passed ? 'passed' : 'failed',
-        paths: [...this._recordedSegments],
-        reason: normalization.describeError(error),
-        processingOutcome: 'failed',
-      })
+      await this._manifestRecorder
+        ?.completeCurrent({
+          decision: 'failed',
+          result: passed ? 'passed' : 'failed',
+          paths: [...this._recordedSegments],
+          reason: normalization.describeError(error),
+          processingOutcome: 'failed',
+        })
+        .catch(() => undefined)
       throw error
     } finally {
       await this._resetTestState()
@@ -2390,6 +2435,24 @@ export default class WdioPuppeteerVideoService
         `[WdioPuppeteerVideoService] Failed to delete retry state for cid=${cid}: ${normalization.describeError(error)}`,
       )
     })
+  }
+
+  private async _runManifestTask<T>(
+    operation: string,
+    task: () => Promise<T>,
+  ): Promise<T | undefined> {
+    try {
+      return await task()
+    } catch (error) {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to ${operation}: ${normalization.describeError(error)}.`,
+      )
+      if (this._options.failurePolicy === 'error') {
+        throw error
+      }
+      return undefined
+    }
   }
 
   private _log(level: LogLevel, message: string, details?: unknown): void {

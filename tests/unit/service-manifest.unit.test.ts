@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isVideoManifest, type VideoManifestV1 } from '../../src/manifest.js'
 import {
   aggregateManifestRun,
@@ -204,5 +204,73 @@ describe('service manifest hooks', () => {
       capture: { decision: 'skipped', reason: 'filtered' },
     })
     expect(manifest.runs[0]?.entries[0]?.test).toBeUndefined()
+  })
+
+  it('defers manifest error policy failures until recording finalization finishes', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const config: Record<string, unknown> = { framework: 'mocha' }
+    assignManifestRunContext(config, context)
+    const service = new WdioPuppeteerVideoService({
+      outputDir,
+      failurePolicy: 'error',
+    })
+    await service.beforeSession(config, { browserName: 'chrome' }, [], '3-1')
+    const internals = service as unknown as {
+      _afterTestOrScenario: (passed: boolean) => Promise<void>
+      _manifestRecorder: {
+        recordResult: (result: string) => Promise<void>
+      }
+    }
+    const finalize = vi.fn().mockResolvedValue(undefined)
+    internals._afterTestOrScenario = finalize
+    vi.spyOn(internals._manifestRecorder, 'recordResult').mockRejectedValue(
+      new Error('journal unavailable'),
+    )
+
+    await expect(
+      service.afterTest(createTest('manifest error', 'error.ts'), {}, {
+        passed: false,
+      } as Frameworks.TestResult),
+    ).rejects.toThrow('journal unavailable')
+    expect(finalize).toHaveBeenCalledWith(false)
+  })
+
+  it('clears session state after an error-policy journal flush failure', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const config: Record<string, unknown> = { framework: 'mocha' }
+    assignManifestRunContext(config, context)
+    const service = new WdioPuppeteerVideoService({
+      outputDir,
+      failurePolicy: 'error',
+    })
+    await service.beforeSession(config, { browserName: 'chrome' }, [], '3-2')
+    const internals = service as unknown as {
+      _browser: unknown
+      _isChromium: boolean
+      _manifestRecorder: {
+        flush: () => Promise<void>
+      }
+      _puppeteerBrowser: unknown
+      _sessionProtocol: string
+      _teardownRecording: (source: string) => Promise<void>
+    }
+    internals._browser = createBrowser('chrome')
+    internals._isChromium = true
+    internals._puppeteerBrowser = {}
+    internals._sessionProtocol = 'classic+cdp'
+    internals._teardownRecording = vi.fn().mockResolvedValue(undefined)
+    vi.spyOn(internals._manifestRecorder, 'flush').mockRejectedValue(
+      new Error('flush unavailable'),
+    )
+
+    await expect(service.afterSession()).rejects.toThrow('flush unavailable')
+    expect(internals).toMatchObject({
+      _browser: undefined,
+      _isChromium: false,
+      _puppeteerBrowser: undefined,
+      _sessionProtocol: 'unsupported',
+    })
   })
 })
