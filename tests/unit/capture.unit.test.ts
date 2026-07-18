@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { systemClock } from '../../src/service/boundaries.js'
 import {
   primeScreencastFrames,
+  resolveCaptureDimensions,
   startScreencast,
 } from '../../src/service/capture.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
@@ -141,6 +142,62 @@ describe('Puppeteer 25 capture controls', () => {
     expect(setViewport).not.toHaveBeenCalled()
   })
 
+  it('resolves scaled crop dimensions for manifest metadata', async () => {
+    const capture = resolveServiceConfiguration({
+      capture: {
+        viewport: { width: 1280, height: 720 },
+        crop: { x: 10, y: 20, width: 800, height: 400 },
+        scale: 0.5,
+      },
+    }).options
+
+    await expect(
+      resolveCaptureDimensions(
+        { viewport: () => null } as unknown as Page,
+        capture,
+      ),
+    ).resolves.toEqual({ width: 400, height: 200 })
+  })
+
+  it('reads native viewport dimensions and handles unavailable dimensions', async () => {
+    const capture = resolveServiceConfiguration({}).options
+    await expect(
+      resolveCaptureDimensions(
+        {
+          viewport: () => null,
+          evaluate: async () => ({ width: 1024, height: 640 }),
+        } as unknown as Page,
+        capture,
+      ),
+    ).resolves.toEqual({ width: 1024, height: 640 })
+    await expect(
+      resolveCaptureDimensions(
+        {
+          viewport: () => null,
+          evaluate: async () => ({ width: 0, height: 0 }),
+        } as unknown as Page,
+        capture,
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  it('evaluates native browser dimensions through the page callback', async () => {
+    const capture = resolveServiceConfiguration({}).options
+    const page = {
+      viewport: () => null,
+      evaluate: async (callback: () => { width: number; height: number }) => {
+        Object.assign(globalThis, { innerWidth: 900, innerHeight: 500 })
+        return callback()
+      },
+    } as unknown as Page
+    await expect(resolveCaptureDimensions(page, capture)).resolves.toEqual({
+      width: 900,
+      height: 500,
+    })
+    Reflect.deleteProperty(globalThis, 'innerWidth')
+    Reflect.deleteProperty(globalThis, 'innerHeight')
+  })
+
   it('primes a static native viewport and returns to native viewport mode', async () => {
     vi.useFakeTimers()
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
@@ -177,6 +234,22 @@ describe('Puppeteer 25 capture controls', () => {
 
     expect(setViewport).not.toHaveBeenCalled()
     expect(delay).not.toHaveBeenCalled()
+  })
+
+  it('contains best-effort failures while priming frames', async () => {
+    const setViewport = vi.fn(async () => {
+      throw new Error('target closed')
+    })
+    const delay = vi.fn(async () => {})
+    await primeScreencastFrames(
+      {
+        viewport: () => ({ width: 800, height: 600 }),
+        setViewport,
+      } as unknown as Page,
+      { ...systemClock, delay },
+    )
+    expect(setViewport).toHaveBeenCalledTimes(2)
+    expect(delay).toHaveBeenCalledWith(50)
   })
 
   it('uses a unique non-enumerable page marker and removes it after lookup', async () => {

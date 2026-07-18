@@ -27,6 +27,11 @@ export interface StartScreencastOptions {
   onViewportRestoreError?: (error: unknown) => void
 }
 
+export interface CaptureDimensions {
+  width: number
+  height: number
+}
+
 export const startScreencast = async (
   page: Page,
   options: StartScreencastOptions,
@@ -62,6 +67,26 @@ export const createScreencastOptions = (
   }
 }
 
+export const resolveCaptureDimensions = async (
+  page: Page,
+  capture: ResolvedCaptureOptions,
+): Promise<CaptureDimensions | undefined> => {
+  const currentViewport =
+    typeof page.viewport === 'function' ? page.viewport() : null
+  const viewport =
+    capture.captureViewport === 'current'
+      ? (currentViewport ?? (await readCurrentViewport(page)))
+      : capture.captureViewport
+  const source = capture.captureCrop ?? viewport
+  if (!source) {
+    return undefined
+  }
+  return {
+    width: Math.max(1, Math.round(source.width * capture.captureScale)),
+    height: Math.max(1, Math.round(source.height * capture.captureScale)),
+  }
+}
+
 export const primeScreencastFrames = async (
   page: Page,
   clock: ClockBoundary = systemClock,
@@ -89,18 +114,18 @@ export const primeScreencastFrames = async (
 const readCurrentViewport = async (
   page: Page,
 ): Promise<Pick<Viewport, 'width' | 'height'> | undefined> => {
-  return page
-    .evaluate(() => ({
+  try {
+    const viewport = await page.evaluate(() => ({
       height: (globalThis as typeof globalThis & { innerHeight: number })
         .innerHeight,
       width: (globalThis as typeof globalThis & { innerWidth: number })
         .innerWidth,
     }))
-    .then((viewport) => {
-      if (viewport.width <= 0 || viewport.height <= 0) {
-        return undefined
-      }
-      return viewport
-    })
-    .catch(() => undefined)
+    if (viewport.width <= 0 || viewport.height <= 0) {
+      return undefined
+    }
+    return viewport
+  } catch {
+    return undefined
+  }
 }

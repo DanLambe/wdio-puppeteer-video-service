@@ -4,11 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getFfmpegCandidates,
   probeDirectMp4Support,
+  readFfmpegVersion,
   resolveAvailableFfmpegPath,
 } from '../../src/service/ffmpeg.js'
 
 class FakeProbeProcess extends EventEmitter {
   stderr: PassThrough | null = new PassThrough()
+  stdout: PassThrough | null = new PassThrough()
   kill = vi.fn(() => true)
 }
 
@@ -53,6 +55,43 @@ describe('ffmpeg helpers', () => {
     )
 
     expect(resolvedPath).toBeUndefined()
+  })
+
+  it('uses the real executable probe boundary when no predicate is supplied', async () => {
+    await expect(
+      resolveAvailableFfmpegPath([process.execPath]),
+    ).resolves.toBeUndefined()
+  })
+
+  it('reads the FFmpeg version from its first output line', async () => {
+    const probeProcess = new FakeProbeProcess()
+    const versionTask = readFfmpegVersion('ffmpeg', () => probeProcess)
+    probeProcess.stdout?.write('ffmpeg version 7.1.1 Copyright\nconfiguration')
+    probeProcess.emit('close', 0)
+    await expect(versionTask).resolves.toBe('7.1.1')
+  })
+
+  it('returns no FFmpeg version for failures, errors, and timeouts', async () => {
+    const failedProcess = new FakeProbeProcess()
+    const failedTask = readFfmpegVersion('ffmpeg', () => failedProcess)
+    failedProcess.emit('close', 1)
+    await expect(failedTask).resolves.toBeUndefined()
+
+    const erroredProcess = new FakeProbeProcess()
+    const erroredTask = readFfmpegVersion('ffmpeg', () => erroredProcess)
+    erroredProcess.emit('error', new Error('spawn failed'))
+    await expect(erroredTask).resolves.toBeUndefined()
+
+    vi.useFakeTimers()
+    const timedOutProcess = new FakeProbeProcess()
+    const timedOutTask = readFfmpegVersion('ffmpeg', () => timedOutProcess)
+    await vi.runAllTimersAsync()
+    await expect(timedOutTask).resolves.toBeUndefined()
+    expect(timedOutProcess.kill).toHaveBeenCalled()
+  })
+
+  it('uses the production spawn boundary when no version probe is injected', async () => {
+    await expect(readFfmpegVersion(process.execPath)).resolves.toBeUndefined()
   })
 
   it('reports direct MP4 support when the probe exits cleanly', async () => {

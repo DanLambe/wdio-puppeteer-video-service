@@ -8,6 +8,7 @@ import {
 const require = createRequire(import.meta.url)
 
 interface ProbeProcessLike {
+  stdout?: NodeJS.ReadableStream | null
   stderr?: NodeJS.ReadableStream | null
   on(event: 'close', listener: (code: number | null) => void): this
   on(event: 'error', listener: (error: Error) => void): this
@@ -102,6 +103,50 @@ export const resolveAvailableFfmpegPath = async (
   }
 
   return undefined
+}
+
+export const readFfmpegVersion = async (
+  ffmpegPath: string,
+  spawnProcess: SpawnProbeProcess = (command, args) =>
+    spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }),
+): Promise<string | undefined> => {
+  return await new Promise<string | undefined>((resolve) => {
+    const proc = spawnProcess(ffmpegPath, ['-version'])
+    let stdout = ''
+    let settled = false
+    const settle = (version: string | undefined): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      resolve(version)
+    }
+    const timer = setTimeout(() => {
+      proc.kill()
+      settle(undefined)
+    }, FFMPEG_CHECK_TIMEOUT_MS)
+
+    proc.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+    proc.on('error', () => {
+      clearTimeout(timer)
+      settle(undefined)
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        settle(undefined)
+        return
+      }
+      const firstLine = stdout.split(/\r?\n/u)[0]?.trim()
+      const match = firstLine?.match(/^ffmpeg version\s+(\S+)/iu)
+      settle(match?.[1])
+    })
+  })
 }
 
 const spawnDirectMp4ProbeProcess: SpawnProbeProcess = (

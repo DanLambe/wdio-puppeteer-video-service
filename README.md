@@ -272,6 +272,31 @@ Videos are written beneath `outputDir`. Test-oriented naming uses
 The service applies the configured basename limit and a Windows path-aware
 budget. Keep `outputDir` reasonably short on Windows.
 
+## Manifest v1
+
+Each launcher creates a privacy-scoped run ID. Workers append crash-tolerant
+JSONL journals and `onComplete` atomically aggregates them into
+`outputDir/manifest.json`. The manifest includes every observed capture
+decision, retry and result, normalized spec and media paths, hashed session
+identity, browser/protocol details, timings, dimensions, tool versions, and
+post-processing outcomes. Concurrent launchers contribute separate run records
+without mixing worker journals.
+
+The dependency-free types and validator are available from the manifest export:
+
+```typescript
+import {
+  MANIFEST_SCHEMA_VERSION,
+  isVideoManifest,
+  validateVideoManifest,
+  type VideoManifestV1,
+} from 'wdio-puppeteer-video-service/manifest'
+```
+
+Manifest v1 validators intentionally accept unknown fields: additive optional
+fields are minor-compatible. Removing a field, changing required semantics, or
+changing an existing enum meaning requires a package major release.
+
 ## FFmpeg Error Handling
 
 If FFmpeg is missing or not executable, the service warns once and disables

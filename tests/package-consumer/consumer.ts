@@ -3,6 +3,11 @@ import WdioPuppeteerVideoService, {
   type RecordingOptions,
   type WdioPuppeteerVideoServiceOptions,
 } from 'wdio-puppeteer-video-service'
+import {
+  isVideoManifest,
+  MANIFEST_SCHEMA_VERSION,
+  type VideoManifestV1,
+} from 'wdio-puppeteer-video-service/manifest'
 
 const recording = {
   scope: 'test',
@@ -32,3 +37,12 @@ const options = {
 } satisfies WdioPuppeteerVideoServiceOptions
 
 export default new WdioPuppeteerVideoService(options)
+
+export const acceptsManifest = (
+  value: unknown,
+): VideoManifestV1 | undefined => {
+  return isVideoManifest(value) &&
+    value.schemaVersion === MANIFEST_SCHEMA_VERSION
+    ? value
+    : undefined
+}

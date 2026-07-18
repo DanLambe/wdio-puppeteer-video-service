@@ -35,6 +35,16 @@ import * as ffmpeg from './service/ffmpeg.js'
 import * as ffmpegRunner from './service/ffmpeg-runner.js'
 import * as filtering from './service/filtering.js'
 import * as logging from './service/logging.js'
+import {
+  aggregateManifestRun,
+  assignManifestRunContext,
+  createManifestRunContext,
+  type ManifestCaptureDimensions,
+  type ManifestRunContext,
+  ManifestWorkerRecorder,
+  normalizeManifestFramework,
+  readManifestRunContext,
+} from './service/manifest-runtime.js'
 import * as normalization from './service/normalization.js'
 import { resolveServiceConfiguration } from './service/options.js'
 import * as pageLookup from './service/page-lookup.js'
@@ -126,6 +136,9 @@ export default class WdioPuppeteerVideoService
     new ffmpegRunner.FfmpegProcessRegistry()
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
+  private _manifestRunContext: ManifestRunContext | undefined
+  private _manifestRecorder: ManifestWorkerRecorder | undefined
+  private _manifestCaptureDimensions: ManifestCaptureDimensions | undefined
 
   constructor(options: WdioPuppeteerVideoServiceOptions = {}) {
     const resolvedConfiguration = resolveServiceConfiguration(options)
@@ -148,6 +161,16 @@ export default class WdioPuppeteerVideoService
   }
 
   async onPrepare(): Promise<void> {
+    this._manifestRunContext = await createManifestRunContext(
+      this._options.outputDir,
+    ).catch((error) => {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to initialize manifest journaling: ${normalization.describeError(error)}.`,
+      )
+      return undefined
+    })
+
     if (!this._options.recordOnRetries) {
       return
     }
@@ -191,7 +214,12 @@ export default class WdioPuppeteerVideoService
     cid: string,
     capabilities: WebdriverIO.Capabilities,
     specs: string[],
+    args?: object,
   ): Promise<void> {
+    if (this._manifestRunContext && args) {
+      assignManifestRunContext(args, this._manifestRunContext)
+    }
+
     if (!this._options.recordOnRetries) {
       return
     }
@@ -238,38 +266,51 @@ export default class WdioPuppeteerVideoService
     )
   }
 
-  async onComplete(): Promise<void> {
-    if (!this._options.recordOnRetries) {
-      return
+  async onComplete(exitCode = 0): Promise<void> {
+    if (this._options.recordOnRetries) {
+      this._launcherSpecRetryAttemptCount.clear()
+      this._specFileRetryAttempt = 0
+
+      const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
+        this._options.outputDir,
+      )
+      await fs
+        .rm(retryStateDir, { recursive: true, force: true })
+        .catch((error) => {
+          this._log(
+            'trace',
+            `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${normalization.describeError(error)}`,
+          )
+        })
+      this._retryStatePersistenceUnavailable = false
+      this._log(
+        'debug',
+        `[WdioPuppeteerVideoService] Cleared retry-state tracking from ${retryStateDir}`,
+      )
     }
 
-    this._launcherSpecRetryAttemptCount.clear()
-    this._specFileRetryAttempt = 0
-
-    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
-      this._options.outputDir,
-    )
-    await fs
-      .rm(retryStateDir, { recursive: true, force: true })
-      .catch((error) => {
-        this._log(
-          'trace',
-          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${normalization.describeError(error)}`,
-        )
-      })
-    this._retryStatePersistenceUnavailable = false
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Cleared retry-state tracking from ${retryStateDir}`,
-    )
+    if (this._manifestRunContext) {
+      await aggregateManifestRun(this._manifestRunContext, exitCode)
+      this._manifestRunContext = undefined
+    }
   }
 
   async beforeSession(
-    _config: unknown,
+    config: unknown,
     capabilities: WebdriverIO.Capabilities,
     specs: string[],
     cid: string,
   ): Promise<void> {
+    const manifestContext = readManifestRunContext(config)
+    this._manifestRecorder = manifestContext
+      ? new ManifestWorkerRecorder({
+          context: manifestContext,
+          cid,
+          framework: normalizeManifestFramework(
+            (config as { framework?: unknown } | undefined)?.framework,
+          ),
+        })
+      : undefined
     this._specFileRetryAttempt = 0
     if (!this._options.recordOnRetries) {
       return
@@ -325,6 +366,14 @@ export default class WdioPuppeteerVideoService
     this._isChromium = isChromiumSession(caps)
     this._puppeteerBrowser = undefined
     this._sessionProtocol = 'unsupported'
+    const browserVersion = caps.browserVersion
+    const browserName = caps.browserName
+    this._manifestRecorder?.configureSession({
+      sessionId: browser.sessionId,
+      ...(typeof browserName === 'string' ? { browserName } : {}),
+      ...(typeof browserVersion === 'string' ? { browserVersion } : {}),
+      protocol: this._sessionProtocol,
+    })
 
     if (!this._isChromium) {
       this._log(
@@ -357,17 +406,43 @@ export default class WdioPuppeteerVideoService
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
+    const manifestScope = this._options.specLevelRecording ? 'spec' : 'test'
+    const manifestEntryAlreadyActive =
+      manifestScope === 'spec' && !!this._manifestRecorder?.currentEntryId
+    await this._manifestRecorder?.beginEntity({
+      test,
+      scope: manifestScope,
+      specPaths: this._specPaths,
+    })
     if (!this._canUseRecordingHooks()) {
+      if (!manifestEntryAlreadyActive) {
+        await this._manifestRecorder?.completeCurrent({
+          decision: 'skipped',
+          result: test.pending ? 'skipped' : 'unknown',
+          reason:
+            this._recordingDisabledReason ?? 'recording-hooks-unavailable',
+          processingOutcome: 'skipped',
+        })
+      }
       return
     }
 
     await this._runSerializedRecordingTask(async () => {
       if (!this._shouldRecordForFilters(test, context)) {
+        if (!manifestEntryAlreadyActive) {
+          await this._manifestRecorder?.completeCurrent({
+            decision: 'skipped',
+            result: test.pending ? 'skipped' : 'unknown',
+            reason: 'filtered',
+            processingOutcome: 'skipped',
+          })
+        }
         return
       }
 
       const retryContext = this._resolveRetryContextForEntity(test, context)
       const retryCount = retryContext.effectiveRetryCount
+      this._manifestRecorder?.setCurrentAttempt(retryCount + 1)
       const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
       this._logRetryDecision(
         retryContext,
@@ -376,6 +451,14 @@ export default class WdioPuppeteerVideoService
       )
       if (!shouldRecordForRetry) {
         this._logRetrySkip(retryContext, test.title || test.fullTitle || 'test')
+        if (!manifestEntryAlreadyActive) {
+          await this._manifestRecorder?.completeCurrent({
+            decision: 'skipped',
+            result: test.pending ? 'skipped' : 'unknown',
+            reason: 'not-a-retry-attempt',
+            processingOutcome: 'skipped',
+          })
+        }
         return
       }
 
@@ -393,10 +476,13 @@ export default class WdioPuppeteerVideoService
   }
 
   async afterTest(
-    _test: Frameworks.Test,
+    test: Frameworks.Test,
     _context: unknown,
     result: Frameworks.TestResult,
   ): Promise<void> {
+    await this._manifestRecorder?.recordResult(
+      test.pending ? 'skipped' : result.passed ? 'passed' : 'failed',
+    )
     await this._afterTestOrScenario(result.passed)
   }
 
@@ -404,17 +490,42 @@ export default class WdioPuppeteerVideoService
     world: Frameworks.World,
     context: unknown,
   ): Promise<void> {
+    const cucumberEntity = {
+      title: world?.pickle?.name || 'scenario',
+      fullTitle: world?.pickle?.name || 'scenario',
+    } as Frameworks.Test
+    const manifestEntryAlreadyActive =
+      this._options.specLevelRecording &&
+      !!this._manifestRecorder?.currentEntryId
+    await this._manifestRecorder?.beginEntity({
+      test: cucumberEntity,
+      scope: this._options.specLevelRecording ? 'spec' : 'test',
+      specPaths: this._specPaths,
+    })
     if (!this._canUseRecordingHooks()) {
+      if (!manifestEntryAlreadyActive) {
+        await this._manifestRecorder?.completeCurrent({
+          decision: 'skipped',
+          result: 'unknown',
+          reason:
+            this._recordingDisabledReason ?? 'recording-hooks-unavailable',
+          processingOutcome: 'skipped',
+        })
+      }
       return
     }
 
     await this._runSerializedRecordingTask(async () => {
-      const cucumberEntity = {
-        title: world?.pickle?.name || 'scenario',
-        fullTitle: world?.pickle?.name || 'scenario',
-      } as Frameworks.Test
       const scenarioContext = context ?? world
       if (!this._shouldRecordForFilters(cucumberEntity, scenarioContext)) {
+        if (!manifestEntryAlreadyActive) {
+          await this._manifestRecorder?.completeCurrent({
+            decision: 'skipped',
+            result: 'unknown',
+            reason: 'filtered',
+            processingOutcome: 'skipped',
+          })
+        }
         return
       }
 
@@ -423,6 +534,7 @@ export default class WdioPuppeteerVideoService
         scenarioContext,
       )
       const retryCount = retryContext.effectiveRetryCount
+      this._manifestRecorder?.setCurrentAttempt(retryCount + 1)
       const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
       this._logRetryDecision(
         retryContext,
@@ -431,6 +543,14 @@ export default class WdioPuppeteerVideoService
       )
       if (!shouldRecordForRetry) {
         this._logRetrySkip(retryContext, cucumberEntity.title)
+        if (!manifestEntryAlreadyActive) {
+          await this._manifestRecorder?.completeCurrent({
+            decision: 'skipped',
+            result: 'unknown',
+            reason: 'not-a-retry-attempt',
+            processingOutcome: 'skipped',
+          })
+        }
         return
       }
 
@@ -455,6 +575,9 @@ export default class WdioPuppeteerVideoService
     _world: Frameworks.World,
     result: Frameworks.PickleResult,
   ): Promise<void> {
+    await this._manifestRecorder?.recordResult(
+      result.passed ? 'passed' : 'failed',
+    )
     await this._afterTestOrScenario(result.passed)
   }
 
@@ -475,6 +598,7 @@ export default class WdioPuppeteerVideoService
 
   async afterSession(): Promise<void> {
     await this._teardownRecording('afterSession')
+    await this._manifestRecorder?.flush()
     this._browser = undefined
     this._isChromium = false
     this._puppeteerBrowser = undefined
@@ -487,6 +611,17 @@ export default class WdioPuppeteerVideoService
     this._sessionProtocol = 'unsupported'
     this._sessionIdToken = buildSessionIdToken(newSessionId)
     this._sessionIdFullToken = buildFullSessionIdToken(newSessionId)
+    const capabilities = this._browser?.capabilities as
+      | WebdriverIO.Capabilities
+      | undefined
+    const browserVersion = capabilities?.browserVersion
+    const browserName = capabilities?.browserName
+    this._manifestRecorder?.configureSession({
+      sessionId: newSessionId,
+      ...(typeof browserName === 'string' ? { browserName } : {}),
+      ...(typeof browserVersion === 'string' ? { browserVersion } : {}),
+      protocol: 'unsupported',
+    })
     this._log(
       'debug',
       `[WdioPuppeteerVideoService] Reset recording lifecycle for session reload ${buildSessionIdToken(oldSessionId)} -> ${this._sessionIdToken}.`,
@@ -650,6 +785,10 @@ export default class WdioPuppeteerVideoService
       }
 
       const { page, windowHandle } = activePage
+      this._manifestCaptureDimensions = await capture.resolveCaptureDimensions(
+        page,
+        this._options,
+      )
       const recordingOutput = await this._reserveRecordingOutput(
         this._createRecordingOutput(),
       )
@@ -735,6 +874,9 @@ export default class WdioPuppeteerVideoService
       await this._kickOffScreencastFramesIfEnabled(page)
       this._recorder = recorder
       this._activeSegment = pendingSegment
+      this._manifestRecorder?.markCaptureStarted(
+        this._manifestCaptureDimensions,
+      )
       pendingRecorder = undefined
       pendingSegment = undefined
       pendingRecordingPath = undefined
@@ -915,6 +1057,7 @@ export default class WdioPuppeteerVideoService
         browser.capabilities,
         true,
       )
+      this._manifestRecorder?.updateProtocol(this._sessionProtocol)
       this._log(
         'info',
         `[WdioPuppeteerVideoService] Session protocol classified as ${this._sessionProtocol}: WDIO controls the browser through ${this._sessionProtocol === 'bidi+cdp' ? 'WebDriver BiDi' : 'classic WebDriver'}, while Puppeteer capture attaches through CDP.`,
@@ -1056,6 +1199,13 @@ export default class WdioPuppeteerVideoService
 
     const started = await this._startRecording()
     if (!started) {
+      await this._manifestRecorder?.completeCurrent({
+        decision: 'failed',
+        result: 'unknown',
+        reason: this._recordingDisabledReason ?? 'recording-start-failed',
+        processingOutcome: 'failed',
+        processingOperation: 'capture',
+      })
       await this._resetTestState()
     }
   }
@@ -1223,6 +1373,8 @@ export default class WdioPuppeteerVideoService
       return
     }
 
+    let keepArtifacts = false
+    const deferredTaskCount = this._deferredPostProcessTasks.length
     try {
       await this._recordingLifecycle.finalize({
         stopRecording: async () => {
@@ -1230,6 +1382,7 @@ export default class WdioPuppeteerVideoService
         },
         processArtifacts: async () => {
           const shouldKeepArtifacts = this._shouldKeepRecording(passed)
+          keepArtifacts = shouldKeepArtifacts
           this._log(
             'debug',
             `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
@@ -1248,6 +1401,41 @@ export default class WdioPuppeteerVideoService
           }
         },
       })
+      const paths = [...this._recordedSegments]
+      const deferred = this._deferredPostProcessTasks.length > deferredTaskCount
+      const processingConfigured =
+        this._options.mergeSegments?.enabled || this._options.transcode?.enabled
+      await this._manifestRecorder?.completeCurrent({
+        decision: keepArtifacts
+          ? paths.length > 0
+            ? 'recorded'
+            : 'failed'
+          : 'discarded',
+        result: passed ? 'passed' : 'failed',
+        paths,
+        ...(!keepArtifacts ? { reason: 'retention-policy' } : {}),
+        processingOutcome: deferred
+          ? 'pending'
+          : keepArtifacts && processingConfigured
+            ? 'completed'
+            : keepArtifacts
+              ? 'not-required'
+              : 'skipped',
+        ...(this._options.mergeSegments?.enabled
+          ? { processingOperation: 'merge' as const }
+          : this._options.transcode?.enabled
+            ? { processingOperation: 'transcode' as const }
+            : {}),
+      })
+    } catch (error) {
+      await this._manifestRecorder?.completeCurrent({
+        decision: 'failed',
+        result: passed ? 'passed' : 'failed',
+        paths: [...this._recordedSegments],
+        reason: normalization.describeError(error),
+        processingOutcome: 'failed',
+      })
+      throw error
     } finally {
       await this._resetTestState()
     }
@@ -1375,6 +1563,10 @@ export default class WdioPuppeteerVideoService
       shouldTranscodeMergedOutput: this._shouldTranscode('mp4'),
       transcodeOptions: this._createResolvedTranscodeOptions(),
     })
+    const manifestEntryId = this._manifestRecorder?.currentEntryId
+    if (manifestEntryId) {
+      mergeTask.manifestEntryId = manifestEntryId
+    }
 
     this._dropDeferredPostProcessTasksForPaths(segmentPaths)
     this._deferredPostProcessTasks.push(mergeTask)
@@ -1503,7 +1695,8 @@ export default class WdioPuppeteerVideoService
       this._ffmpegCandidates,
     )
     this._ffmpegAvailable = !!this._resolvedFfmpegPath
-    if (!this._ffmpegAvailable) {
+    const ffmpegPath = this._resolvedFfmpegPath
+    if (!this._ffmpegAvailable || !ffmpegPath) {
       this._warnMissingFfmpeg('Video recording is disabled for this worker.')
       return false
     }
@@ -1512,6 +1705,10 @@ export default class WdioPuppeteerVideoService
       'info',
       `[WdioPuppeteerVideoService] Using ffmpeg binary: ${this._resolvedFfmpegPath}`,
     )
+    const ffmpegVersion = await ffmpeg.readFfmpegVersion(ffmpegPath)
+    if (ffmpegVersion) {
+      await this._manifestRecorder?.noteFfmpegVersion(ffmpegVersion)
+    }
     await this._configureMp4RecordingMode()
     return true
   }
@@ -1698,6 +1895,10 @@ export default class WdioPuppeteerVideoService
         segment.outputPath,
         segment.transcodeOptions,
       )
+      const manifestEntryId = this._manifestRecorder?.currentEntryId
+      if (manifestEntryId) {
+        transcodeTask.manifestEntryId = manifestEntryId
+      }
       this._deferredPostProcessTasks.push(transcodeTask)
       this._log(
         'debug',
@@ -1919,6 +2120,15 @@ export default class WdioPuppeteerVideoService
       .then(() => true)
       .catch(() => false)
     if (!inputExists) {
+      if (task.manifestEntryId) {
+        await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
+          decision: 'failed',
+          paths: [task.inputPath],
+          reason: 'deferred-transcode-input-missing',
+          processingOutcome: 'failed',
+          processingOperation: 'transcode',
+        })
+      }
       return
     }
 
@@ -1928,6 +2138,15 @@ export default class WdioPuppeteerVideoService
       task.ffmpegArgs,
     )
     if (!transcodedPath) {
+      if (task.manifestEntryId) {
+        await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
+          decision: 'recorded',
+          paths: [task.inputPath],
+          reason: 'deferred-transcode-failed-original-preserved',
+          processingOutcome: 'failed',
+          processingOperation: 'transcode',
+        })
+      }
       this._reportPostProcessFailure(
         `Deferred transcode failed, keeping original recording: ${task.inputPath}`,
       )
@@ -1937,6 +2156,14 @@ export default class WdioPuppeteerVideoService
     if (task.deleteOriginal && task.inputPath !== transcodedPath) {
       await fs.unlink(task.inputPath).catch(() => {
         /* best-effort cleanup */
+      })
+    }
+    if (task.manifestEntryId) {
+      await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
+        decision: 'recorded',
+        paths: [transcodedPath],
+        processingOutcome: 'completed',
+        processingOperation: 'transcode',
       })
     }
   }
@@ -1952,6 +2179,15 @@ export default class WdioPuppeteerVideoService
       ffmpegOperation: 'deferred segment merge',
     })
     if (!mergedPath) {
+      if (task.manifestEntryId) {
+        await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
+          decision: 'recorded',
+          paths: task.segmentPaths,
+          reason: 'deferred-merge-failed-segments-preserved',
+          processingOutcome: 'failed',
+          processingOperation: 'merge',
+        })
+      }
       this._reportPostProcessFailure(
         `Deferred merge failed, keeping ${task.segmentPaths.length.toString()} original segment(s).`,
       )
@@ -1959,6 +2195,14 @@ export default class WdioPuppeteerVideoService
     }
 
     if (!task.transcodeToMp4) {
+      if (task.manifestEntryId) {
+        await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
+          decision: 'recorded',
+          paths: [mergedPath],
+          processingOutcome: 'completed',
+          processingOperation: 'merge',
+        })
+      }
       return
     }
 
@@ -1970,6 +2214,9 @@ export default class WdioPuppeteerVideoService
     }
     if (task.transcodeToMp4.ffmpegArgs !== undefined) {
       transcodeTask.ffmpegArgs = task.transcodeToMp4.ffmpegArgs
+    }
+    if (task.manifestEntryId) {
+      transcodeTask.manifestEntryId = task.manifestEntryId
     }
     await this._executeDeferredTranscodeTask(transcodeTask)
   }
@@ -2147,6 +2394,7 @@ export default class WdioPuppeteerVideoService
       this._currentTestSlug = ''
       this._currentRecordingRetryCount = 0
       this._currentWindowHandle = undefined
+      this._manifestCaptureDimensions = undefined
       this._recordedSegments.clear()
       await this._recordingSlotScheduler.release()
     })

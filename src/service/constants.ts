@@ -33,6 +33,7 @@ export interface DeferredTranscodeTask {
   outputPath: string
   deleteOriginal: boolean
   ffmpegArgs?: string[]
+  manifestEntryId?: string
 }
 
 export interface DeferredMergeTask {
@@ -45,6 +46,7 @@ export interface DeferredMergeTask {
     deleteOriginal: boolean
     ffmpegArgs?: string[]
   }
+  manifestEntryId?: string
 }
 
 export type DeferredPostProcessTask = DeferredTranscodeTask | DeferredMergeTask
