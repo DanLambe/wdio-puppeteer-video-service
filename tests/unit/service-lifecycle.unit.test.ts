@@ -50,6 +50,8 @@ type StartHarness = {
   _prepareRecordingPage: () => Promise<{
     page: {
       screencast: () => Promise<FakeRecorder>
+      setViewport: (viewport: unknown) => Promise<void>
+      viewport: () => null
     }
     windowHandle: string
   }>
@@ -90,7 +92,11 @@ const createStartHarness = (
     release,
   }
   service._prepareRecordingPage = async () => ({
-    page: { screencast },
+    page: {
+      screencast,
+      setViewport: async () => {},
+      viewport: () => null,
+    },
     windowHandle: 'window-1',
   })
   service._createRecordingOutput = () => ({

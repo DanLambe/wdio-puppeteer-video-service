@@ -9,12 +9,15 @@ describe('service option resolution', () => {
     expect(resolved.options).toMatchObject({
       outputDir: 'videos',
       recordingRetain: 'failures',
-      videoWidth: 1280,
-      videoHeight: 720,
+      captureViewport: 'current',
       fps: 30,
+      captureQuality: 30,
+      captureScale: 1,
+      captureSpeed: 1,
+      framePriming: true,
+      puppeteerConnectionTimeoutMs: 10_000,
       recordOnRetries: false,
       specLevelRecording: false,
-      skipViewPortKickoff: false,
       segmentOnWindowSwitch: true,
       maxConcurrentRecordings: 0,
       maxGlobalRecordings: 0,
@@ -72,7 +75,7 @@ describe('service option resolution', () => {
       postProcessMode: 'deferred',
       recordingStartMode: 'fastFail',
       segmentOnWindowSwitch: false,
-      skipViewPortKickoff: true,
+      framePriming: false,
     })
     expect(defaults.hasExplicitLogLevel).toBe(true)
     expect(defaults.logLevel).toBe('warn')
@@ -94,7 +97,7 @@ describe('service option resolution', () => {
       postProcessMode: 'immediate',
       recordingStartMode: 'blocking',
       segmentOnWindowSwitch: true,
-      skipViewPortKickoff: false,
+      framePriming: true,
     })
     expect(explicit.logLevel).toBe('trace')
   })
@@ -112,7 +115,16 @@ describe('service option resolution', () => {
           excludeTags: [' @noVideo '],
         },
       },
-      capture: { width: 1440, height: 900, fps: 24, framePriming: false },
+      capture: {
+        viewport: { width: 1440, height: 900 },
+        fps: 24,
+        quality: 20,
+        scale: 0.5,
+        speed: 2,
+        crop: { x: 10, y: 20, width: 1200, height: 800 },
+        framePriming: false,
+        connectionTimeoutMs: 1500,
+      },
       processing: {
         format: 'mp4',
         mp4Mode: 'transcode',
@@ -146,10 +158,14 @@ describe('service option resolution', () => {
       segmentOnWindowSwitch: false,
       includeSpecPatterns: ['*critical*'],
       excludeTagPatterns: ['@novideo'],
-      videoWidth: 1440,
-      videoHeight: 900,
+      captureViewport: { width: 1440, height: 900 },
       fps: 24,
-      skipViewPortKickoff: true,
+      captureQuality: 20,
+      captureScale: 0.5,
+      captureSpeed: 2,
+      captureCrop: { x: 10, y: 20, width: 1200, height: 800 },
+      framePriming: false,
+      puppeteerConnectionTimeoutMs: 1500,
       outputFormat: 'mp4',
       mp4Mode: 'transcode',
       postProcessMode: 'deferred',
@@ -230,6 +246,15 @@ describe('service option resolution', () => {
 
   it.each([
     [{ capture: { fps: 0 } }, 'capture.fps'],
+    [{ capture: { viewport: { width: 1280 } } }, 'capture.viewport.height'],
+    [{ capture: { quality: 64 } }, 'capture.quality'],
+    [{ capture: { scale: 0 } }, 'capture.scale'],
+    [{ capture: { speed: Number.NaN } }, 'capture.speed'],
+    [
+      { capture: { crop: { x: -1, y: 0, width: 1, height: 1 } } },
+      'capture.crop.x',
+    ],
+    [{ capture: { connectionTimeoutMs: 0 } }, 'capture.connectionTimeoutMs'],
     [
       { concurrency: { maxRecordingsGlobal: 1.5 } },
       'concurrency.maxRecordingsGlobal',

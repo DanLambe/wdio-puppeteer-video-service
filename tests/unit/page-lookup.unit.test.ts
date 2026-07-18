@@ -4,6 +4,7 @@ import type { ClockBoundary } from '../../src/service/boundaries.js'
 import {
   findActivePage,
   findPageWithId,
+  PAGE_MARKER_PROPERTY,
 } from '../../src/service/page-lookup.js'
 
 const createPage = (marker: string | Error): Page =>
@@ -57,20 +58,23 @@ describe('Puppeteer page lookup', () => {
   })
 
   it('reads the page marker through the Puppeteer evaluation callback', async () => {
-    const globalMarker = globalThis as { _wdio_video_id?: string }
-    const previousMarker = globalMarker._wdio_video_id
-    globalMarker._wdio_video_id = 'target'
+    const globalMarker = globalThis as Record<string, unknown>
+    const previousMarker = globalMarker[PAGE_MARKER_PROPERTY]
+    globalMarker[PAGE_MARKER_PROPERTY] = 'target'
     try {
       const page = {
-        evaluate: async (callback: () => string | undefined) => callback(),
+        evaluate: async (
+          callback: (property: string) => unknown,
+          property: string,
+        ) => callback(property),
       } as unknown as Page
 
       await expect(findPageWithId([page], 'target')).resolves.toBe(page)
     } finally {
       if (previousMarker === undefined) {
-        delete globalMarker._wdio_video_id
+        delete globalMarker[PAGE_MARKER_PROPERTY]
       } else {
-        globalMarker._wdio_video_id = previousMarker
+        globalMarker[PAGE_MARKER_PROPERTY] = previousMarker
       }
     }
   })

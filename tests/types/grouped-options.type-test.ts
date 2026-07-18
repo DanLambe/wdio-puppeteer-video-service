@@ -15,10 +15,14 @@ const validOptions = {
     },
   },
   capture: {
-    width: 1280,
-    height: 720,
+    viewport: { width: 1280, height: 720 },
     fps: 30,
+    quality: 28,
+    scale: 1,
+    speed: 1,
+    crop: { x: 0, y: 0, width: 1200, height: 700 },
     framePriming: true,
+    connectionTimeoutMs: 10_000,
   },
   processing: {
     format: 'mp4',

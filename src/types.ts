@@ -36,15 +36,33 @@ export interface RecordingOptions {
   filters?: RecordingFilterOptions
 }
 
+export interface CaptureViewport {
+  width: number
+  height: number
+}
+
+export interface CaptureCrop extends CaptureViewport {
+  x: number
+  y: number
+}
+
 export interface CaptureOptions {
-  /** @default 1280 */
-  width?: number
-  /** @default 720 */
-  height?: number
+  /** Use the current browser viewport or temporarily size capture initialization. @default 'current' */
+  viewport?: 'current' | CaptureViewport
   /** @default 30 */
   fps?: number
+  /** FFmpeg constant-rate factor from 0 (best) to 63 (smallest). @default 30 */
+  quality?: number
+  /** Output dimension multiplier. @default 1 */
+  scale?: number
+  /** Playback-speed multiplier. @default 1 */
+  speed?: number
+  /** Crop applied by Puppeteer before scaling. */
+  crop?: CaptureCrop
   /** Whether to prime early screencast frames with the viewport warmup. @default true */
   framePriming?: boolean
+  /** Maximum time to wait for WDIO's CDP-backed Puppeteer connection. @default 10000 */
+  connectionTimeoutMs?: number
 }
 
 export interface ProcessingFfmpegOptions {
@@ -132,12 +150,16 @@ export interface WdioPuppeteerVideoServiceOptions {
 export interface ResolvedWdioPuppeteerVideoServiceOptions {
   outputDir: string
   recordingRetain: RecordingRetention
-  videoWidth: number
-  videoHeight: number
+  captureViewport: 'current' | CaptureViewport
   fps: number
+  captureQuality: number
+  captureScale: number
+  captureSpeed: number
+  captureCrop?: CaptureCrop
+  framePriming: boolean
+  puppeteerConnectionTimeoutMs: number
   recordOnRetries: boolean
   specLevelRecording: boolean
-  skipViewPortKickoff: boolean
   segmentOnWindowSwitch: boolean
   maxConcurrentRecordings: number
   maxGlobalRecordings: number

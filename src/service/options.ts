@@ -8,6 +8,7 @@ import type {
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
+  DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
   DEFAULT_RECORDING_START_TIMEOUT_MS,
   WINDOWS_DEFAULT_MAX_FILENAME_LENGTH,
 } from './constants.js'
@@ -64,15 +65,19 @@ export const resolveServiceConfiguration = (
   const resolvedOptions: ResolvedWdioPuppeteerVideoServiceOptions = {
     outputDir: normalization.normalizeOutputDir(options.outputDir),
     recordingRetain: retain,
-    videoWidth: capture.width ?? 1280,
-    videoHeight: capture.height ?? 720,
+    captureViewport: capture.viewport ?? 'current',
     fps: capture.fps ?? (profile === 'default' ? 30 : 24),
+    captureQuality: capture.quality ?? 30,
+    captureScale: capture.scale ?? 1,
+    captureSpeed: capture.speed ?? 1,
+    framePriming:
+      capture.framePriming === undefined
+        ? profile !== 'ci'
+        : capture.framePriming,
+    puppeteerConnectionTimeoutMs:
+      capture.connectionTimeoutMs ?? DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
     recordOnRetries: recording.attempts === 'retries',
     specLevelRecording: recording.scope === 'spec',
-    skipViewPortKickoff:
-      capture.framePriming === undefined
-        ? profile === 'ci'
-        : !capture.framePriming,
     segmentOnWindowSwitch:
       recording.windowChanges === undefined
         ? profile !== 'ci'
@@ -109,6 +114,7 @@ export const resolveServiceConfiguration = (
     mp4Mode: processing.mp4Mode ?? 'auto',
     transcode,
     mergeSegments,
+    ...(capture.crop ? { captureCrop: capture.crop } : {}),
     ...(globalRecordingLockDir ? { globalRecordingLockDir } : {}),
     ...(ffmpegPath ? { ffmpegPath } : {}),
   }

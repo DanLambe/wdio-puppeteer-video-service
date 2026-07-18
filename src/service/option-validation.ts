@@ -15,8 +15,8 @@ const ROOT_OPTIONS = [
 
 const BETA_OPTION_MIGRATIONS: Readonly<Record<string, string>> = {
   saveAllVideos: "recording.retain: 'all'",
-  videoWidth: 'capture.width',
-  videoHeight: 'capture.height',
+  videoWidth: 'capture.viewport.width',
+  videoHeight: 'capture.viewport.height',
   fps: 'capture.fps',
   recordOnRetries:
     "recording.attempts: 'retries' and recording.retain: 'retries'",
@@ -140,15 +140,49 @@ const validateCapture = (value: unknown): void => {
   }
 
   assertKnownOptions(capture, 'capture', [
-    'width',
-    'height',
+    'viewport',
     'fps',
+    'quality',
+    'scale',
+    'speed',
+    'crop',
     'framePriming',
+    'connectionTimeoutMs',
   ])
-  assertOptionalInteger(capture.width, 'capture.width', 1)
-  assertOptionalInteger(capture.height, 'capture.height', 1)
+  validateCaptureViewport(capture.viewport)
   assertOptionalInteger(capture.fps, 'capture.fps', 1)
+  assertOptionalInteger(capture.quality, 'capture.quality', 0, 63)
+  assertOptionalPositiveNumber(capture.scale, 'capture.scale')
+  assertOptionalPositiveNumber(capture.speed, 'capture.speed')
+  validateCaptureCrop(capture.crop)
   assertOptionalBoolean(capture.framePriming, 'capture.framePriming')
+  assertOptionalInteger(
+    capture.connectionTimeoutMs,
+    'capture.connectionTimeoutMs',
+    1,
+  )
+}
+
+const validateCaptureViewport = (value: unknown): void => {
+  if (value === undefined || value === 'current') {
+    return
+  }
+  const viewport = requireOptionObject(value, 'capture.viewport')
+  assertKnownOptions(viewport, 'capture.viewport', ['width', 'height'])
+  assertRequiredInteger(viewport.width, 'capture.viewport.width', 1)
+  assertRequiredInteger(viewport.height, 'capture.viewport.height', 1)
+}
+
+const validateCaptureCrop = (value: unknown): void => {
+  const crop = readOptionalOptionObject(value, 'capture.crop')
+  if (!crop) {
+    return
+  }
+  assertKnownOptions(crop, 'capture.crop', ['x', 'y', 'width', 'height'])
+  assertRequiredInteger(crop.x, 'capture.crop.x', 0)
+  assertRequiredInteger(crop.y, 'capture.crop.y', 0)
+  assertRequiredInteger(crop.width, 'capture.crop.width', 1)
+  assertRequiredInteger(crop.height, 'capture.crop.height', 1)
 }
 
 const validateProcessing = (value: unknown): void => {
@@ -386,6 +420,7 @@ const assertOptionalInteger = (
   value: unknown,
   path: string,
   minimum: number,
+  maximum?: number,
 ): void => {
   if (value === undefined) {
     return
@@ -393,10 +428,39 @@ const assertOptionalInteger = (
   if (
     typeof value !== 'number' ||
     !Number.isInteger(value) ||
-    value < minimum
+    value < minimum ||
+    (maximum !== undefined && value > maximum)
   ) {
+    const maximumSuffix =
+      maximum === undefined
+        ? ''
+        : ` and less than or equal to ${maximum.toString()}`
     throw new TypeError(
-      `[WdioPuppeteerVideoService] Configuration option "${path}" must be an integer greater than or equal to ${minimum.toString()}.`,
+      `[WdioPuppeteerVideoService] Configuration option "${path}" must be an integer greater than or equal to ${minimum.toString()}${maximumSuffix}.`,
+    )
+  }
+}
+
+const assertRequiredInteger = (
+  value: unknown,
+  path: string,
+  minimum: number,
+): void => {
+  if (value === undefined) {
+    throw new TypeError(
+      `[WdioPuppeteerVideoService] Configuration option "${path}" is required.`,
+    )
+  }
+  assertOptionalInteger(value, path, minimum)
+}
+
+const assertOptionalPositiveNumber = (value: unknown, path: string): void => {
+  if (value === undefined) {
+    return
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new TypeError(
+      `[WdioPuppeteerVideoService] Configuration option "${path}" must be a finite number greater than 0.`,
     )
   }
 }

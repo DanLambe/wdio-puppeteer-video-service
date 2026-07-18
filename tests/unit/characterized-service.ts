@@ -165,11 +165,11 @@ const createCaptureOptions = (
   source: CharacterizedServiceOptions,
 ): CaptureOptions => {
   const capture: CaptureOptions = {}
-  if (source.videoWidth !== undefined) {
-    capture.width = source.videoWidth
-  }
-  if (source.videoHeight !== undefined) {
-    capture.height = source.videoHeight
+  if (source.videoWidth !== undefined || source.videoHeight !== undefined) {
+    capture.viewport = {
+      width: source.videoWidth ?? 1280,
+      height: source.videoHeight ?? 720,
+    }
   }
   if (source.fps !== undefined) {
     capture.fps = source.fps

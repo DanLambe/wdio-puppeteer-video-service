@@ -193,8 +193,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }) as unknown as {
       _options: {
         outputDir: string
-        videoWidth: number
-        videoHeight: number
+        captureViewport: 'current' | { width: number; height: number }
         fps: number
         outputFormat?: 'webm' | 'mp4'
         mp4Mode?: string
@@ -204,7 +203,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         performanceProfile?: string
         recordOnRetries?: boolean
         specLevelRecording?: boolean
-        skipViewPortKickoff?: boolean
+        framePriming?: boolean
         segmentOnWindowSwitch?: boolean
         maxConcurrentRecordings?: number
         maxGlobalRecordings?: number
@@ -224,8 +223,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._options.outputDir).toBe('videos')
-    expect(service._options.videoWidth).toBe(1280)
-    expect(service._options.videoHeight).toBe(720)
+    expect(service._options.captureViewport).toBe('current')
     expect(service._options.fps).toBe(30)
     expect(service._options.maxFileNameLength).toBeGreaterThanOrEqual(40)
     expect(service._options.fileNameStyle).toBe('test')
@@ -234,7 +232,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._options.performanceProfile).toBe('default')
     expect(service._options.recordOnRetries).toBe(false)
     expect(service._options.specLevelRecording).toBe(false)
-    expect(service._options.skipViewPortKickoff).toBe(false)
+    expect(service._options.framePriming).toBe(true)
     expect(service._options.segmentOnWindowSwitch).toBe(true)
     expect(service._options.maxConcurrentRecordings).toBe(0)
     expect(service._options.maxGlobalRecordings).toBe(0)
@@ -282,8 +280,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       performanceProfile: 'parallel',
     }) as unknown as {
       _options: {
-        videoWidth: number
-        videoHeight: number
+        captureViewport: 'current' | { width: number; height: number }
         fps: number
         outputFormat?: 'webm' | 'mp4'
         mp4Mode?: string
@@ -293,8 +290,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._options.performanceProfile).toBe('parallel')
-    expect(service._options.videoWidth).toBe(1280)
-    expect(service._options.videoHeight).toBe(720)
+    expect(service._options.captureViewport).toBe('current')
     expect(service._options.fps).toBe(24)
     expect(service._options.outputFormat).toBe('webm')
     expect(service._options.mp4Mode).toBe('auto')
@@ -316,8 +312,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       },
     }) as unknown as {
       _options: {
-        videoWidth: number
-        videoHeight: number
+        captureViewport: 'current' | { width: number; height: number }
         fps: number
         outputFormat?: 'webm' | 'mp4'
         mp4Mode?: string
@@ -325,8 +320,10 @@ describe('WdioPuppeteerVideoService unit', () => {
       }
     }
 
-    expect(service._options.videoWidth).toBe(1920)
-    expect(service._options.videoHeight).toBe(1080)
+    expect(service._options.captureViewport).toEqual({
+      width: 1920,
+      height: 1080,
+    })
     expect(service._options.fps).toBe(30)
     expect(service._options.outputFormat).toBe('mp4')
     expect(service._options.mp4Mode).toBe('direct')
@@ -339,12 +336,11 @@ describe('WdioPuppeteerVideoService unit', () => {
       performanceProfile: 'ci',
     }) as unknown as {
       _options: {
-        videoWidth: number
-        videoHeight: number
+        captureViewport: 'current' | { width: number; height: number }
         fps: number
         outputFormat?: 'webm' | 'mp4'
         performanceProfile?: string
-        skipViewPortKickoff?: boolean
+        framePriming?: boolean
         segmentOnWindowSwitch?: boolean
         postProcessMode?: string
         recordingStartMode?: string
@@ -356,11 +352,10 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     expect(service._options.performanceProfile).toBe('ci')
-    expect(service._options.videoWidth).toBe(1280)
-    expect(service._options.videoHeight).toBe(720)
+    expect(service._options.captureViewport).toBe('current')
     expect(service._options.fps).toBe(24)
     expect(service._options.outputFormat).toBe('webm')
-    expect(service._options.skipViewPortKickoff).toBe(true)
+    expect(service._options.framePriming).toBe(false)
     expect(service._options.segmentOnWindowSwitch).toBe(false)
     expect(service._options.postProcessMode).toBe('deferred')
     expect(service._options.recordingStartMode).toBe('fastFail')
@@ -388,11 +383,10 @@ describe('WdioPuppeteerVideoService unit', () => {
       logLevel: 'error',
     }) as unknown as {
       _options: {
-        videoWidth: number
-        videoHeight: number
+        captureViewport: 'current' | { width: number; height: number }
         fps: number
         outputFormat?: 'webm' | 'mp4'
-        skipViewPortKickoff?: boolean
+        framePriming?: boolean
         segmentOnWindowSwitch?: boolean
         postProcessMode?: string
         recordingStartMode?: string
@@ -402,11 +396,13 @@ describe('WdioPuppeteerVideoService unit', () => {
       _logLevel: string
     }
 
-    expect(service._options.videoWidth).toBe(1920)
-    expect(service._options.videoHeight).toBe(1080)
+    expect(service._options.captureViewport).toEqual({
+      width: 1920,
+      height: 1080,
+    })
     expect(service._options.fps).toBe(30)
     expect(service._options.outputFormat).toBe('mp4')
-    expect(service._options.skipViewPortKickoff).toBe(false)
+    expect(service._options.framePriming).toBe(true)
     expect(service._options.segmentOnWindowSwitch).toBe(true)
     expect(service._options.postProcessMode).toBe('immediate')
     expect(service._options.recordingStartMode).toBe('blocking')
@@ -1252,19 +1248,22 @@ describe('WdioPuppeteerVideoService unit', () => {
     try {
       const service = new WdioPuppeteerVideoService({}) as unknown as {
         _kickOffScreencastFrames: (page: {
-          setViewport: (viewport: {
-            width: number
-            height: number
-          }) => Promise<void>
+          setViewport: (
+            viewport: { width: number; height: number } | null,
+          ) => Promise<void>
+          viewport: () => { width: number; height: number }
         }) => Promise<void>
       }
 
       const setViewport = vi
-        .fn<(viewport: { width: number; height: number }) => Promise<void>>()
+        .fn<
+          (viewport: { width: number; height: number } | null) => Promise<void>
+        >()
         .mockRejectedValueOnce(new Error('first resize failed'))
         .mockResolvedValueOnce(undefined)
       const kickoffPromise = service._kickOffScreencastFrames({
         setViewport,
+        viewport: () => ({ width: 1280, height: 720 }),
       })
 
       await vi.advanceTimersByTimeAsync(50)
@@ -1315,7 +1314,11 @@ describe('WdioPuppeteerVideoService unit', () => {
     const browserCalls: string[] = []
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _browser: {
-        execute: (script: unknown, markerId: string) => Promise<void>
+        execute: (
+          script: unknown,
+          markerProperty: string,
+          markerId: string,
+        ) => Promise<void>
         getPuppeteer: () => Promise<unknown>
         getWindowHandle: () => Promise<string>
       }
@@ -1405,6 +1408,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       'getWindowHandle',
       'execute',
       'findActivePage',
+      'execute',
       'releaseRecordingSlot',
     ])
   })
@@ -2469,7 +2473,11 @@ describe('WdioPuppeteerVideoService unit', () => {
   it('_prepareRecordingPage tolerates missing window handles and best-effort focus failures', async () => {
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _prepareRecordingPage: (browser: {
-        execute: (script: unknown, markerId: string) => Promise<void>
+        execute: (
+          script: unknown,
+          markerProperty: string,
+          markerId: string,
+        ) => Promise<void>
         getPuppeteer: () => Promise<unknown>
         getWindowHandle: () => Promise<string>
       }) => Promise<
@@ -2490,7 +2498,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
 
     const result = await service._prepareRecordingPage({
-      execute: async (_script, markerId) => {
+      execute: async (_script, _markerProperty, markerId) => {
         seenMarkerIds.push(markerId)
       },
       getPuppeteer: async () => ({ pages: async () => [page] }),
@@ -2511,7 +2519,11 @@ describe('WdioPuppeteerVideoService unit', () => {
     vi.spyOn(pageLookup, 'findActivePage').mockResolvedValue(undefined)
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _prepareRecordingPage: (browser: {
-        execute: (script: unknown, markerId: string) => Promise<void>
+        execute: (
+          script: unknown,
+          markerProperty: string,
+          markerId: string,
+        ) => Promise<void>
         getPuppeteer: () => Promise<unknown>
         getWindowHandle: () => Promise<string>
       }) => Promise<unknown>

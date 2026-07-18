@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -10,6 +11,7 @@ import type {
   ScreenRecorder,
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
+import * as capture from './service/capture.js'
 import {
   type ActiveSegment,
   CI_TRANSCODE_FFMPEG_ARGS,
@@ -37,6 +39,13 @@ import { resolveServiceConfiguration } from './service/options.js'
 import * as pageLookup from './service/page-lookup.js'
 import * as artifactPaths from './service/paths.js'
 import * as postProcess from './service/post-process.js'
+import {
+  classifySessionProtocol,
+  connectPuppeteerWithTimeout,
+  describePuppeteerConnectionFailure,
+  isChromiumSession,
+  type SessionProtocol,
+} from './service/protocol.js'
 import { RecordingLifecycle } from './service/recording-lifecycle.js'
 import { RecordingSlotScheduler } from './service/recording-slots.js'
 import * as retryStateHelpers from './service/retry-state.js'
@@ -73,6 +82,8 @@ export default class WdioPuppeteerVideoService
   private _specFileRetryAttempt = 0
   private readonly _launcherSpecRetryAttemptCount = new Map<string, number>()
   private _isChromium = false
+  private _puppeteerBrowser: PuppeteerBrowser | undefined
+  private _sessionProtocol: SessionProtocol = 'unsupported'
   private _recordingDisabledReason: string | undefined
   private _retryStatePersistenceUnavailable = false
   private _specHadFailure = false
@@ -292,18 +303,20 @@ export default class WdioPuppeteerVideoService
     this._sessionIdToken = buildSessionIdToken(browser.sessionId)
     this._sessionIdFullToken = buildFullSessionIdToken(browser.sessionId)
     const caps = browser.capabilities
-    const browserName = caps.browserName?.toLowerCase()
-    this._isChromium =
-      browserName === 'chrome' ||
-      browserName === 'microsoftedge' ||
-      browserName === 'edge' ||
-      'goog:chromeOptions' in caps ||
-      'ms:edgeOptions' in caps
+    this._isChromium = isChromiumSession(caps)
+    this._puppeteerBrowser = undefined
+    this._sessionProtocol = 'unsupported'
 
     if (!this._isChromium) {
       this._log(
         'warn',
         '[WdioPuppeteerVideoService] Video recording is only supported on Chromium-based browsers.',
+      )
+      return
+    }
+    if (browser.isMultiremote) {
+      this._disableRecordingForWorker(
+        'multiremote sessions are not supported; configure recording for a single-browser WDIO worker',
       )
       return
     }
@@ -445,10 +458,14 @@ export default class WdioPuppeteerVideoService
     await this._teardownRecording('afterSession')
     this._browser = undefined
     this._isChromium = false
+    this._puppeteerBrowser = undefined
+    this._sessionProtocol = 'unsupported'
   }
 
   async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
     await this._teardownRecording('onReload')
+    this._puppeteerBrowser = undefined
+    this._sessionProtocol = 'unsupported'
     this._sessionIdToken = buildSessionIdToken(newSessionId)
     this._sessionIdFullToken = buildFullSessionIdToken(newSessionId)
     this._log(
@@ -610,10 +627,16 @@ export default class WdioPuppeteerVideoService
       const recordingOutput = this._createRecordingOutput()
 
       const ffmpegPath = this._resolveFfmpegPath()
-      const recorder = await page.screencast({
-        format: recordingOutput.recordingFormat,
-        fps: this._options.fps || 30,
+      const recorder = await capture.startScreencast(page, {
+        capture: this._options,
         ffmpegPath,
+        format: recordingOutput.recordingFormat,
+        onViewportRestoreError: (error) => {
+          this._log(
+            'warn',
+            `[WdioPuppeteerVideoService] Failed to restore the browser viewport after capture initialization: ${normalization.describeError(error)}`,
+          )
+        },
       })
       pendingRecorder = recorder
 
@@ -781,19 +804,45 @@ export default class WdioPuppeteerVideoService
       }
     | undefined
   > {
-    const puppeteerBrowser =
-      (await browser.getPuppeteer()) as unknown as PuppeteerBrowser
+    const puppeteerBrowser = await this._getPuppeteerBrowser(browser)
+    if (!puppeteerBrowser) {
+      return undefined
+    }
     const windowHandle = await browser
       .getWindowHandle()
       .catch(() => undefined /* window may already be closed */)
 
     const targetId = this._nextPageMarkerId()
-    await browser.execute((id: string) => {
-      const win = globalThis as unknown as { _wdio_video_id?: string }
-      win._wdio_video_id = id
-    }, targetId)
+    await browser.execute(
+      (property: string, id: string) => {
+        Object.defineProperty(globalThis, property, {
+          configurable: true,
+          enumerable: false,
+          value: id,
+          writable: false,
+        })
+      },
+      pageLookup.PAGE_MARKER_PROPERTY,
+      targetId,
+    )
 
-    const page = await pageLookup.findActivePage(puppeteerBrowser, targetId)
+    const page = await pageLookup
+      .findActivePage(puppeteerBrowser, targetId)
+      .finally(async () => {
+        await browser
+          .execute(
+            (property: string, id: string) => {
+              if (Reflect.get(globalThis, property) === id) {
+                Reflect.deleteProperty(globalThis, property)
+              }
+            },
+            pageLookup.PAGE_MARKER_PROPERTY,
+            targetId,
+          )
+          .catch(() => {
+            /* best-effort marker cleanup during navigation or target closure */
+          })
+      })
     if (!page) {
       this._log(
         'warn',
@@ -809,6 +858,38 @@ export default class WdioPuppeteerVideoService
     return {
       page,
       windowHandle,
+    }
+  }
+
+  private async _getPuppeteerBrowser(
+    browser: Browser,
+  ): Promise<PuppeteerBrowser | undefined> {
+    if (this._puppeteerBrowser && this._puppeteerBrowser.connected !== false) {
+      return this._puppeteerBrowser
+    }
+
+    try {
+      const puppeteerBrowser = await connectPuppeteerWithTimeout(
+        browser,
+        this._options.puppeteerConnectionTimeoutMs,
+      )
+      this._puppeteerBrowser = puppeteerBrowser
+      this._sessionProtocol = classifySessionProtocol(
+        browser.capabilities,
+        true,
+      )
+      this._log(
+        'info',
+        `[WdioPuppeteerVideoService] Session protocol classified as ${this._sessionProtocol}: WDIO controls the browser through ${this._sessionProtocol === 'bidi+cdp' ? 'WebDriver BiDi' : 'classic WebDriver'}, while Puppeteer capture attaches through CDP.`,
+      )
+      return puppeteerBrowser
+    } catch (error) {
+      this._puppeteerBrowser = undefined
+      this._sessionProtocol = 'unsupported'
+      this._disableRecordingForWorker(
+        describePuppeteerConnectionFailure(browser, error),
+      )
+      return undefined
     }
   }
 
@@ -1439,24 +1520,11 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _kickOffScreencastFrames(page: Page): Promise<void> {
-    const targetWidth = this._options.videoWidth ?? 1280
-    const targetHeight = this._options.videoHeight ?? 720
-
-    await page
-      .setViewport({ width: targetWidth + 1, height: targetHeight })
-      .catch(() => {
-        /* best-effort viewport resize */
-      })
-    await delay(50)
-    await page
-      .setViewport({ width: targetWidth, height: targetHeight })
-      .catch(() => {
-        /* best-effort viewport resize */
-      })
+    await capture.primeScreencastFrames(page)
   }
 
   private async _kickOffScreencastFramesIfEnabled(page: Page): Promise<void> {
-    if (this._options.skipViewPortKickoff) {
+    if (!this._options.framePriming) {
       return
     }
 
@@ -1985,6 +2053,6 @@ export default class WdioPuppeteerVideoService
     this._pageMarkerCounter += 1
     const sessionToken =
       this._sessionIdToken || this._sessionIdFullToken || 'session'
-    return `wdio-video-${sessionToken}-${Date.now().toString(36)}-${this._pageMarkerCounter.toString(36)}`
+    return `wdio-video-${sessionToken}-${this._pageMarkerCounter.toString(36)}-${randomUUID()}`
   }
 }

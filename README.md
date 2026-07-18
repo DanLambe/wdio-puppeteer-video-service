@@ -50,10 +50,14 @@ export const config = {
           },
         },
         capture: {
-          width: 1280,
-          height: 720,
+          viewport: 'current',
           fps: 30,
+          quality: 30,
+          scale: 1,
+          speed: 1,
+          crop: { x: 0, y: 0, width: 1200, height: 700 },
           framePriming: true,
+          connectionTimeoutMs: 10000,
         },
         processing: {
           format: 'webm',
@@ -135,8 +139,13 @@ Top-level options:
 
 `capture`:
 
-- `width` (default `1280`), `height` (default `720`), and `fps` (default `30`).
+- `viewport` (default `'current'`): preserves the browser's current viewport. Use `{ width, height }` to temporarily size capture initialization; the original Puppeteer viewport mode is restored immediately after `page.screencast()` starts.
+- `fps` (default `30`; `24` for the `parallel` and `ci` profiles).
+- `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
+- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer 25.
+- `crop`: optional `{ x, y, width, height }` rectangle. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces `400x200` media.
 - `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
+- `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
 
 `processing`:
 
@@ -181,8 +190,8 @@ from JavaScript configuration files. Use this complete mapping:
 | --- | --- | --- |
 | `outputDir` | `outputDir` | Unchanged. |
 | `saveAllVideos` | `recording.retain` | `true` becomes `'all'`; `false` becomes `'failures'`. |
-| `videoWidth` | `capture.width` | |
-| `videoHeight` | `capture.height` | |
+| `videoWidth` | `capture.viewport.width` | Set `capture.viewport` to an explicit `{ width, height }` object. |
+| `videoHeight` | `capture.viewport.height` | Set `capture.viewport` to an explicit `{ width, height }` object. |
 | `fps` | `capture.fps` | |
 | `recordOnRetries` | `recording.attempts` and `recording.retain` | For equivalent retry-only behavior, set both to `'retries'`. |
 | `specLevelRecording` | `recording.scope` | `true` becomes `'spec'`; `false` becomes `'test'`. |
@@ -230,7 +239,7 @@ After:
     attempts: 'retries',
     retain: 'retries',
   },
-  capture: { width: 1280 },
+  capture: { viewport: { width: 1280, height: 720 } },
   processing: {
     format: 'mp4',
     transcode: { enabled: true },
@@ -268,10 +277,25 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
 - The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, disables merging unless explicit, and pins service logging to `warn` unless explicit.
 
+## WDIO Protocol Compatibility
+
+WDIO v9 attempts WebDriver BiDi for supported browsers by default. This service
+classifies a successful recording session as `bidi+cdp` or `classic+cdp`:
+WDIO may issue automation commands through BiDi, while Puppeteer still attaches
+to Chrome or Edge through CDP for `page.screencast()`.
+
+Set `'wdio:enforceWebDriverClassic': true` in the browser capability when a
+classic-only validation run is required. Both modes use the same CDP capture
+path. A session is `unsupported` when no usable CDP endpoint is available.
+Diagnostics distinguish multiremote, WDIO browser/component runner, remote
+debugging pipes, remote/cloud endpoints without `se:cdp`, non-Chromium
+browsers, connection timeout, and generic missing-CDP cases.
+
 ## Limitations
 
 - Chromium only; capture requires CDP even when WDIO controls the session through BiDi.
 - Audio, Firefox, Safari, Appium/mobile, component runner, multiremote, and cloud sessions without CDP are not supported.
+- Chrome sessions started with `--remote-debugging-pipe` are not supported by WDIO `getPuppeteer()`; expose a debugger address instead.
 - Window changes are segmented by default.
 - VP9-in-MP4 output without transcoding has limited player compatibility.
 - Host CPU, RAM, and I/O still determine stability under heavy parallel load.
@@ -284,6 +308,7 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
 - `npm run test:e2e:both`: multipart and merged Mocha runs.
 - `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
+- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, and Edge smoke.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
 

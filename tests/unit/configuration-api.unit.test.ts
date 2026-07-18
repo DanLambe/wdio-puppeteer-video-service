@@ -29,7 +29,7 @@ describe('grouped 1.0 configuration API', () => {
     } as unknown as WdioPuppeteerVideoServiceOptions
 
     expect(() => new WdioPuppeteerVideoService(betaOptions)).toThrow(
-      'Use "capture.width" instead',
+      'Use "capture.viewport.width" instead',
     )
   })
 

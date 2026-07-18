@@ -12,8 +12,7 @@ const recording = {
 } satisfies RecordingOptions
 
 const capture = {
-  width: 1280,
-  height: 720,
+  viewport: { width: 1280, height: 720 },
   fps: 30,
 } satisfies CaptureOptions
 
