@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import WdioPuppeteerVideoService, {
+  launcher,
   WdioPuppeteerVideoService as NamedService,
 } from 'wdio-puppeteer-video-service'
 import {
@@ -10,6 +11,10 @@ import {
 
 assert.equal(WdioPuppeteerVideoService, NamedService)
 assert.equal(typeof WdioPuppeteerVideoService, 'function')
+assert.equal(typeof launcher, 'function')
+assert.notEqual(launcher, WdioPuppeteerVideoService)
+assert.equal(typeof launcher.prototype.onPrepare, 'function')
+assert.equal(WdioPuppeteerVideoService.prototype.onPrepare, undefined)
 assert.equal(MANIFEST_SCHEMA_VERSION, 1)
 assert.equal(typeof isVideoManifest, 'function')
 assert.equal(typeof validateVideoManifest, 'function')

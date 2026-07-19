@@ -1,3 +1,4 @@
+import WdioPuppeteerVideoLauncher from './launcher.js'
 import WdioPuppeteerVideoService from './service.js'
 
 export type {
@@ -31,5 +32,5 @@ export type {
   WdioPuppeteerVideoServiceOptions,
   WindowChangeBehavior,
 } from './types.js'
-export { WdioPuppeteerVideoService }
+export { WdioPuppeteerVideoLauncher as launcher, WdioPuppeteerVideoService }
 export default WdioPuppeteerVideoService

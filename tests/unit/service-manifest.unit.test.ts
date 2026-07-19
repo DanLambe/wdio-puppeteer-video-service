@@ -3,11 +3,15 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { isVideoManifest, type VideoManifestV1 } from '../../src/manifest.js'
+import { assignLauncherWorkerContext } from '../../src/service/launcher-context.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
+  assignManifestWorkerContext,
   createManifestRunContext,
+  type ManifestRunContext,
 } from '../../src/service/manifest-runtime.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 
@@ -46,6 +50,17 @@ const readManifest = async (outputDir: string): Promise<VideoManifestV1> => {
   return value as VideoManifestV1
 }
 
+const assignWorkerConfiguration = (
+  config: object,
+  cid: string,
+  context: ManifestRunContext,
+  specFileRetryAttempt = 0,
+): void => {
+  assignLauncherWorkerContext(config, true)
+  assignManifestRunContext(config, context)
+  assignManifestWorkerContext(config, cid, { specFileRetryAttempt })
+}
+
 afterEach(async () => {
   await Promise.all(
     tempDirs
@@ -59,7 +74,7 @@ describe('service manifest hooks', () => {
     const outputDir = await createTempDir()
     const spec = path.join(process.cwd(), 'tests', 'specs', 'unsupported.ts')
     const specs = [spec]
-    const launcher = new WdioPuppeteerVideoService({
+    const launcher = new WdioPuppeteerVideoLauncher({
       outputDir,
       recording: { attempts: 'retries' },
     })
@@ -112,7 +127,7 @@ describe('service manifest hooks', () => {
     const specs = [spec]
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'jasmine' }
-    assignManifestRunContext(config, context)
+    assignWorkerConfiguration(config, '1-0', context)
     const worker = new WdioPuppeteerVideoService({
       outputDir,
       recording: {
@@ -130,7 +145,7 @@ describe('service manifest hooks', () => {
 
     const retryContext = await createManifestRunContext(outputDir)
     const retryConfig: Record<string, unknown> = { framework: 'mocha' }
-    assignManifestRunContext(retryConfig, retryContext)
+    assignWorkerConfiguration(retryConfig, '1-1', retryContext)
     const retryWorker = new WdioPuppeteerVideoService({
       outputDir,
       recording: { attempts: 'retries' },
@@ -171,7 +186,7 @@ describe('service manifest hooks', () => {
     const specs = [path.join(process.cwd(), 'features', 'manifest.feature')]
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'cucumber' }
-    assignManifestRunContext(config, context)
+    assignWorkerConfiguration(config, '2-0', context)
     const worker = new WdioPuppeteerVideoService({
       outputDir,
       recording: {
@@ -210,7 +225,7 @@ describe('service manifest hooks', () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'mocha' }
-    assignManifestRunContext(config, context)
+    assignWorkerConfiguration(config, '3-1', context)
     const service = new WdioPuppeteerVideoService({
       outputDir,
       failurePolicy: 'error',
@@ -240,7 +255,7 @@ describe('service manifest hooks', () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'mocha' }
-    assignManifestRunContext(config, context)
+    assignWorkerConfiguration(config, '3-2', context)
     const service = new WdioPuppeteerVideoService({
       outputDir,
       failurePolicy: 'error',

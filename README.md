@@ -46,12 +46,10 @@ npm install --save-dev @wdio/allure-reporter
 Add the service to `wdio.conf.ts`:
 
 ```typescript
-import { WdioPuppeteerVideoService } from 'wdio-puppeteer-video-service'
-
 export const config = {
   services: [
     [
-      WdioPuppeteerVideoService,
+      'puppeteer-video',
       {
         outputDir: 'videos',
         recording: {
@@ -122,9 +120,11 @@ export const config = {
 }
 ```
 
-Configuration is validated when the service is constructed, before a browser
-session starts. Unknown keys, invalid values, and removed 0.8 aliases throw a
-path-specific `TypeError`.
+Register the service by package name so WDIO v9 can load both its named launcher
+export and its default worker export in the correct processes. Direct imported
+class registration is rejected before browser startup because it cannot load
+the launcher. Configuration is validated during plugin initialization. Unknown
+keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
 ## Prerequisites
 
@@ -231,7 +231,9 @@ Unknown integrations are rejected instead of being silently ignored.
 - `attempts: 'retries'` skips first-attempt capture.
 - `retain: 'retries'` keeps retry-attempt artifacts, including a retry that passes.
 - `retain: 'all'` keeps every captured artifact.
-- Retry state is stored under `<outputDir>/.wdio-video-retry-state` and cleaned by launcher hooks.
+- Retry context is passed from the launcher to each worker through WDIO's
+  configuration boundary; no retry-state files are written to the artifact
+  directory.
 - `scope: 'spec'` records one artifact per spec and uses the aggregate spec result.
 
 ## Migrating from 0.8 to 1.0
@@ -347,13 +349,12 @@ status, spec, browser, and retry filters, inline playback, diagnostics, and
 error details.
 
 ```typescript
-import WdioPuppeteerVideoService from 'wdio-puppeteer-video-service'
 import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
 
 const outputDir = 'videos'
 
 export const config: WebdriverIO.Config = {
-  services: [[WdioPuppeteerVideoService, { outputDir }]],
+  services: [['puppeteer-video', { outputDir }]],
   reporters: [
     'spec',
     [WdioPuppeteerVideoReporter, { outputDir }],

@@ -3,10 +3,10 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
 import * as ffmpeg from '../../src/service/ffmpeg.js'
 import * as pageLookup from '../../src/service/page-lookup.js'
-import * as retryState from '../../src/service/retry-state.js'
 import WdioPuppeteerVideoServiceRuntime from '../../src/service.js'
 import WdioPuppeteerVideoService, {
   type CharacterizedServiceOptions,
@@ -37,13 +37,14 @@ type RetryLauncherService = {
     cid: string,
     capabilities: WebdriverIO.Capabilities,
     specs: string[],
-  ) => Promise<void>
+    args: object,
+  ) => void
   onWorkerEnd: (
     cid: string,
     exitCode: number,
     specs: string[],
     retries: number,
-  ) => Promise<void>
+  ) => void
   onComplete: () => Promise<void>
 }
 
@@ -120,21 +121,24 @@ const withTempDir = async (
 const createRetryLauncherService = (
   outputDir: string,
 ): RetryLauncherService => {
-  return new WdioPuppeteerVideoService({
+  return new WdioPuppeteerVideoLauncher({
     outputDir,
-    recordOnRetries: true,
+    recording: { attempts: 'retries' },
   })
 }
 
 const primeRetryStateForSecondWorker = async (
   launcherService: RetryLauncherService,
-  launcherCapabilities: WebdriverIO.Capabilities,
+  firstCapabilities: WebdriverIO.Capabilities,
   specs: string[],
-): Promise<void> => {
+  secondCapabilities = firstCapabilities,
+): Promise<Record<string, unknown>> => {
   await launcherService.onPrepare()
-  await launcherService.onWorkerStart('0-0', launcherCapabilities, specs)
+  launcherService.onWorkerStart('0-0', firstCapabilities, specs, {})
   await launcherService.onWorkerEnd('0-0', 1, specs, 0)
-  await launcherService.onWorkerStart('0-1', launcherCapabilities, specs)
+  const workerConfig: Record<string, unknown> = { framework: 'mocha' }
+  launcherService.onWorkerStart('0-0', secondCapabilities, specs, workerConfig)
+  return workerConfig
 }
 
 const createRetryWorkerHarness = (
@@ -169,11 +173,17 @@ const createRetryWorkerHarness = (
 
 const runSpecFileRetryBeforeTest = async (
   workerService: RetryWorkerService,
+  workerConfig: Record<string, unknown>,
   workerCapabilities: WebdriverIO.Capabilities,
   specs: string[],
 ): Promise<void> => {
   const specPath = specs[0] ?? RETRY_RECORDING_SPEC_PATH
-  await workerService.beforeSession({}, workerCapabilities, specs, '0-1')
+  await workerService.beforeSession(
+    workerConfig,
+    workerCapabilities,
+    specs,
+    '0-0',
+  )
   await workerService.beforeTest(
     createTest({
       title: 'spec file retry candidate',
@@ -747,7 +757,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       } as unknown as WebdriverIO.Capabilities
 
       const launcherService = createRetryLauncherService(tempDir)
-      await primeRetryStateForSecondWorker(
+      const workerConfig = await primeRetryStateForSecondWorker(
         launcherService,
         launcherCapabilities,
         specs,
@@ -755,7 +765,12 @@ describe('WdioPuppeteerVideoService unit', () => {
 
       const { workerService, seenRetryCounts } =
         createRetryWorkerHarness(tempDir)
-      await runSpecFileRetryBeforeTest(workerService, workerCapabilities, specs)
+      await runSpecFileRetryBeforeTest(
+        workerService,
+        workerConfig,
+        workerCapabilities,
+        specs,
+      )
 
       expect(seenRetryCounts).toEqual([1])
       await launcherService.onComplete()
@@ -773,15 +788,21 @@ describe('WdioPuppeteerVideoService unit', () => {
       } as unknown as WebdriverIO.Capabilities
 
       const launcherService = createRetryLauncherService(tempDir)
-      await primeRetryStateForSecondWorker(
+      const workerConfig = await primeRetryStateForSecondWorker(
         launcherService,
         launcherCapabilities,
         specs,
+        workerCapabilities,
       )
 
       const { workerService, seenRetryCounts } =
         createRetryWorkerHarness(tempDir)
-      await runSpecFileRetryBeforeTest(workerService, workerCapabilities, specs)
+      await runSpecFileRetryBeforeTest(
+        workerService,
+        workerConfig,
+        workerCapabilities,
+        specs,
+      )
 
       expect(seenRetryCounts).toEqual([])
       await launcherService.onComplete()
@@ -2452,95 +2473,6 @@ describe('WdioPuppeteerVideoService unit', () => {
     })
   })
 
-  it('onPrepare disables persisted retry-state tracking when init fails', async () => {
-    await withTempDir(async (tempDir) => {
-      const blockedOutputDir = path.join(tempDir, 'blocked-output')
-      await fs.writeFile(blockedOutputDir, 'blocker')
-
-      const service = new WdioPuppeteerVideoService({
-        outputDir: blockedOutputDir,
-        recordOnRetries: true,
-      }) as unknown as {
-        onPrepare: () => Promise<void>
-        onWorkerStart: (
-          cid: string,
-          capabilities: WebdriverIO.Capabilities,
-          specs: string[],
-        ) => Promise<void>
-        _writeSpecRetryState: (
-          cid: string,
-          state: { specRetryKey: string; specFileRetryAttempt: number },
-        ) => Promise<void>
-        _log: (level: string, message: string) => void
-      }
-
-      const warnMessages: string[] = []
-      let writeCalls = 0
-      service._writeSpecRetryState = async () => {
-        writeCalls += 1
-      }
-      service._log = (level, message) => {
-        if (level === 'warn') {
-          warnMessages.push(message)
-        }
-      }
-
-      await expect(service.onPrepare()).resolves.toBeUndefined()
-      await expect(
-        service.onWorkerStart('0-0', { browserName: 'chrome' }, [
-          'tests/specs/e2e.test.ts',
-        ]),
-      ).resolves.toBeUndefined()
-
-      expect(writeCalls).toBe(0)
-      expect(
-        warnMessages.some((m) =>
-          m.includes('Failed to initialize retry-state tracking'),
-        ),
-      ).toBe(true)
-    })
-  })
-
-  it('_writeSpecRetryState does not propagate errors when write fails', async () => {
-    await withTempDir(async (tempDir) => {
-      const service = new WdioPuppeteerVideoService({
-        outputDir: tempDir,
-        recordOnRetries: true,
-      }) as unknown as {
-        _writeSpecRetryState: (
-          cid: string,
-          state: { specRetryKey: string; specFileRetryAttempt: number },
-        ) => Promise<void>
-        _log: (level: string, message: string) => void
-      }
-
-      const warnMessages: string[] = []
-      const originalLog = service._log.bind(service)
-      service._log = (level, message, ...rest) => {
-        if (level === 'warn') {
-          warnMessages.push(message)
-        }
-        originalLog(level, message, ...rest)
-      }
-
-      // Make the method fail by writing to a path that cannot exist (file as dir)
-      const blockerFile = path.join(tempDir, '.wdio-video-retry-state')
-      await fs.writeFile(blockerFile, 'blocker')
-
-      // _writeSpecRetryState must resolve (not reject) even when I/O fails
-      await expect(
-        service._writeSpecRetryState('0-0', {
-          specRetryKey: 'key',
-          specFileRetryAttempt: 1,
-        }),
-      ).resolves.toBeUndefined()
-
-      expect(warnMessages.some((m) => m.includes('Failed to persist'))).toBe(
-        true,
-      )
-    })
-  })
-
   it('_acquireRecordingSlotForStart logs the fastFail timeout when acquisition fails', async () => {
     const service = new WdioPuppeteerVideoService({
       recordingStartMode: 'fastFail',
@@ -2679,102 +2611,6 @@ describe('WdioPuppeteerVideoService unit', () => {
       transcodeEnabled: true,
     })
     expect(warnMessages).toHaveLength(0)
-  })
-
-  it('_readSpecRetryState returns persisted retry state when it is valid', async () => {
-    await withTempDir(async (tempDir) => {
-      const service = new WdioPuppeteerVideoService({
-        outputDir: tempDir,
-      }) as unknown as {
-        _readSpecRetryState: (cid: string) => Promise<
-          | {
-              specRetryKey: string
-              specFileRetryAttempt: number
-            }
-          | undefined
-        >
-      }
-
-      const retryStatePath = retryState.getSpecRetryStatePathForCid(
-        tempDir,
-        '0-0',
-      )
-      await fs.mkdir(path.dirname(retryStatePath), { recursive: true })
-      await fs.writeFile(
-        retryStatePath,
-        JSON.stringify({
-          specRetryKey: 'retry-key',
-          specFileRetryAttempt: 2,
-        }),
-        'utf8',
-      )
-
-      await expect(service._readSpecRetryState('0-0')).resolves.toEqual({
-        specRetryKey: 'retry-key',
-        specFileRetryAttempt: 2,
-      })
-    })
-  })
-
-  it('_readSpecRetryState warns and ignores invalid persisted retry state', async () => {
-    await withTempDir(async (tempDir) => {
-      const service = new WdioPuppeteerVideoService({
-        outputDir: tempDir,
-      }) as unknown as {
-        _log: (level: string, message: string) => void
-        _readSpecRetryState: (cid: string) => Promise<unknown>
-      }
-
-      const warnMessages: string[] = []
-      service._log = (level, message) => {
-        if (level === 'warn') {
-          warnMessages.push(message)
-        }
-      }
-
-      const retryStatePath = retryState.getSpecRetryStatePathForCid(
-        tempDir,
-        '0-0',
-      )
-      await fs.mkdir(path.dirname(retryStatePath), { recursive: true })
-      await fs.writeFile(
-        retryStatePath,
-        JSON.stringify({
-          specRetryKey: 'retry-key',
-          specFileRetryAttempt: 'bad-value',
-        }),
-        'utf8',
-      )
-
-      await expect(service._readSpecRetryState('0-0')).resolves.toBeUndefined()
-      expect(warnMessages[0]).toContain('specFileRetryAttempt is invalid')
-    })
-  })
-
-  it('_deleteSpecRetryState logs unexpected unlink failures', async () => {
-    await withTempDir(async (tempDir) => {
-      const service = new WdioPuppeteerVideoService({
-        outputDir: tempDir,
-      }) as unknown as {
-        _deleteSpecRetryState: (cid: string) => Promise<void>
-        _log: (level: string, message: string) => void
-      }
-
-      const traceMessages: string[] = []
-      const retryStatePath = retryState.getSpecRetryStatePathForCid(
-        tempDir,
-        '0-0',
-      )
-      await fs.mkdir(retryStatePath, { recursive: true })
-      service._log = (level, message) => {
-        if (level === 'trace') {
-          traceMessages.push(message)
-        }
-      }
-
-      await service._deleteSpecRetryState('0-0')
-      expect(traceMessages[0]).toContain('Failed to delete retry state')
-    })
   })
 
   it('_warnMissingFfmpeg and _disableRecordingForWorker only log once', () => {

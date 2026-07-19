@@ -1,8 +1,8 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
 import WdioPuppeteerVideoReporter from '../src/reporter.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const expectVideos = !['0', 'false', 'no'].includes(
@@ -41,7 +41,7 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 3,
   services: [
     [
-      WdioPuppeteerVideoService,
+      videoServiceModulePath,
       {
         outputDir: resultsDir,
         recording: {

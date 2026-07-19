@@ -11,7 +11,6 @@ import type {
   ScreenRecorder,
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
-import { generateVideoReportForRun } from './reporter/report-generator.js'
 import { AllureVideoIntegration } from './service/allure-integration.js'
 import * as artifactIntegrity from './service/artifact-integrity.js'
 import * as capture from './service/capture.js'
@@ -25,7 +24,6 @@ import {
   type DeferredTranscodeTask,
   type MergeExecutionOptions,
   type OutputFormat,
-  type PersistedSpecRetryState,
   RECORDER_STOP_TIMEOUT_MS,
   type ResolvedRetryContext,
   type ResolvedTranscodeOptions,
@@ -36,18 +34,19 @@ import {
 import * as ffmpeg from './service/ffmpeg.js'
 import * as ffmpegRunner from './service/ffmpeg-runner.js'
 import * as filtering from './service/filtering.js'
+import {
+  createLauncherRegistrationError,
+  inspectLauncherWorkerContext,
+} from './service/launcher-context.js'
 import * as logging from './service/logging.js'
 import {
-  aggregateManifestRun,
-  assignManifestRunContext,
-  assignManifestWorkerContext,
   type CompleteManifestEntryOptions,
-  createManifestRunContext,
+  hasManifestWorkerContexts,
   type ManifestCaptureDimensions,
-  type ManifestRunContext,
   ManifestWorkerRecorder,
   normalizeManifestFramework,
   readManifestRunContext,
+  readManifestWorkerContext,
 } from './service/manifest-runtime.js'
 import * as normalization from './service/normalization.js'
 import { resolveServiceConfiguration } from './service/options.js'
@@ -66,7 +65,6 @@ import {
   PostProcessSlotScheduler,
   RecordingSlotScheduler,
 } from './service/recording-slots.js'
-import * as retryStateHelpers from './service/retry-state.js'
 import type {
   LogLevel,
   ResolvedWdioPuppeteerVideoServiceOptions,
@@ -100,6 +98,22 @@ const resolveManifestTestResult = (
   return passed ? 'passed' : 'failed'
 }
 
+const validateLauncherWorkerConfiguration = (config: unknown): void => {
+  const launcherContext = inspectLauncherWorkerContext(config)
+  if (launcherContext.status !== 'valid') {
+    throw createLauncherRegistrationError(launcherContext.status)
+  }
+  if (!hasManifestWorkerContexts(config)) {
+    throw createLauncherRegistrationError('malformed')
+  }
+  if (
+    launcherContext.context.manifestContextAvailable &&
+    !readManifestRunContext(config)
+  ) {
+    throw createLauncherRegistrationError('malformed')
+  }
+}
+
 /**
  * WebdriverIO Service to record videos using Puppeteer and FFmpeg
  */
@@ -116,12 +130,10 @@ export default class WdioPuppeteerVideoService
   private readonly _recordedSegments = new Set<string>()
   private readonly _entityAttemptCount = new Map<string, number>()
   private _specFileRetryAttempt = 0
-  private readonly _launcherSpecRetryAttemptCount = new Map<string, number>()
   private _isChromium = false
   private _puppeteerBrowser: PuppeteerBrowser | undefined
   private _sessionProtocol: SessionProtocol = 'unsupported'
   private _recordingDisabledReason: string | undefined
-  private _retryStatePersistenceUnavailable = false
   private _specHadFailure = false
   private _specPaths: string[] = []
   private _currentWindowHandle: string | undefined
@@ -150,12 +162,18 @@ export default class WdioPuppeteerVideoService
     new ffmpegRunner.FfmpegProcessRegistry()
   private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
-  private _manifestRunContext: ManifestRunContext | undefined
   private _manifestRecorder: ManifestWorkerRecorder | undefined
   private _manifestCaptureDimensions: ManifestCaptureDimensions | undefined
   private readonly _allureIntegration: AllureVideoIntegration | undefined
 
-  constructor(options: WdioPuppeteerVideoServiceOptions = {}) {
+  constructor(
+    options: WdioPuppeteerVideoServiceOptions = {},
+    _capabilities?: unknown,
+    config?: unknown,
+  ) {
+    if (config !== undefined) {
+      validateLauncherWorkerConfiguration(config)
+    }
     const resolvedConfiguration = resolveServiceConfiguration(options)
     this._hasExplicitLogLevel = resolvedConfiguration.hasExplicitLogLevel
     this._logLevel = resolvedConfiguration.logLevel
@@ -183,167 +201,13 @@ export default class WdioPuppeteerVideoService
     )
   }
 
-  async onPrepare(): Promise<void> {
-    this._manifestRunContext = await this._runManifestTask(
-      'initialize manifest journaling',
-      () => createManifestRunContext(this._options.outputDir),
-    )
-
-    if (!this._options.recordOnRetries) {
-      return
-    }
-
-    this._retryStatePersistenceUnavailable = false
-    this._launcherSpecRetryAttemptCount.clear()
-    this._specFileRetryAttempt = 0
-
-    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
-      this._options.outputDir,
-    )
-    await fs
-      .rm(retryStateDir, { recursive: true, force: true })
-      .catch((error) => {
-        this._log(
-          'trace',
-          `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onPrepare (${retryStateDir}): ${normalization.describeError(error)}`,
-        )
-      })
-    const retryStateDirReady = await fs
-      .mkdir(retryStateDir, { recursive: true })
-      .then(() => true)
-      .catch((error) => {
-        this._retryStatePersistenceUnavailable = true
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Failed to initialize retry-state tracking at ${retryStateDir}: ${normalization.describeError(error)}. Falling back to framework and inferred retry detection only.`,
-        )
-        return false
-      })
-    if (!retryStateDirReady) {
-      return
-    }
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Initialized retry-state tracking at ${retryStateDir}`,
-    )
-  }
-
-  async onWorkerStart(
-    cid: string,
-    capabilities: WebdriverIO.Capabilities,
-    specs: string[],
-    args?: object,
-  ): Promise<void> {
-    if (this._manifestRunContext && args) {
-      assignManifestRunContext(args, this._manifestRunContext)
-    }
-
-    if (!this._options.recordOnRetries) {
-      if (args) {
-        assignManifestWorkerContext(args, { specFileRetryAttempt: 0 })
-      }
-      return
-    }
-
-    const specRetryKey = retryStateHelpers.buildSpecRetryKey(
-      specs,
-      capabilities,
-    )
-    const specFileRetryAttempt =
-      this._launcherSpecRetryAttemptCount.get(specRetryKey) ?? 0
-    this._launcherSpecRetryAttemptCount.set(
-      specRetryKey,
-      specFileRetryAttempt + 1,
-    )
-    if (args) {
-      assignManifestWorkerContext(args, { specFileRetryAttempt })
-    }
-    if (this._retryStatePersistenceUnavailable) {
-      return
-    }
-
-    const retryState: PersistedSpecRetryState = {
-      specRetryKey,
-      specFileRetryAttempt,
-    }
-    await this._writeSpecRetryState(cid, retryState)
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Worker start retry context cid=${cid} specFileRetryAttempt=${specFileRetryAttempt} specs=${specs.length}`,
-    )
-  }
-
-  async onWorkerEnd(
-    cid: string,
-    exitCode: number,
-    specs: string[],
-    retries: number,
-  ): Promise<void> {
-    if (!this._options.recordOnRetries) {
-      return
-    }
-
-    await this._deleteSpecRetryState(cid)
-    this._log(
-      'trace',
-      `[WdioPuppeteerVideoService] Worker end cleanup cid=${cid} exitCode=${exitCode} retries=${retries} specs=${specs.length}`,
-    )
-  }
-
-  async onComplete(exitCode = 0): Promise<void> {
-    if (this._options.recordOnRetries) {
-      this._launcherSpecRetryAttemptCount.clear()
-      this._specFileRetryAttempt = 0
-
-      const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
-        this._options.outputDir,
-      )
-      await fs
-        .rm(retryStateDir, { recursive: true, force: true })
-        .catch((error) => {
-          this._log(
-            'trace',
-            `[WdioPuppeteerVideoService] Failed to clean retry-state dir during onComplete (${retryStateDir}): ${normalization.describeError(error)}`,
-          )
-        })
-      this._retryStatePersistenceUnavailable = false
-      this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Cleared retry-state tracking from ${retryStateDir}`,
-      )
-    }
-
-    if (!this._manifestRunContext) {
-      return
-    }
-
-    const manifestRunContext = this._manifestRunContext
-    try {
-      const manifest = await this._runManifestTask(
-        'aggregate manifest journals',
-        () => aggregateManifestRun(manifestRunContext, exitCode),
-      )
-      if (!manifest) {
-        return
-      }
-      await this._runManifestTask('generate the static video report', () =>
-        generateVideoReportForRun({
-          outputDir: manifestRunContext.outputDir,
-          runId: manifestRunContext.runId,
-          manifest,
-        }),
-      )
-    } finally {
-      this._manifestRunContext = undefined
-    }
-  }
-
   async beforeSession(
     config: unknown,
-    capabilities: WebdriverIO.Capabilities,
-    specs: string[],
+    _capabilities: WebdriverIO.Capabilities,
+    _specs: string[],
     cid: string,
   ): Promise<void> {
+    validateLauncherWorkerConfiguration(config)
     const manifestContext = readManifestRunContext(config)
     this._manifestRecorder = manifestContext
       ? new ManifestWorkerRecorder({
@@ -361,36 +225,14 @@ export default class WdioPuppeteerVideoService
           },
         })
       : undefined
-    this._specFileRetryAttempt = 0
-    if (!this._options.recordOnRetries) {
-      return
+    const workerContext = readManifestWorkerContext(config, cid)
+    if (!workerContext) {
+      throw createLauncherRegistrationError('malformed')
     }
-
-    const retryState = await this._readSpecRetryState(cid)
-    if (!retryState) {
-      this._log(
-        'trace',
-        `[WdioPuppeteerVideoService] No persisted retry state found for cid=${cid}; defaulting spec-file retry attempt to 0.`,
-      )
-      return
-    }
-
-    const expectedRetryKey = retryStateHelpers.buildSpecRetryKey(
-      specs,
-      capabilities,
-    )
-    if (retryState.specRetryKey !== expectedRetryKey) {
-      this._log(
-        'trace',
-        `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} due to spec key mismatch.`,
-      )
-      return
-    }
-
-    this._specFileRetryAttempt = retryState.specFileRetryAttempt
+    this._specFileRetryAttempt = workerContext.specFileRetryAttempt
     this._log(
       'debug',
-      `[WdioPuppeteerVideoService] Hydrated spec-file retry attempt for cid=${cid}: ${this._specFileRetryAttempt}`,
+      `[WdioPuppeteerVideoService] Hydrated launcher retry context for cid=${cid}: ${this._specFileRetryAttempt.toString()}`,
     )
   }
 
@@ -2399,120 +2241,6 @@ export default class WdioPuppeteerVideoService
 
     this._deferredPostProcessTasks.length = 0
     this._deferredPostProcessTasks.push(...filteredTasks)
-  }
-
-  private async _writeSpecRetryState(
-    cid: string,
-    retryState: PersistedSpecRetryState,
-  ): Promise<void> {
-    if (this._retryStatePersistenceUnavailable) {
-      return
-    }
-
-    const retryStateDir = retryStateHelpers.getSpecRetryStateDirPath(
-      this._options.outputDir,
-    )
-    try {
-      await fs.mkdir(retryStateDir, { recursive: true })
-      const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
-        this._options.outputDir,
-        cid,
-      )
-      await fs.writeFile(retryStatePath, JSON.stringify(retryState), 'utf8')
-      this._log(
-        'trace',
-        `[WdioPuppeteerVideoService] Persisted retry state for cid=${cid} at ${retryStatePath} (specFileRetryAttempt=${retryState.specFileRetryAttempt})`,
-      )
-    } catch (error) {
-      this._retryStatePersistenceUnavailable = true
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to persist retry state for cid=${cid}: ${normalization.describeError(error)}. Falling back to framework and inferred retry detection only.`,
-      )
-    }
-  }
-
-  private async _readSpecRetryState(
-    cid: string,
-  ): Promise<PersistedSpecRetryState | undefined> {
-    const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
-      this._options.outputDir,
-      cid,
-    )
-    try {
-      const rawValue = await fs.readFile(retryStatePath, 'utf8')
-      const parsedValue = JSON.parse(
-        rawValue,
-      ) as Partial<PersistedSpecRetryState>
-      if (typeof parsedValue.specRetryKey !== 'string') {
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} because specRetryKey is missing or invalid.`,
-        )
-        return undefined
-      }
-
-      const parsedRetryAttempt = this._extractRetryValue(
-        parsedValue.specFileRetryAttempt,
-      )
-      if (parsedRetryAttempt === undefined) {
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Ignoring retry state for cid=${cid} because specFileRetryAttempt is invalid.`,
-        )
-        return undefined
-      }
-
-      return {
-        specRetryKey: parsedValue.specRetryKey,
-        specFileRetryAttempt: parsedRetryAttempt,
-      }
-    } catch (error) {
-      const retryStateError = error as NodeJS.ErrnoException
-      if (retryStateError.code === 'ENOENT') {
-        return undefined
-      }
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to read retry state for cid=${cid}: ${normalization.describeError(error)}`,
-      )
-      return undefined
-    }
-  }
-
-  private async _deleteSpecRetryState(cid: string): Promise<void> {
-    const retryStatePath = retryStateHelpers.getSpecRetryStatePathForCid(
-      this._options.outputDir,
-      cid,
-    )
-    await fs.unlink(retryStatePath).catch((error) => {
-      const retryStateError = error as NodeJS.ErrnoException
-      if (retryStateError.code === 'ENOENT') {
-        return
-      }
-      this._log(
-        'trace',
-        `[WdioPuppeteerVideoService] Failed to delete retry state for cid=${cid}: ${normalization.describeError(error)}`,
-      )
-    })
-  }
-
-  private async _runManifestTask<T>(
-    operation: string,
-    task: () => Promise<T>,
-  ): Promise<T | undefined> {
-    try {
-      return await task()
-    } catch (error) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to ${operation}: ${normalization.describeError(error)}.`,
-      )
-      if (this._options.failurePolicy === 'error') {
-        throw error
-      }
-      return undefined
-    }
   }
 
   private _log(level: LogLevel, message: string, details?: unknown): void {

@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildSpecRetryKey,
   extractPidFromSlotFile,
-  getSpecRetryStateDirPath,
-  getSpecRetryStatePathForCid,
   isProcessAlive,
   parseGlobalRecordingSlotMetadata,
   resolveGlobalRecordingLockDir,
@@ -169,21 +167,6 @@ describe('retry-state buildSpecRetryKey', () => {
 describe('retry-state helper utilities', () => {
   afterEach(() => {
     vi.restoreAllMocks()
-  })
-
-  it('builds retry-state paths using custom and default output directories', () => {
-    expect(getSpecRetryStateDirPath('artifacts')).toBe(
-      path.join('artifacts', '.wdio-video-retry-state'),
-    )
-    expect(getSpecRetryStateDirPath(undefined)).toBe(
-      path.join('videos', '.wdio-video-retry-state'),
-    )
-    expect(getSpecRetryStatePathForCid('artifacts', ' 0:1/2 ')).toBe(
-      path.join('artifacts', '.wdio-video-retry-state', '0_1_2.json'),
-    )
-    expect(getSpecRetryStatePathForCid(undefined, '   ')).toBe(
-      path.join('videos', '.wdio-video-retry-state', 'unknown.json'),
-    )
   })
 
   it('resolves the global recording lock directory with trimmed override support', () => {

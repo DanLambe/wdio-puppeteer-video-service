@@ -2,28 +2,12 @@ import path from 'node:path'
 import {
   DEFAULT_OUTPUT_DIR,
   GLOBAL_RECORDING_SLOT_DIR_NAME,
-  SPEC_RETRY_STATE_DIR_NAME,
 } from './constants.js'
 
 /**
- * Helpers for on-disk retry-state and cross-process recording-slot metadata.
+ * Helpers for retry identity and cross-process recording-slot metadata.
  * These utilities are intentionally stateless and side-effect free.
  */
-
-export const getSpecRetryStateDirPath = (
-  outputDir: string | undefined,
-): string => {
-  return path.join(outputDir || DEFAULT_OUTPUT_DIR, SPEC_RETRY_STATE_DIR_NAME)
-}
-
-export const getSpecRetryStatePathForCid = (
-  outputDir: string | undefined,
-  cid: string,
-): string => {
-  const safeCidToken =
-    cid.trim().replaceAll(/[^a-zA-Z0-9._-]/g, '_') || 'unknown'
-  return path.join(getSpecRetryStateDirPath(outputDir), `${safeCidToken}.json`)
-}
 
 export const buildSpecRetryKey = (
   specs: string[],

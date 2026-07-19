@@ -59,11 +59,6 @@ export interface MergeExecutionOptions {
   ffmpegOperation: string
 }
 
-export interface PersistedSpecRetryState {
-  specRetryKey: string
-  specFileRetryAttempt: number
-}
-
 export interface ResolvedRetryContext {
   explicitFrameworkRetry: number | undefined
   specFileRetryAttempt: number
@@ -107,7 +102,6 @@ export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 export const GLOBAL_POST_PROCESS_SLOT_DIR_NAME =
   '.wdio-video-post-process-global-slots'
-export const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 

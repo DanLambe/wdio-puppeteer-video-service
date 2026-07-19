@@ -46,6 +46,10 @@ Equivalent retry-only configuration:
 
 ## Behavioral changes
 
+- Register the service by package name with
+  `services: [['puppeteer-video', options]]`. Direct imported-class
+  registration cannot load WDIO's named launcher export and is rejected before
+  browser startup.
 - Recording defaults to test scope, all attempts, failure retention, and window
   segmentation.
 - `capture.viewport` defaults to `'current'`; an explicit size is temporary and
@@ -60,10 +64,15 @@ Equivalent retry-only configuration:
 ## Imports
 
 ```typescript
-import WdioPuppeteerVideoService from 'wdio-puppeteer-video-service'
+import type { WdioPuppeteerVideoServiceOptions } from 'wdio-puppeteer-video-service'
 import { validateVideoManifest } from 'wdio-puppeteer-video-service/manifest'
 import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
 ```
+
+The root default and named worker classes remain available for advanced
+programmatic use and testing, but they are not valid values in WDIO's
+`services` configuration. String registration is what activates both launcher
+and worker halves of the plugin.
 
 The reporter and Allure integration have optional peers. Install
 `@wdio/reporter` when using the reporter export and `@wdio/allure-reporter`

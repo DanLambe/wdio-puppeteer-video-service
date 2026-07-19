@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import vm from 'node:vm'
 import type { RunnerStats, TestStats } from '@wdio/reporter'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import type {
   ManifestEntryV1,
   ManifestRunV1,
@@ -30,7 +31,6 @@ import {
   createManifestRunContext,
   readManifestRunContext,
 } from '../../src/service/manifest-runtime.js'
-import WdioPuppeteerVideoService from '../../src/service.js'
 
 const tempDirs: string[] = []
 const browserIdentity: ReporterBrowserIdentity = {
@@ -254,7 +254,7 @@ describe('WdioPuppeteerVideoReporter', () => {
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'mocha' }
     assignManifestRunContext(config, context)
-    assignManifestWorkerContext(config, { specFileRetryAttempt: 0 })
+    assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
     const reporter = new WdioPuppeteerVideoReporter({ outputDir })
     const specPath = path.resolve('tests/specs/reporter.spec.ts')
     const runner = {
@@ -346,7 +346,7 @@ describe('WdioPuppeteerVideoReporter', () => {
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { specFileRetries: 1 }
     assignManifestRunContext(config, context)
-    assignManifestWorkerContext(config, { specFileRetryAttempt: 1 })
+    assignManifestWorkerContext(config, '1-0', { specFileRetryAttempt: 1 })
     const reporter = new WdioPuppeteerVideoReporter({
       outputDir,
       writeStream: { write: () => true },
@@ -682,7 +682,7 @@ describe('static report generation', () => {
 
   it('lets the service launcher generate the report after manifest aggregation', async () => {
     const outputDir = await createTempDir()
-    const launcher = new WdioPuppeteerVideoService({ outputDir })
+    const launcher = new WdioPuppeteerVideoLauncher({ outputDir })
     const workerConfig: Record<string, unknown> = {}
     await launcher.onPrepare()
     await launcher.onWorkerStart(

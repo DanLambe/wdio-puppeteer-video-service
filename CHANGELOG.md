@@ -5,6 +5,10 @@ versioning and release notes.
 
 ## 1.0.0-rc.1
 
+- Split the WDIO v9 plugin into a named launcher export and a worker-only
+  default export. Canonical registration is now
+  `services: [['puppeteer-video', options]]`, with versioned launcher-to-worker
+  run and retry context transport.
 - Replaced the flat beta configuration with validated recording, capture,
   processing, concurrency, artifact, and integration groups.
 - Added an idempotent recording lifecycle with crash-safe cleanup and separate

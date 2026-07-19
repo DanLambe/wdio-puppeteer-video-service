@@ -1,8 +1,9 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService, { type CaptureOptions } from '../src/index.js'
+import type { CaptureOptions } from '../src/index.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { probeMediaFile } from './utils/media-probe.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import { listVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const mode = process.env.WDIO_CAPTURE_MODE ?? 'bidi'
@@ -71,7 +72,7 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 1,
   services: [
     [
-      WdioPuppeteerVideoService,
+      videoServiceModulePath,
       {
         outputDir: resultsDir,
         recording: { retain: 'all' },

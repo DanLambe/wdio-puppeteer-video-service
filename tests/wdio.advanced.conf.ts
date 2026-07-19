@@ -1,10 +1,10 @@
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
 import WdioPuppeteerVideoReporter from '../src/reporter.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../src/types.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import {
   assertVideoArtifacts,
   listVideoArtifacts,
@@ -508,7 +508,7 @@ export const config: WebdriverIO.Config = {
   specFileRetries: mode === 'spec-file-retry' ? 1 : 0,
   specFileRetriesDelay: 0,
   specFileRetriesDeferred: false,
-  services: [[WdioPuppeteerVideoService, serviceOptionsByMode[mode]]],
+  services: [[videoServiceModulePath, serviceOptionsByMode[mode]]],
   framework: 'mocha',
   reporters: [
     'spec',

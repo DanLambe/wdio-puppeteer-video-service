@@ -69,7 +69,10 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
 
   override onRunnerStart(runnerStats: RunnerStats): void {
     const context = readManifestRunContext(runnerStats.config)
-    const workerContext = readManifestWorkerContext(runnerStats.config)
+    const workerContext = readManifestWorkerContext(
+      runnerStats.config,
+      runnerStats.cid,
+    )
     this._outputDir = context?.outputDir ?? this._outputDir
     this._runnerRetry = workerContext?.specFileRetryAttempt ?? 0
     this._runnerUsesRetries =

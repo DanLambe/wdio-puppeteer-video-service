@@ -1,5 +1,7 @@
+import type { Services } from '@wdio/types'
 import WdioPuppeteerVideoService, {
   type CaptureOptions,
+  launcher,
   type RecordingOptions,
   type WdioPuppeteerVideoServiceOptions,
 } from 'wdio-puppeteer-video-service'
@@ -40,7 +42,13 @@ const options = {
   failurePolicy: 'warn',
 } satisfies WdioPuppeteerVideoServiceOptions
 
-export default new WdioPuppeteerVideoService(options)
+export const serviceRegistration = [
+  'puppeteer-video',
+  options,
+] satisfies Services.ServiceEntry
+export const workerClass: Services.ServiceClass = WdioPuppeteerVideoService
+export const launcherClass: Services.ServiceClass = launcher
+export default serviceRegistration
 
 const reporterOptions = {
   outputDir: 'videos',

@@ -55,6 +55,11 @@ export interface ManifestWorkerContext {
   specFileRetryAttempt: number
 }
 
+interface ManifestWorkerContextEnvelope {
+  contexts: Record<string, ManifestWorkerContext>
+  version: 1
+}
+
 export interface ManifestCaptureDimensions {
   width: number
   height: number
@@ -138,9 +143,19 @@ export const assignManifestRunContext = (
 
 export const assignManifestWorkerContext = (
   config: object,
+  cid: string,
   context: ManifestWorkerContext,
 ): void => {
-  Object.assign(config, { [MANIFEST_WORKER_CONFIG_KEY]: context })
+  const existing = readManifestWorkerContextEnvelope(config)
+  Object.assign(config, {
+    [MANIFEST_WORKER_CONFIG_KEY]: {
+      contexts: {
+        ...existing?.contexts,
+        [cid]: context,
+      },
+      version: 1,
+    } satisfies ManifestWorkerContextEnvelope,
+  })
 }
 
 export const readManifestRunContext = (
@@ -194,19 +209,53 @@ const isManifestToolVersions = (
 
 export const readManifestWorkerContext = (
   config: unknown,
+  cid: string,
 ): ManifestWorkerContext | undefined => {
+  return readManifestWorkerContextEnvelope(config)?.contexts[cid]
+}
+
+export const hasManifestWorkerContexts = (config: unknown): boolean => {
+  const envelope = readManifestWorkerContextEnvelope(config)
+  return envelope !== undefined && Object.keys(envelope.contexts).length > 0
+}
+
+const readManifestWorkerContextEnvelope = (
+  config: unknown,
+): ManifestWorkerContextEnvelope | undefined => {
   if (!config || typeof config !== 'object') {
     return undefined
   }
   const value = (config as Record<string, unknown>)[MANIFEST_WORKER_CONFIG_KEY]
-  if (!value || typeof value !== 'object') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined
+  }
+  const envelope = value as Partial<ManifestWorkerContextEnvelope>
+  if (
+    envelope.version !== 1 ||
+    !envelope.contexts ||
+    typeof envelope.contexts !== 'object' ||
+    Array.isArray(envelope.contexts)
+  ) {
+    return undefined
+  }
+
+  const contexts = envelope.contexts as Record<string, unknown>
+  for (const [cid, contextValue] of Object.entries(contexts)) {
+    if (!cid || !isManifestWorkerContext(contextValue)) {
+      return undefined
+    }
+  }
+  return envelope as ManifestWorkerContextEnvelope
+}
+
+const isManifestWorkerContext = (
+  value: unknown,
+): value is ManifestWorkerContext => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
   }
   const attempt = (value as Partial<ManifestWorkerContext>).specFileRetryAttempt
-  if (!Number.isInteger(attempt) || (attempt ?? -1) < 0) {
-    return undefined
-  }
-  return { specFileRetryAttempt: attempt as number }
+  return Number.isInteger(attempt) && (attempt ?? -1) >= 0
 }
 
 export class ManifestWorkerRecorder {

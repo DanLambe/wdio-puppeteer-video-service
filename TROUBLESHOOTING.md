@@ -1,5 +1,17 @@
 # Troubleshooting
 
+## WDIO launcher context is missing or malformed
+
+Register the service by package name:
+
+```typescript
+services: [['puppeteer-video', options]]
+```
+
+Do not import the worker class into `services`. WDIO only discovers the
+package's named launcher export when resolving a string or module path, and the
+service rejects class-based registration before browser startup.
+
 ## No recording is created
 
 - Confirm Chrome or Edge exposes CDP and the session is classified as
