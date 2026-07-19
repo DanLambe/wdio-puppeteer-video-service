@@ -692,46 +692,19 @@ const parseJournals = async (
   const diagnostics: ManifestDiagnostic[] = []
   const tools: Partial<ManifestToolVersions> = {}
 
-  for (const journalName of journalNames.sort()) {
+  for (const journalName of journalNames.toSorted((left, right) =>
+    left.localeCompare(right),
+  )) {
     if (!journalName.endsWith('.jsonl')) {
       continue
     }
-    const journalPath = path.join(journalDir, journalName)
-    const content = await fs.readFile(journalPath, 'utf8')
-    const lines = content.split('\n')
-    const lastNonEmptyIndex = lines.findLastIndex(
-      (line) => line.trim().length > 0,
+    await collectJournalFile(
+      path.join(journalDir, journalName),
+      context,
+      entries,
+      diagnostics,
+      tools,
     )
-    for (const [index, line] of lines.entries()) {
-      if (!line.trim()) {
-        continue
-      }
-      const event = parseJournalEvent(line)
-      if (!event) {
-        diagnostics.push({
-          code:
-            index === lastNonEmptyIndex
-              ? 'malformed-final-journal-line'
-              : 'invalid-journal-entry',
-          journal: normalizeManifestPath(journalPath, context.outputDir),
-          line: index + 1,
-        })
-        continue
-      }
-      if (event.type === 'tools') {
-        Object.assign(tools, event.tools)
-        continue
-      }
-      if (isValidManifestEntry(event.entry, context)) {
-        entries.set(event.entry.id, event.entry)
-      } else {
-        diagnostics.push({
-          code: 'invalid-journal-entry',
-          journal: normalizeManifestPath(journalPath, context.outputDir),
-          line: index + 1,
-        })
-      }
-    }
   }
 
   return {
@@ -741,6 +714,78 @@ const parseJournals = async (
     ),
     tools,
   }
+}
+
+const collectJournalFile = async (
+  journalPath: string,
+  context: ManifestRunContext,
+  entries: Map<string, ManifestEntryV1>,
+  diagnostics: ManifestDiagnostic[],
+  tools: Partial<ManifestToolVersions>,
+): Promise<void> => {
+  const content = await fs.readFile(journalPath, 'utf8')
+  const lines = content.split('\n')
+  const lastNonEmptyIndex = lines.findLastIndex(
+    (line) => line.trim().length > 0,
+  )
+  for (const [index, line] of lines.entries()) {
+    collectJournalLine({
+      context,
+      diagnostics,
+      entries,
+      index,
+      journalPath,
+      lastNonEmptyIndex,
+      line,
+      tools,
+    })
+  }
+}
+
+const collectJournalLine = (options: {
+  context: ManifestRunContext
+  diagnostics: ManifestDiagnostic[]
+  entries: Map<string, ManifestEntryV1>
+  index: number
+  journalPath: string
+  lastNonEmptyIndex: number
+  line: string
+  tools: Partial<ManifestToolVersions>
+}): void => {
+  if (!options.line.trim()) {
+    return
+  }
+  const event = parseJournalEvent(options.line)
+  if (!event) {
+    options.diagnostics.push({
+      code:
+        options.index === options.lastNonEmptyIndex
+          ? 'malformed-final-journal-line'
+          : 'invalid-journal-entry',
+      journal: normalizeManifestPath(
+        options.journalPath,
+        options.context.outputDir,
+      ),
+      line: options.index + 1,
+    })
+    return
+  }
+  if (event.type === 'tools') {
+    Object.assign(options.tools, event.tools)
+    return
+  }
+  if (isValidManifestEntry(event.entry, options.context)) {
+    options.entries.set(event.entry.id, event.entry)
+    return
+  }
+  options.diagnostics.push({
+    code: 'invalid-journal-entry',
+    journal: normalizeManifestPath(
+      options.journalPath,
+      options.context.outputDir,
+    ),
+    line: options.index + 1,
+  })
 }
 
 const parseJournalEvent = (line: string): ManifestJournalEvent | undefined => {
@@ -904,9 +949,8 @@ const cleanupStaleManifestLock = async (lockPath: string): Promise<boolean> => {
   ])
   if (
     currentContents !== contents ||
-    !currentStats ||
-    currentStats.ino !== stats.ino ||
-    currentStats.mtimeMs !== stats.mtimeMs
+    currentStats?.ino !== stats.ino ||
+    currentStats?.mtimeMs !== stats.mtimeMs
   ) {
     return false
   }
@@ -968,7 +1012,7 @@ const sanitizeJournalToken = (value: string): string => {
 const sanitizePathComponent = (value: string): string => {
   let sanitized = ''
   for (const character of value) {
-    sanitized += character.charCodeAt(0) <= 31 ? '_' : character
+    sanitized += (character.codePointAt(0) ?? 0) <= 31 ? '_' : character
   }
   return sanitized || 'unknown'
 }

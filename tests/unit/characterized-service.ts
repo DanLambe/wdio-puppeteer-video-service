@@ -239,12 +239,7 @@ const createNamingOptions = (
 ): ArtifactNamingOptions => {
   const naming: ArtifactNamingOptions = {}
   if (source.fileNameStyle !== undefined) {
-    naming.style =
-      source.fileNameStyle === 'testFull'
-        ? 'test-full'
-        : source.fileNameStyle === 'sessionFull'
-          ? 'session-full'
-          : source.fileNameStyle
+    naming.style = toPublicNameStyle(source.fileNameStyle)
   }
   if (source.maxFileNameLength !== undefined) {
     naming.maxLength = source.maxFileNameLength
@@ -253,4 +248,16 @@ const createNamingOptions = (
     naming.overflow = source.fileNameOverflowStrategy
   }
   return naming
+}
+
+const toPublicNameStyle = (
+  style: NonNullable<CharacterizedServiceOptions['fileNameStyle']>,
+): NonNullable<ArtifactNamingOptions['style']> => {
+  if (style === 'testFull') {
+    return 'test-full'
+  }
+  if (style === 'sessionFull') {
+    return 'session-full'
+  }
+  return style
 }

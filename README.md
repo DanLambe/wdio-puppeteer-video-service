@@ -152,7 +152,7 @@ Top-level options:
 - `outputDir` (default `'videos'`): generated artifact directory.
 - `profile` (`'default' | 'parallel' | 'ci'`, default `'default'`): grouped preset. Explicit values always win.
 - `logLevel` (`'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'`): inherits WDIO when omitted, with a `'warn'` fallback.
-- `failurePolicy` (`'warn' | 'error'`, default `'warn'`): post-processing failures warn or throw only after slots and temporary files are cleaned up and source media is preserved.
+- `failurePolicy` (`'warn' | 'error'`, default `'warn'`): recording, post-processing, manifest, report, and integration failures warn or throw only after applicable cleanup finishes and recoverable source media is preserved.
 
 `recording`:
 
@@ -193,11 +193,13 @@ Top-level options:
 - `postProcessStartTimeoutMs` (default `2500`).
 
 Recording and post-processing use separate in-process and cross-worker slot
-pools. Global slots carry heartbeats so an exited worker does not permanently
-consume capacity. Capture paths are exclusively reserved, while merge and
-transcode outputs are decoded from unique temporary files and atomically
-published only after validation. A failed or timed-out operation keeps its
-source recordings and removes partial output.
+pools. Global slots carry heartbeats, but a lease owned by a live process is
+never reclaimed solely because its heartbeat expired. Dead owners are reclaimed
+immediately; malformed lock files are reclaimed only after an invalid-file grace
+period. Capture paths are exclusively reserved, while merge and transcode
+outputs are decoded from unique temporary files and atomically published only
+after validation. A failed or timed-out operation keeps its source recordings
+and removes partial output.
 
 `artifacts.naming`:
 
@@ -332,6 +334,8 @@ import {
 Manifest v1 validators intentionally accept unknown fields: additive optional
 fields are minor-compatible. Removing a field, changing required semantics, or
 changing an existing enum meaning requires a package major release.
+Timestamp fields accept ISO 8601 UTC (`Z`) or numeric-offset values, with or
+without fractional seconds.
 
 ## Static HTML Reporter
 

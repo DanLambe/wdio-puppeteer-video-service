@@ -525,6 +525,7 @@ export const config: WebdriverIO.Config = {
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,
+    retries: mode === 'retry' ? 1 : 0,
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)

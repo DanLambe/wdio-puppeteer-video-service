@@ -1,9 +1,16 @@
 import type {
+  AllureIntegrationOptions,
   ArtifactNameStyle,
+  ConcurrencyOptions,
   InternalArtifactNameStyle,
+  InternalPostProcessMode,
+  InternalRecordingStartMode,
   LogLevel,
   ProcessingMergeOptions,
+  ProcessingOptions,
+  RecordingOptions,
   ResolvedWdioPuppeteerVideoServiceOptions,
+  ServiceProfile,
   WdioPuppeteerVideoServiceOptions,
 } from '../types.js'
 import {
@@ -38,10 +45,7 @@ export const resolveServiceConfiguration = (
   const allure = options.integrations?.allure
   const profile = options.profile ?? 'default'
   const retain = recording.retain ?? 'failures'
-  const platformMaxFilenameLength =
-    platform === 'win32'
-      ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
-      : DEFAULT_MAX_FILENAME_LENGTH
+  const platformMaxFilenameLength = resolvePlatformMaxFilenameLength(platform)
 
   const ciPinnedWarnLogLevel =
     profile === 'ci' && options.logLevel === undefined
@@ -62,51 +66,41 @@ export const resolveServiceConfiguration = (
     concurrency.lockDir,
   )
   const ffmpegPath = normalization.normalizeOptionalDir(processing.ffmpeg?.path)
+  const resolvedAllure = resolveAllureOptions(allure)
 
   const resolvedOptions: ResolvedWdioPuppeteerVideoServiceOptions = {
     outputDir: normalization.normalizeOutputDir(options.outputDir),
     recordingRetain: retain,
     captureViewport: capture.viewport ?? 'current',
-    fps: capture.fps ?? (profile === 'default' ? 30 : 24),
+    fps: capture.fps ?? resolveProfileFps(profile),
     captureQuality: capture.quality ?? 30,
     captureScale: capture.scale ?? 1,
     captureSpeed: capture.speed ?? 1,
-    framePriming:
-      capture.framePriming === undefined
-        ? profile !== 'ci'
-        : capture.framePriming,
+    framePriming: capture.framePriming ?? profile !== 'ci',
     puppeteerConnectionTimeoutMs:
       capture.connectionTimeoutMs ?? DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
     recordOnRetries: recording.attempts === 'retries',
     specLevelRecording: recording.scope === 'spec',
-    segmentOnWindowSwitch:
-      recording.windowChanges === undefined
-        ? profile !== 'ci'
-        : recording.windowChanges === 'segment',
+    segmentOnWindowSwitch: resolveWindowSegmentation(recording, profile),
     maxConcurrentRecordings: concurrency.maxRecordingsPerProcess ?? 0,
     maxGlobalRecordings: concurrency.maxRecordingsGlobal ?? 0,
-    recordingStartMode:
-      (concurrency.startMode ??
-        (profile === 'ci' ? 'fast-fail' : 'blocking')) === 'fast-fail'
-        ? 'fastFail'
-        : 'blocking',
+    recordingStartMode: resolveRecordingStartMode(
+      concurrency.startMode,
+      profile === 'ci' ? 'fast-fail' : 'blocking',
+    ),
     recordingStartTimeoutMs:
       concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
     maxConcurrentPostProcesses: concurrency.maxPostProcessesPerProcess ?? 0,
     maxGlobalPostProcesses:
       concurrency.maxPostProcessesGlobal ?? (profile === 'ci' ? 1 : 0),
-    postProcessStartMode:
-      (concurrency.postProcessStartMode ?? 'blocking') === 'fast-fail'
-        ? 'fastFail'
-        : 'blocking',
+    postProcessStartMode: resolveRecordingStartMode(
+      concurrency.postProcessStartMode,
+      'blocking',
+    ),
     postProcessStartTimeoutMs:
       concurrency.postProcessStartTimeoutMs ??
       DEFAULT_RECORDING_START_TIMEOUT_MS,
-    postProcessMode:
-      (processing.timing ??
-        (profile === 'ci' ? 'after-worker' : 'after-test')) === 'after-worker'
-        ? 'deferred'
-        : 'immediate',
+    postProcessMode: resolvePostProcessMode(processing, profile),
     includeSpecPatterns: normalization.normalizePatternList(
       filters.includeSpecs,
     ),
@@ -125,16 +119,7 @@ export const resolveServiceConfiguration = (
     mp4Mode: processing.mp4Mode ?? 'auto',
     transcode,
     mergeSegments,
-    ...(allure
-      ? {
-          allure: {
-            attach: allure.attach ?? 'failures',
-            ...(allure.maxBytes === undefined
-              ? {}
-              : { maxBytes: allure.maxBytes }),
-          },
-        }
-      : {}),
+    ...(resolvedAllure ? { allure: resolvedAllure } : {}),
     ...(capture.crop ? { captureCrop: capture.crop } : {}),
     ...(globalRecordingLockDir ? { globalRecordingLockDir } : {}),
     ...(ffmpegPath ? { ffmpegPath } : {}),
@@ -148,6 +133,59 @@ export const resolveServiceConfiguration = (
       platform,
     ),
     options: resolvedOptions,
+  }
+}
+
+const resolvePlatformMaxFilenameLength = (
+  platform: NodeJS.Platform,
+): number => {
+  return platform === 'win32'
+    ? WINDOWS_DEFAULT_MAX_FILENAME_LENGTH
+    : DEFAULT_MAX_FILENAME_LENGTH
+}
+
+const resolveProfileFps = (profile: ServiceProfile): number => {
+  return profile === 'default' ? 30 : 24
+}
+
+const resolveWindowSegmentation = (
+  recording: RecordingOptions,
+  profile: ServiceProfile,
+): boolean => {
+  if (recording.windowChanges === undefined) {
+    return profile !== 'ci'
+  }
+  return recording.windowChanges === 'segment'
+}
+
+const resolveRecordingStartMode = (
+  configuredMode: ConcurrencyOptions['startMode'],
+  defaultMode: NonNullable<ConcurrencyOptions['startMode']>,
+): InternalRecordingStartMode => {
+  return (configuredMode ?? defaultMode) === 'fast-fail'
+    ? 'fastFail'
+    : 'blocking'
+}
+
+const resolvePostProcessMode = (
+  processing: ProcessingOptions,
+  profile: ServiceProfile,
+): InternalPostProcessMode => {
+  const defaultTiming = profile === 'ci' ? 'after-worker' : 'after-test'
+  return (processing.timing ?? defaultTiming) === 'after-worker'
+    ? 'deferred'
+    : 'immediate'
+}
+
+const resolveAllureOptions = (
+  allure: AllureIntegrationOptions | undefined,
+): ResolvedWdioPuppeteerVideoServiceOptions['allure'] => {
+  if (!allure) {
+    return undefined
+  }
+  return {
+    attach: allure.attach ?? 'failures',
+    ...(allure.maxBytes === undefined ? {} : { maxBytes: allure.maxBytes }),
   }
 }
 

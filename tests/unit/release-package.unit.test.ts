@@ -1,9 +1,13 @@
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   assertPackageMetadata,
   parsePackResult,
 } from '../../scripts/check-packed-consumer.js'
-import { assertCycloneDxBom } from '../../scripts/generate-sbom.js'
+import {
+  assertCycloneDxBom,
+  resolveReleaseOutputPath,
+} from '../../scripts/generate-sbom.js'
 
 describe('release package validation', () => {
   it('accepts the exact ESM export map', () => {
@@ -99,5 +103,18 @@ describe('release package validation', () => {
         expectedPackage,
       ),
     ).toThrow('does not match')
+  })
+
+  it('keeps generated release output inside the repository', () => {
+    const repositoryRoot = path.resolve('repository-root')
+    expect(
+      resolveReleaseOutputPath(repositoryRoot, 'artifacts/sbom.json'),
+    ).toBe(path.join(repositoryRoot, 'artifacts', 'sbom.json'))
+    expect(() => resolveReleaseOutputPath(repositoryRoot, '.')).toThrow(
+      'inside the repository',
+    )
+    expect(() => resolveReleaseOutputPath(repositoryRoot, '..')).toThrow(
+      'inside the repository',
+    )
   })
 })

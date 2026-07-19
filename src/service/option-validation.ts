@@ -396,7 +396,9 @@ const validateIntegrationCompatibility = (root: OptionRecord): void => {
 }
 
 const assertKnownRootOptions = (options: OptionRecord): void => {
-  for (const key of Object.keys(options).sort()) {
+  for (const key of Object.keys(options).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
     if ((ROOT_OPTIONS as readonly string[]).includes(key)) {
       continue
     }
@@ -419,7 +421,9 @@ const assertKnownOptions = (
   path: string,
   allowed: readonly string[],
 ): void => {
-  for (const key of Object.keys(options).sort()) {
+  for (const key of Object.keys(options).sort((left, right) =>
+    left.localeCompare(right),
+  )) {
     if (!allowed.includes(key)) {
       const supported = allowed.length > 0 ? allowed.join(', ') : '(none yet)'
       throw new TypeError(

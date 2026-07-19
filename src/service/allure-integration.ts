@@ -142,13 +142,7 @@ export class AllureVideoIntegration {
 
   private getApi(): Promise<AllureAttachmentApi> {
     this.apiTask ??= this.loadModule().then((module) => {
-      const defaultExport = module.default
-      const candidate =
-        hasAddAttachment(defaultExport) && defaultExport
-          ? defaultExport
-          : hasAddAttachment(module)
-            ? module
-            : undefined
+      const candidate = resolveAllureApi(module)
       if (!candidate) {
         throw new TypeError(
           '@wdio/allure-reporter does not expose addAttachment',
@@ -166,6 +160,18 @@ export class AllureVideoIntegration {
     this.log('warn', error.message, cause)
     return { attachedPaths: [], error }
   }
+}
+
+const resolveAllureApi = (
+  module: AllureModule,
+): AllureAttachmentApi | undefined => {
+  if (hasAddAttachment(module.default)) {
+    return module.default
+  }
+  if (hasAddAttachment(module)) {
+    return module
+  }
+  return undefined
 }
 
 const hasAddAttachment = (value: unknown): value is AllureAttachmentApi => {

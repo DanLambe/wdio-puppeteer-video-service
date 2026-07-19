@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -215,7 +216,11 @@ describe('ffmpeg runner process handling', () => {
       terminateFfmpegProcessTree(ffmpegProcess, true)
 
       expect(spawnMock).toHaveBeenCalledWith(
-        'taskkill',
+        path.join(
+          globalThis.process.env.SystemRoot ?? String.raw`C:\Windows`,
+          'System32',
+          'taskkill.exe',
+        ),
         ['/PID', '4321', '/T', '/F'],
         { stdio: 'ignore', windowsHide: true },
       )

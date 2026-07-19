@@ -41,7 +41,7 @@ export class Utf8TailBuffer {
       }
 
       let sliceStart = excess
-      const nextCodeUnit = first.charCodeAt(sliceStart)
+      const nextCodeUnit = first.codePointAt(sliceStart) ?? 0
       if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
         sliceStart += 1
       }

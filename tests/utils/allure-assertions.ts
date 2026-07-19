@@ -139,11 +139,14 @@ const findMediaFiles = async (
 }
 
 const mimeTypeFor = (fileName: string): string => {
-  return path.extname(fileName).toLowerCase() === '.mp4'
-    ? 'video/mp4'
-    : path.extname(fileName).toLowerCase() === '.webm'
-      ? 'video/webm'
-      : ''
+  const extension = path.extname(fileName).toLowerCase()
+  if (extension === '.mp4') {
+    return 'video/mp4'
+  }
+  if (extension === '.webm') {
+    return 'video/webm'
+  }
+  return ''
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {

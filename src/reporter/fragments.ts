@@ -78,7 +78,9 @@ export const readReporterFragments = async (
   })
   const fragments: ReporterFragmentV1[] = []
   const invalidFiles: string[] = []
-  for (const fileName of fileNames.sort()) {
+  for (const fileName of fileNames.sort((left, right) =>
+    left.localeCompare(right),
+  )) {
     if (!fileName.endsWith('.json')) {
       continue
     }
@@ -197,6 +199,13 @@ const isReporterStatus = (value: unknown): boolean => {
 }
 
 const sanitizeFileToken = (value: string): string => {
-  const token = value.replace(/[^a-z0-9._-]+/giu, '_').replace(/^_+|_+$/gu, '')
+  const token = trimBoundaryUnderscores(value.replace(/[^a-z0-9._-]+/giu, '_'))
   return token || 'unknown'
+}
+
+const trimBoundaryUnderscores = (value: string): string => {
+  const segments = value.split('_')
+  return segments
+    .slice(segments.findIndex(Boolean), segments.findLastIndex(Boolean) + 1)
+    .join('_')
 }

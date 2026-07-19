@@ -70,10 +70,31 @@ export const generateSbom = async (outputPath: string): Promise<void> => {
 
   const bom = JSON.parse(result.stdout) as unknown
   assertCycloneDxBom(bom, packageMetadata)
-  const absoluteOutputPath = path.resolve(repositoryRoot, outputPath)
+  const absoluteOutputPath = resolveReleaseOutputPath(
+    repositoryRoot,
+    outputPath,
+  )
   const temporaryPath = `${absoluteOutputPath}.${process.pid.toString()}.tmp`
   await fs.writeFile(temporaryPath, `${JSON.stringify(bom, null, 2)}\n`, 'utf8')
   await fs.rename(temporaryPath, absoluteOutputPath)
+}
+
+export const resolveReleaseOutputPath = (
+  repositoryRoot: string,
+  outputPath: string,
+): string => {
+  const resolvedRoot = path.resolve(repositoryRoot)
+  const resolvedOutput = path.resolve(resolvedRoot, outputPath)
+  const relativeOutput = path.relative(resolvedRoot, resolvedOutput)
+  if (
+    relativeOutput.length === 0 ||
+    relativeOutput === '..' ||
+    relativeOutput.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeOutput)
+  ) {
+    throw new TypeError('SBOM output path must be inside the repository')
+  }
+  return resolvedOutput
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {

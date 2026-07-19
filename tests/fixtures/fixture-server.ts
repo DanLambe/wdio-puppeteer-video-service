@@ -80,7 +80,7 @@ const closeServer = async (server: Server): Promise<void> => {
 
 const createCrossOriginServer = (): Server => {
   return createServer((request, response) => {
-    const pathname = new URL(request.url ?? '/', 'http://fixture.invalid')
+    const pathname = new URL(request.url ?? '/', 'https://fixture.invalid')
       .pathname
     if (pathname !== '/frame-content') {
       sendNotFound(response)
@@ -99,7 +99,7 @@ const createCrossOriginServer = (): Server => {
 
 const createPrimaryServer = (crossOriginUrl: string): Server => {
   return createServer((request, response) => {
-    const pathname = new URL(request.url ?? '/', 'http://fixture.invalid')
+    const pathname = new URL(request.url ?? '/', 'https://fixture.invalid')
       .pathname
 
     switch (pathname) {

@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process'
+import path from 'node:path'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import { FFMPEG_TERMINATION_GRACE_MS } from './constants.js'
 import type { ServiceLogger } from './logging.js'
@@ -59,7 +60,7 @@ export class FfmpegProcessRegistry {
   }
 
   terminateAll(): void {
-    for (const process of [...this.activeProcesses]) {
+    for (const process of this.activeProcesses) {
       process.terminate()
     }
   }
@@ -82,8 +83,13 @@ export const terminateFfmpegProcessTree: TerminateFfmpegProcessTree = (
 ): void => {
   const pid = ffmpegProcess.pid
   if (pid && process.platform === 'win32') {
+    const taskkillPath = path.join(
+      process.env.SystemRoot ?? String.raw`C:\Windows`,
+      'System32',
+      'taskkill.exe',
+    )
     const terminator = spawn(
-      'taskkill',
+      taskkillPath,
       ['/PID', pid.toString(), '/T', ...(force ? ['/F'] : [])],
       {
         stdio: 'ignore',

@@ -1,8 +1,6 @@
 let retryAttempt = 0
 
-describe('Advanced E2E - Retry Recording', function () {
-  this.retries(1)
-
+describe('Advanced E2E - Retry Recording', () => {
   it('should record only when retry attempt executes', async () => {
     retryAttempt += 1
 

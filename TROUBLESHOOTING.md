@@ -24,7 +24,9 @@ the operation is demonstrably healthy but slow.
 ## Recording capacity is exhausted
 
 Inspect `concurrency` recording and post-processing limits independently.
-Cross-worker lock files carry heartbeats and stale owners are reclaimed. Keep
+Cross-worker lock files carry heartbeats. A lease with a live owner PID is kept
+even when its heartbeat is old; dead owners are reclaimed immediately, while
+malformed locks must exceed the invalid-file grace period. Keep
 `concurrency.lockDir` on storage shared by the participating local workers.
 
 ## Allure has no video

@@ -22,12 +22,19 @@ const filterMode = process.env.WDIO_CUCUMBER_FILTER_MODE as
 // shape the service recognizes. Preserve that behavior until the filter API
 // and its framework adapters are intentionally revised in a later chunk.
 const expectZeroVideos = filterMode === 'include-tag'
-const serviceFilterOptions =
-  filterMode === 'include-tag'
-    ? { includeTags: ['@recordable'] }
-    : filterMode === 'exclude-tag'
-      ? { excludeTags: ['@recordable'] }
-      : {}
+
+const resolveServiceFilterOptions = (
+  mode: CucumberFilterMode | undefined,
+): { includeTags?: string[]; excludeTags?: string[] } => {
+  if (mode === 'include-tag') {
+    return { includeTags: ['@recordable'] }
+  }
+  if (mode === 'exclude-tag') {
+    return { excludeTags: ['@recordable'] }
+  }
+  return {}
+}
+const serviceFilterOptions = resolveServiceFilterOptions(filterMode)
 
 export const config: WebdriverIO.Config = {
   runner: 'local',

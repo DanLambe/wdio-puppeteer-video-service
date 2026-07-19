@@ -27,10 +27,12 @@ const defaultSpawnProcess = (command: string, args: string[]): ChildProcess => {
 }
 
 const parseContainer = (output: string): MediaContainer => {
-  const formatMatch = /Input #0,\s*([^,\r\n]+(?:,[^\r\n]+)?),\s*from/.exec(
-    output,
-  )
-  const format = formatMatch?.[1]?.toLowerCase() ?? ''
+  const inputLine = output
+    .split(/\r?\n/u)
+    .find((line) => line.includes('Input #0,') && line.includes(', from'))
+  const format = readBetween(inputLine ?? '', 'Input #0,', ', from')
+    .trim()
+    .toLowerCase()
   if (format.includes('webm') || format.includes('matroska')) {
     return 'webm'
   }
@@ -61,19 +63,32 @@ const parseDurationSeconds = (output: string): number => {
 const parseVideoStream = (
   output: string,
 ): Pick<MediaProbeResult, 'codec' | 'width' | 'height'> => {
-  const streamMatch =
-    /Video:\s*([a-zA-Z0-9_-]+)[^\r\n]*?\b(\d{2,5})x(\d{2,5})\b/.exec(output)
-  if (!streamMatch) {
+  const videoLine = output
+    .split(/\r?\n/u)
+    .find((line) => line.includes('Video:'))
+  const codecMatch = /Video:\s*([a-zA-Z0-9_-]+)/u.exec(videoLine ?? '')
+  const dimensionsMatch = /\b(\d{2,5})x(\d{2,5})\b/u.exec(videoLine ?? '')
+  if (!codecMatch || !dimensionsMatch) {
     throw new Error(
       'Unable to determine video stream details from FFmpeg output',
     )
   }
 
   return {
-    codec: streamMatch[1]?.toLowerCase() ?? '',
-    width: Number(streamMatch[2]),
-    height: Number(streamMatch[3]),
+    codec: codecMatch[1]?.toLowerCase() ?? '',
+    width: Number(dimensionsMatch[1]),
+    height: Number(dimensionsMatch[2]),
   }
+}
+
+const readBetween = (value: string, start: string, end: string): string => {
+  const startIndex = value.indexOf(start)
+  if (startIndex < 0) {
+    return ''
+  }
+  const contentStart = startIndex + start.length
+  const endIndex = value.indexOf(end, contentStart)
+  return endIndex < 0 ? '' : value.slice(contentStart, endIndex)
 }
 
 const parseFrameCount = (output: string): number => {
@@ -160,9 +175,10 @@ export const probeMediaFile = async (
     child.once('close', (code) => {
       if (code !== 0) {
         const details = stderr.trim().slice(-2_000)
+        const detailsSuffix = details ? `: ${details}` : ''
         settle(
           new Error(
-            `Media decode failed for ${filePath} with FFmpeg exit code ${String(code)}${details ? `: ${details}` : ''}`,
+            `Media decode failed for ${filePath} with FFmpeg exit code ${String(code)}${detailsSuffix}`,
           ),
         )
         return

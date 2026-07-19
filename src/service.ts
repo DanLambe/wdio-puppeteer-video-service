@@ -41,6 +41,7 @@ import {
   aggregateManifestRun,
   assignManifestRunContext,
   assignManifestWorkerContext,
+  type CompleteManifestEntryOptions,
   createManifestRunContext,
   type ManifestCaptureDimensions,
   type ManifestRunContext,
@@ -87,6 +88,16 @@ const replaceFileExtension = (
 ): string => {
   const parsed = path.parse(filePath)
   return path.join(parsed.dir, `${parsed.name}.${format}`)
+}
+
+const resolveManifestTestResult = (
+  pending: boolean,
+  passed: boolean,
+): 'failed' | 'passed' | 'skipped' => {
+  if (pending) {
+    return 'skipped'
+  }
+  return passed ? 'passed' : 'failed'
 }
 
 /**
@@ -520,7 +531,7 @@ export default class WdioPuppeteerVideoService
     result: Frameworks.TestResult,
   ): Promise<void> {
     await this._recordManifestResultAndFinalize(
-      test.pending ? 'skipped' : result.passed ? 'passed' : 'failed',
+      resolveManifestTestResult(!!test.pending, result.passed),
       result.passed,
     )
   }
@@ -1477,30 +1488,14 @@ export default class WdioPuppeteerVideoService
       })
       const paths = [...this._recordedSegments]
       const deferred = this._deferredPostProcessTasks.length > deferredTaskCount
-      const processingConfigured =
-        this._options.mergeSegments?.enabled || this._options.transcode?.enabled
-      await this._manifestRecorder?.completeCurrent({
-        decision: keepArtifacts
-          ? paths.length > 0
-            ? 'recorded'
-            : 'failed'
-          : 'discarded',
-        result: passed ? 'passed' : 'failed',
-        paths,
-        ...(!keepArtifacts ? { reason: 'retention-policy' } : {}),
-        processingOutcome: deferred
-          ? 'pending'
-          : keepArtifacts && processingConfigured
-            ? 'completed'
-            : keepArtifacts
-              ? 'not-required'
-              : 'skipped',
-        ...(this._options.mergeSegments?.enabled
-          ? { processingOperation: 'merge' as const }
-          : this._options.transcode?.enabled
-            ? { processingOperation: 'transcode' as const }
-            : {}),
-      })
+      await this._manifestRecorder?.completeCurrent(
+        this._createCompletedManifestOptions({
+          deferred,
+          keepArtifacts,
+          passed,
+          paths,
+        }),
+      )
       const allureResult = await this._allureIntegration?.attachRetainedVideos(
         paths,
         passed,
@@ -1524,6 +1519,56 @@ export default class WdioPuppeteerVideoService
     if (allureError && this._options.failurePolicy === 'error') {
       throw allureError
     }
+  }
+
+  private _createCompletedManifestOptions(options: {
+    deferred: boolean
+    keepArtifacts: boolean
+    passed: boolean
+    paths: string[]
+  }): CompleteManifestEntryOptions {
+    let decision: CompleteManifestEntryOptions['decision'] = 'discarded'
+    if (options.keepArtifacts) {
+      decision = options.paths.length > 0 ? 'recorded' : 'failed'
+    }
+
+    let processingOutcome: CompleteManifestEntryOptions['processingOutcome'] =
+      'skipped'
+    if (options.deferred) {
+      processingOutcome = 'pending'
+    } else if (options.keepArtifacts) {
+      processingOutcome = this._isPostProcessingConfigured()
+        ? 'completed'
+        : 'not-required'
+    }
+
+    const processingOperation = this._resolveProcessingOperation()
+    return {
+      decision,
+      result: options.passed ? 'passed' : 'failed',
+      paths: options.paths,
+      ...(!options.keepArtifacts ? { reason: 'retention-policy' } : {}),
+      processingOutcome,
+      ...(processingOperation ? { processingOperation } : {}),
+    }
+  }
+
+  private _isPostProcessingConfigured(): boolean {
+    return !!(
+      this._options.mergeSegments?.enabled || this._options.transcode?.enabled
+    )
+  }
+
+  private _resolveProcessingOperation():
+    | CompleteManifestEntryOptions['processingOperation']
+    | undefined {
+    if (this._options.mergeSegments?.enabled) {
+      return 'merge'
+    }
+    if (this._options.transcode?.enabled) {
+      return 'transcode'
+    }
+    return undefined
   }
 
   private async _stopRecording(): Promise<void> {

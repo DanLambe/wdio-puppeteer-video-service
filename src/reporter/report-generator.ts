@@ -249,14 +249,14 @@ const testIdentityMatches = (
     outcome.test.fullName ?? outcome.test.name,
   )
   const entryNames = [entryFullName, normalizeIdentity(entry.test.name)]
-  const outcomeNames = [
+  const outcomeNames = new Set([
     outcomeFullName,
     normalizeIdentity(outcome.test.name),
     ...(outcome.test.containerName
       ? [normalizeIdentity(outcome.test.containerName)]
       : []),
-  ]
-  return entryNames.some((entryName) => outcomeNames.includes(entryName))
+  ])
+  return entryNames.some((entryName) => outcomeNames.has(entryName))
 }
 
 const createReportItem = (

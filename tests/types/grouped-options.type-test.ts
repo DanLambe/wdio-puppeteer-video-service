@@ -60,28 +60,28 @@ const validOptions = {
   failurePolicy: 'error',
 } satisfies WdioPuppeteerVideoServiceOptions
 
-new WdioPuppeteerVideoService(validOptions)
+export const groupedOptionsService = new WdioPuppeteerVideoService(validOptions)
 
-const removedBetaOption = {
+export const removedBetaOption = {
   // @ts-expect-error The 1.0 API does not retain flat beta aliases.
   saveAllVideos: true,
 } satisfies WdioPuppeteerVideoServiceOptions
 
-const invalidRecordingScope = {
+export const invalidRecordingScope = {
   recording: {
     // @ts-expect-error Recording scope is test or spec.
     scope: 'suite',
   },
 } satisfies WdioPuppeteerVideoServiceOptions
 
-const unknownNestedOption = {
+export const unknownNestedOption = {
   capture: {
     // @ts-expect-error Unknown grouped keys are rejected.
     bitrate: 5000,
   },
 } satisfies WdioPuppeteerVideoServiceOptions
 
-const invalidAllureMode = {
+export const invalidAllureMode = {
   integrations: {
     allure: {
       // @ts-expect-error Allure attachments are failures-only or retained.
@@ -89,8 +89,3 @@ const invalidAllureMode = {
     },
   },
 } satisfies WdioPuppeteerVideoServiceOptions
-
-void removedBetaOption
-void invalidRecordingScope
-void unknownNestedOption
-void invalidAllureMode

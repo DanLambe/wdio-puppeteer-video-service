@@ -35,8 +35,13 @@ export const assertPackageMetadata = (value: unknown): void => {
     throw new Error('Packed package must define an export map')
   }
 
-  const exportNames = Object.keys(metadata.exports).sort()
-  if (exportNames.join(',') !== [...EXPECTED_EXPORTS.keys()].sort().join(',')) {
+  const exportNames = Object.keys(metadata.exports).sort((left, right) =>
+    left.localeCompare(right),
+  )
+  const expectedExportNames = [...EXPECTED_EXPORTS.keys()].sort((left, right) =>
+    left.localeCompare(right),
+  )
+  if (exportNames.join(',') !== expectedExportNames.join(',')) {
     throw new Error(`Unexpected package exports: ${exportNames.join(', ')}`)
   }
 
@@ -55,11 +60,7 @@ export const assertPackageMetadata = (value: unknown): void => {
 
 export const parsePackResult = (output: string): string => {
   const result = JSON.parse(output) as unknown
-  const packMetadata = Array.isArray(result)
-    ? result[0]
-    : isRecord(result)
-      ? Object.values(result)[0]
-      : undefined
+  const packMetadata = readFirstPackMetadata(result)
   if (!isRecord(packMetadata)) {
     throw new Error('npm pack did not return package metadata')
   }
@@ -68,6 +69,16 @@ export const parsePackResult = (output: string): string => {
     throw new Error('npm pack did not return a tarball filename')
   }
   return filename
+}
+
+const readFirstPackMetadata = (result: unknown): unknown => {
+  if (Array.isArray(result)) {
+    return result[0]
+  }
+  if (isRecord(result)) {
+    return Object.values(result)[0]
+  }
+  return undefined
 }
 
 const runChecked = (command: string, args: string[], cwd: string): string => {

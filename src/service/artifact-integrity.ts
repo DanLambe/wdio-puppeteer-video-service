@@ -228,9 +228,8 @@ const cleanupStaleReservation = async (
   ])
   if (
     currentContents !== contents ||
-    !currentStats ||
-    currentStats.ino !== stats.ino ||
-    currentStats.mtimeMs !== stats.mtimeMs
+    currentStats?.ino !== stats.ino ||
+    currentStats?.mtimeMs !== stats.mtimeMs
   ) {
     return false
   }

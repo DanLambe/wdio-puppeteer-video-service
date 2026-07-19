@@ -115,38 +115,59 @@ const assertMediaIntegrity = async (
   for (const file of mediaFiles) {
     const filePath = path.join(resultsDir, file)
     const probe = await probeMediaFile(ffmpegPath, filePath)
-    const expectedContainer = file.endsWith('.mp4') ? 'mp4' : 'webm'
+    assertProbeMatches(file, probe, {
+      expectedCodec,
+      expectedHeight,
+      expectedWidth,
+    })
+  }
+}
 
-    if (probe.container !== expectedContainer) {
-      throw new Error(
-        `Expected ${file} to contain ${expectedContainer} media, but FFmpeg detected ${probe.container}`,
-      )
-    }
-    if (expectedCodec && probe.codec !== expectedCodec) {
-      throw new Error(
-        `Expected ${file} to use ${expectedCodec}, but FFmpeg detected ${probe.codec}`,
-      )
-    }
-    if (expectedWidth !== undefined && probe.width !== expectedWidth) {
-      throw new Error(
-        `Expected ${file} width ${expectedWidth.toString()}, but FFmpeg detected ${probe.width.toString()}`,
-      )
-    }
-    if (expectedHeight !== undefined && probe.height !== expectedHeight) {
-      throw new Error(
-        `Expected ${file} height ${expectedHeight.toString()}, but FFmpeg detected ${probe.height.toString()}`,
-      )
-    }
-    if (
-      probe.width <= 0 ||
-      probe.height <= 0 ||
-      probe.durationSeconds <= 0 ||
-      probe.frameCount <= 0
-    ) {
-      throw new Error(
-        `Expected ${file} to contain decodable video, but dimensions=${probe.width.toString()}x${probe.height.toString()}, duration=${probe.durationSeconds.toString()}s, and frames=${probe.frameCount.toString()}`,
-      )
-    }
+const assertProbeMatches = (
+  file: string,
+  probe: Awaited<ReturnType<typeof probeMediaFile>>,
+  expected: {
+    expectedCodec: string | undefined
+    expectedHeight: number | undefined
+    expectedWidth: number | undefined
+  },
+): void => {
+  const expectedContainer = file.endsWith('.mp4') ? 'mp4' : 'webm'
+  if (probe.container !== expectedContainer) {
+    throw new Error(
+      `Expected ${file} to contain ${expectedContainer} media, but FFmpeg detected ${probe.container}`,
+    )
+  }
+  if (expected.expectedCodec && probe.codec !== expected.expectedCodec) {
+    throw new Error(
+      `Expected ${file} to use ${expected.expectedCodec}, but FFmpeg detected ${probe.codec}`,
+    )
+  }
+  if (
+    expected.expectedWidth !== undefined &&
+    probe.width !== expected.expectedWidth
+  ) {
+    throw new Error(
+      `Expected ${file} width ${expected.expectedWidth.toString()}, but FFmpeg detected ${probe.width.toString()}`,
+    )
+  }
+  if (
+    expected.expectedHeight !== undefined &&
+    probe.height !== expected.expectedHeight
+  ) {
+    throw new Error(
+      `Expected ${file} height ${expected.expectedHeight.toString()}, but FFmpeg detected ${probe.height.toString()}`,
+    )
+  }
+  if (
+    probe.width <= 0 ||
+    probe.height <= 0 ||
+    probe.durationSeconds <= 0 ||
+    probe.frameCount <= 0
+  ) {
+    throw new Error(
+      `Expected ${file} to contain decodable video, but dimensions=${probe.width.toString()}x${probe.height.toString()}, duration=${probe.durationSeconds.toString()}s, and frames=${probe.frameCount.toString()}`,
+    )
   }
 }
 
