@@ -77,7 +77,7 @@ describe('video-name-utils helpers', () => {
           hashInput: 'session-full',
         },
         {
-          fileNameStyle: 'sessionFull',
+          fileNameStyle: 'session-full',
           fileNameOverflowStrategy: 'truncate',
           maxSlugLength: 40,
           sessionIdToken: '',
@@ -193,7 +193,7 @@ describe('video-name-utils helpers', () => {
 
     expect(
       buildTestSlugFromMetadata(metadata, {
-        fileNameStyle: 'sessionFull',
+        fileNameStyle: 'session-full',
         fileNameOverflowStrategy: 'truncate',
         maxSlugLength: 40,
         sessionIdToken: 'short-session',
@@ -202,7 +202,7 @@ describe('video-name-utils helpers', () => {
     ).toBe('short_session_retry3')
     expect(
       buildTestSlugFromMetadata(metadata, {
-        fileNameStyle: 'sessionFull',
+        fileNameStyle: 'session-full',
         fileNameOverflowStrategy: 'truncate',
         maxSlugLength: 40,
         sessionIdToken: '',

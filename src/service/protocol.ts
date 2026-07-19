@@ -1,4 +1,5 @@
 import type { Browser as PuppeteerBrowser } from 'puppeteer-core'
+import { type ClockBoundary, systemClock } from './boundaries.js'
 
 export type SessionProtocol = 'bidi+cdp' | 'classic+cdp' | 'unsupported'
 
@@ -39,10 +40,11 @@ export const classifySessionProtocol = (
 export const connectPuppeteerWithTimeout = async (
   browser: ProtocolBrowser,
   timeoutMs: number,
+  clock: ClockBoundary = systemClock,
 ): Promise<PuppeteerBrowser> => {
   let timeout: NodeJS.Timeout | undefined
   const timeoutTask = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
+    timeout = clock.setTimeout(() => {
       reject(
         new Error(
           `Puppeteer CDP connection timed out after ${timeoutMs.toString()}ms`,
@@ -59,7 +61,7 @@ export const connectPuppeteerWithTimeout = async (
     ])) as PuppeteerBrowser
   } finally {
     if (timeout) {
-      clearTimeout(timeout)
+      clock.clearTimeout(timeout)
     }
   }
 }

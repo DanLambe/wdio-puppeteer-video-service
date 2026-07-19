@@ -165,53 +165,97 @@ export interface WdioPuppeteerVideoServiceOptions {
  * Normalized runtime representation. This is intentionally not exported from
  * the package root; it isolates the service implementation from the public API.
  */
-export interface ResolvedWdioPuppeteerVideoServiceOptions {
-  outputDir: string
-  recordingRetain: RecordingRetention
-  captureViewport: 'current' | CaptureViewport
-  fps: number
-  captureQuality: number
-  captureScale: number
-  captureSpeed: number
-  captureCrop?: CaptureCrop
-  framePriming: boolean
-  puppeteerConnectionTimeoutMs: number
-  recordOnRetries: boolean
-  specLevelRecording: boolean
-  segmentOnWindowSwitch: boolean
-  maxConcurrentRecordings: number
-  maxGlobalRecordings: number
-  recordingStartMode: InternalRecordingStartMode
-  recordingStartTimeoutMs: number
-  maxConcurrentPostProcesses: number
-  maxGlobalPostProcesses: number
-  postProcessStartMode: InternalRecordingStartMode
-  postProcessStartTimeoutMs: number
-  globalRecordingLockDir?: string
-  postProcessMode: InternalPostProcessMode
-  includeSpecPatterns: string[]
-  excludeSpecPatterns: string[]
-  includeTagPatterns: string[]
-  excludeTagPatterns: string[]
-  performanceProfile: ServiceProfile
-  failurePolicy: FailurePolicy
-  maxFileNameLength: number
-  fileNameOverflowStrategy: ArtifactNameOverflowStrategy
-  fileNameStyle: InternalArtifactNameStyle
-  ffmpegPath?: string
-  ffmpegTimeoutMs: number
-  outputFormat: OutputFormat
-  mp4Mode: Mp4Mode
-  transcode: ProcessingTranscodeOptions
-  mergeSegments: ProcessingMergeOptions
-  allure?: Required<Pick<AllureIntegrationOptions, 'attach'>> &
-    Pick<AllureIntegrationOptions, 'maxBytes'>
+export interface ResolvedRecordingFilterOptions {
+  readonly includeSpecs: readonly string[]
+  readonly excludeSpecs: readonly string[]
+  readonly includeTags: readonly string[]
+  readonly excludeTags: readonly string[]
 }
 
-export type InternalArtifactNameStyle =
-  | 'test'
-  | 'testFull'
-  | 'session'
-  | 'sessionFull'
-export type InternalPostProcessMode = 'immediate' | 'deferred'
-export type InternalRecordingStartMode = 'blocking' | 'fastFail'
+export interface ResolvedRecordingOptions {
+  readonly scope: RecordingScope
+  readonly attempts: RecordingAttempts
+  readonly retain: RecordingRetention
+  readonly windowChanges: WindowChangeBehavior
+  readonly filters: ResolvedRecordingFilterOptions
+}
+
+export interface ResolvedCaptureOptions {
+  readonly viewport: 'current' | Readonly<CaptureViewport>
+  readonly fps: number
+  readonly quality: number
+  readonly scale: number
+  readonly speed: number
+  readonly crop?: Readonly<CaptureCrop>
+  readonly framePriming: boolean
+  readonly connectionTimeoutMs: number
+}
+
+export interface ResolvedProcessingFfmpegOptions {
+  readonly path?: string
+  readonly timeoutMs: number
+}
+
+export interface ResolvedProcessingTranscodeOptions {
+  readonly enabled: boolean
+  readonly deleteOriginal: boolean
+  readonly ffmpegArgs?: readonly string[]
+}
+
+export interface ResolvedProcessingMergeOptions {
+  readonly enabled: boolean
+  readonly deleteSegments: boolean
+}
+
+export interface ResolvedProcessingOptions {
+  readonly format: OutputFormat
+  readonly mp4Mode: Mp4Mode
+  readonly timing: ProcessingTiming
+  readonly ffmpeg: ResolvedProcessingFfmpegOptions
+  readonly transcode: ResolvedProcessingTranscodeOptions
+  readonly merge: ResolvedProcessingMergeOptions
+}
+
+export interface ResolvedConcurrencyOptions {
+  readonly maxRecordingsPerProcess: number
+  readonly maxRecordingsGlobal: number
+  readonly startMode: RecordingStartMode
+  readonly startTimeoutMs: number
+  readonly maxPostProcessesPerProcess: number
+  readonly maxPostProcessesGlobal: number
+  readonly postProcessStartMode: RecordingStartMode
+  readonly postProcessStartTimeoutMs: number
+  readonly lockDir?: string
+}
+
+export interface ResolvedArtifactNamingOptions {
+  readonly style: ArtifactNameStyle
+  readonly maxLength: number
+  readonly overflow: ArtifactNameOverflowStrategy
+}
+
+export interface ResolvedArtifactOptions {
+  readonly naming: ResolvedArtifactNamingOptions
+}
+
+export interface ResolvedAllureIntegrationOptions {
+  readonly attach: AllureAttachmentMode
+  readonly maxBytes?: number
+}
+
+export interface ResolvedIntegrationOptions {
+  readonly allure?: ResolvedAllureIntegrationOptions
+}
+
+export interface ResolvedWdioPuppeteerVideoServiceOptions {
+  readonly outputDir: string
+  readonly recording: ResolvedRecordingOptions
+  readonly capture: ResolvedCaptureOptions
+  readonly processing: ResolvedProcessingOptions
+  readonly concurrency: ResolvedConcurrencyOptions
+  readonly artifacts: ResolvedArtifactOptions
+  readonly integrations: ResolvedIntegrationOptions
+  readonly profile: ServiceProfile
+  readonly logLevel: LogLevel
+  readonly failurePolicy: FailurePolicy
+}

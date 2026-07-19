@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
-import type { InternalRecordingStartMode } from '../types.js'
+import type { RecordingStartMode } from '../types.js'
 import {
   type ClockBoundary,
   type FileSystemBoundary,
@@ -39,11 +39,11 @@ export interface RecordingSlotSchedulerDependencies {
 }
 
 export interface RecordingSlotSchedulerOptions {
-  globalRecordingLockDir?: string
+  globalRecordingLockDir?: string | undefined
   maxConcurrentRecordings?: number
   maxGlobalRecordings?: number
   outputDir?: string
-  recordingStartMode?: InternalRecordingStartMode
+  recordingStartMode?: RecordingStartMode
   recordingStartTimeoutMs?: number
   resourceLabel?: 'recording' | 'post-processing'
 }
@@ -102,7 +102,7 @@ export class RecordingSlotScheduler {
   }
 
   get startTimeoutMs(): number | undefined {
-    if ((this.options.recordingStartMode ?? 'blocking') !== 'fastFail') {
+    if ((this.options.recordingStartMode ?? 'blocking') !== 'fast-fail') {
       return undefined
     }
 
@@ -556,11 +556,11 @@ export class PostProcessSlotScheduler {
 
   constructor(
     options: {
-      globalRecordingLockDir?: string
+      globalRecordingLockDir?: string | undefined
       maxConcurrentPostProcesses?: number
       maxGlobalPostProcesses?: number
       outputDir?: string
-      postProcessStartMode?: InternalRecordingStartMode
+      postProcessStartMode?: RecordingStartMode
       postProcessStartTimeoutMs?: number
     },
     log: ServiceLogger,

@@ -1,15 +1,17 @@
 import type { Services } from '@wdio/types'
-import { generateVideoReportForRun } from './reporter/report-generator.js'
+import {
+  createLauncherCompositionRoot,
+  type LauncherCompositionOverrides,
+  type LauncherCompositionRoot,
+} from './service/composition.js'
 import {
   assignLauncherWorkerContext,
   createLauncherRegistrationError,
 } from './service/launcher-context.js'
 import * as logging from './service/logging.js'
 import {
-  aggregateManifestRun,
   assignManifestRunContext,
   assignManifestWorkerContext,
-  createManifestRunContext,
   type ManifestRunContext,
 } from './service/manifest-runtime.js'
 import * as normalization from './service/normalization.js'
@@ -29,6 +31,7 @@ export default class WdioPuppeteerVideoLauncher
   implements Services.ServiceInstance
 {
   private readonly _options: ResolvedWdioPuppeteerVideoServiceOptions
+  private readonly _composition: LauncherCompositionRoot
   private readonly _logLevel: LogLevel
   private readonly _specRetryAttempts = new Map<string, number>()
   private _manifestRunContext: ManifestRunContext | undefined
@@ -38,7 +41,9 @@ export default class WdioPuppeteerVideoLauncher
     options: WdioPuppeteerVideoServiceOptions = {},
     _capabilities?: unknown,
     config?: LauncherConfig,
+    compositionOverrides?: LauncherCompositionOverrides,
   ) {
+    this._composition = createLauncherCompositionRoot(compositionOverrides)
     const resolvedConfiguration = resolveServiceConfiguration(options)
     this._options = resolvedConfiguration.options
     this._logLevel = resolvedConfiguration.hasExplicitLogLevel
@@ -50,7 +55,7 @@ export default class WdioPuppeteerVideoLauncher
     this._specRetryAttempts.clear()
     this._manifestRunContext = await this._runManifestTask(
       'initialize manifest journaling',
-      () => createManifestRunContext(this._options.outputDir),
+      () => this._composition.createManifestRunContext(this._options.outputDir),
     )
     this._prepared = true
   }
@@ -71,10 +76,11 @@ export default class WdioPuppeteerVideoLauncher
     }
 
     const specRetryKey = `${cid}\0${buildSpecRetryKey(specs, capabilities)}`
-    const specFileRetryAttempt = this._options.recordOnRetries
+    const recordOnRetries = this._options.recording.attempts === 'retries'
+    const specFileRetryAttempt = recordOnRetries
       ? (this._specRetryAttempts.get(specRetryKey) ?? 0)
       : 0
-    if (this._options.recordOnRetries) {
+    if (recordOnRetries) {
       this._specRetryAttempts.set(specRetryKey, specFileRetryAttempt + 1)
     }
     assignManifestWorkerContext(args, cid, { specFileRetryAttempt })
@@ -107,13 +113,14 @@ export default class WdioPuppeteerVideoLauncher
     try {
       const manifest = await this._runManifestTask(
         'aggregate manifest journals',
-        () => aggregateManifestRun(manifestRunContext, exitCode),
+        () =>
+          this._composition.aggregateManifestRun(manifestRunContext, exitCode),
       )
       if (!manifest) {
         return
       }
       await this._runManifestTask('generate the static video report', () =>
-        generateVideoReportForRun({
+        this._composition.generateVideoReportForRun({
           outputDir: manifestRunContext.outputDir,
           runId: manifestRunContext.runId,
           manifest,
@@ -143,6 +150,6 @@ export default class WdioPuppeteerVideoLauncher
   }
 
   private _log(level: LogLevel, message: string, details?: unknown): void {
-    logging.writeLog(this._logLevel, level, message, details)
+    this._composition.writeLog(this._logLevel, level, message, details)
   }
 }

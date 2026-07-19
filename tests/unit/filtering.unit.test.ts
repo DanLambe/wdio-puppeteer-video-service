@@ -128,32 +128,17 @@ describe('recording filters', () => {
 
     expect(shouldRecordForFilters({}, test, {}, cache)).toBe(true)
     expect(
-      shouldRecordForFilters(
-        { includeSpecPatterns: ['*account*'] },
-        test,
-        {},
-        cache,
-      ),
+      shouldRecordForFilters({ includeSpecs: ['*account*'] }, test, {}, cache),
     ).toBe(false)
     expect(
-      shouldRecordForFilters(
-        { includeSpecPatterns: ['*checkout*'] },
-        test,
-        {},
-        cache,
-      ),
+      shouldRecordForFilters({ includeSpecs: ['*checkout*'] }, test, {}, cache),
     ).toBe(true)
     expect(
-      shouldRecordForFilters(
-        { excludeSpecPatterns: ['*checkout*'] },
-        test,
-        {},
-        cache,
-      ),
+      shouldRecordForFilters({ excludeSpecs: ['*checkout*'] }, test, {}, cache),
     ).toBe(false)
     expect(
       shouldRecordForFilters(
-        { includeTagPatterns: ['@smoke'] },
+        { includeTags: ['@smoke'] },
         test,
         { tags: ['@regression'] },
         cache,
@@ -161,7 +146,7 @@ describe('recording filters', () => {
     ).toBe(false)
     expect(
       shouldRecordForFilters(
-        { includeTagPatterns: ['@smoke'] },
+        { includeTags: ['@smoke'] },
         test,
         { tags: ['@smoke'] },
         cache,
@@ -169,7 +154,7 @@ describe('recording filters', () => {
     ).toBe(true)
     expect(
       shouldRecordForFilters(
-        { excludeTagPatterns: ['@skip'] },
+        { excludeTags: ['@skip'] },
         test,
         { tags: ['@skip'] },
         cache,
@@ -177,7 +162,7 @@ describe('recording filters', () => {
     ).toBe(false)
     expect(
       shouldRecordForFilters(
-        { excludeTagPatterns: ['@skip'] },
+        { excludeTags: ['@skip'] },
         test,
         { tags: ['@smoke'] },
         cache,

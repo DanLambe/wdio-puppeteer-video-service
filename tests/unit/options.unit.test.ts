@@ -8,32 +8,51 @@ describe('service option resolution', () => {
 
     expect(resolved.options).toMatchObject({
       outputDir: 'videos',
-      recordingRetain: 'failures',
-      captureViewport: 'current',
-      fps: 30,
-      captureQuality: 30,
-      captureScale: 1,
-      captureSpeed: 1,
-      framePriming: true,
-      puppeteerConnectionTimeoutMs: 10_000,
-      recordOnRetries: false,
-      specLevelRecording: false,
-      segmentOnWindowSwitch: true,
-      maxConcurrentRecordings: 0,
-      maxGlobalRecordings: 0,
-      recordingStartMode: 'blocking',
-      recordingStartTimeoutMs: 2500,
-      maxConcurrentPostProcesses: 0,
-      maxGlobalPostProcesses: 0,
-      postProcessStartMode: 'blocking',
-      postProcessStartTimeoutMs: 2500,
-      ffmpegTimeoutMs: 0,
-      postProcessMode: 'immediate',
-      outputFormat: 'webm',
-      mp4Mode: 'auto',
-      fileNameStyle: 'test',
-      fileNameOverflowStrategy: 'truncate',
-      maxFileNameLength: 255,
+      recording: {
+        scope: 'test',
+        attempts: 'all',
+        retain: 'failures',
+        windowChanges: 'segment',
+        filters: {
+          includeSpecs: [],
+          excludeSpecs: [],
+          includeTags: [],
+          excludeTags: [],
+        },
+      },
+      capture: {
+        viewport: 'current',
+        fps: 30,
+        quality: 30,
+        scale: 1,
+        speed: 1,
+        framePriming: true,
+        connectionTimeoutMs: 10_000,
+      },
+      processing: {
+        format: 'webm',
+        mp4Mode: 'auto',
+        timing: 'after-test',
+        ffmpeg: { timeoutMs: 0 },
+        transcode: { enabled: false, deleteOriginal: true },
+        merge: { enabled: false, deleteSegments: true },
+      },
+      concurrency: {
+        maxRecordingsPerProcess: 0,
+        maxRecordingsGlobal: 0,
+        startMode: 'blocking',
+        startTimeoutMs: 2500,
+        maxPostProcessesPerProcess: 0,
+        maxPostProcessesGlobal: 0,
+        postProcessStartMode: 'blocking',
+        postProcessStartTimeoutMs: 2500,
+      },
+      artifacts: {
+        naming: { style: 'test', overflow: 'truncate', maxLength: 255 },
+      },
+      integrations: {},
+      profile: 'default',
+      logLevel: 'warn',
       failurePolicy: 'warn',
     })
     expect(resolved.hasExplicitLogLevel).toBe(false)
@@ -43,7 +62,7 @@ describe('service option resolution', () => {
   it('uses the Windows filename default through the process boundary', () => {
     const resolved = resolveServiceConfiguration({}, 'win32')
 
-    expect(resolved.options.maxFileNameLength).toBe(180)
+    expect(resolved.options.artifacts.naming.maxLength).toBe(180)
     expect(resolved.maxSlugLength).toBeLessThan(180)
   })
 
@@ -51,9 +70,11 @@ describe('service option resolution', () => {
     expect(
       resolveServiceConfiguration({ profile: 'parallel' }).options,
     ).toMatchObject({
-      fps: 24,
-      mergeSegments: { deleteSegments: true, enabled: false },
-      outputFormat: 'webm',
+      capture: { fps: 24 },
+      processing: {
+        merge: { deleteSegments: true, enabled: false },
+        format: 'webm',
+      },
     })
     expect(
       resolveServiceConfiguration({
@@ -65,36 +86,41 @@ describe('service option resolution', () => {
         },
       }).options,
     ).toMatchObject({
-      fps: 48,
-      mergeSegments: { deleteSegments: true, enabled: true },
-      outputFormat: 'mp4',
+      capture: { fps: 48 },
+      processing: {
+        merge: { deleteSegments: true, enabled: true },
+        format: 'mp4',
+      },
     })
   })
 
   it('resolves Allure defaults without loading the optional peer', () => {
     expect(
       resolveServiceConfiguration({ integrations: { allure: {} } }).options
-        .allure,
+        .integrations.allure,
     ).toEqual({ attach: 'failures' })
     expect(
       resolveServiceConfiguration({
         integrations: {
           allure: { attach: 'retained', maxBytes: 42 },
         },
-      }).options.allure,
+      }).options.integrations.allure,
     ).toEqual({ attach: 'retained', maxBytes: 42 })
   })
 
   it('applies CI defaults, pinned logging, and explicit grouped overrides', () => {
     const defaults = resolveServiceConfiguration({ profile: 'ci' })
     expect(defaults.options).toMatchObject({
-      fps: 24,
-      mergeSegments: { deleteSegments: true, enabled: false },
-      postProcessMode: 'deferred',
-      recordingStartMode: 'fastFail',
-      maxGlobalPostProcesses: 1,
-      segmentOnWindowSwitch: false,
-      framePriming: false,
+      capture: { fps: 24, framePriming: false },
+      processing: {
+        merge: { deleteSegments: true, enabled: false },
+        timing: 'after-worker',
+      },
+      concurrency: {
+        startMode: 'fast-fail',
+        maxPostProcessesGlobal: 1,
+      },
+      recording: { windowChanges: 'ignore' },
     })
     expect(defaults.hasExplicitLogLevel).toBe(true)
     expect(defaults.logLevel).toBe('warn')
@@ -111,12 +137,13 @@ describe('service option resolution', () => {
       recording: { windowChanges: 'segment' },
     })
     expect(explicit.options).toMatchObject({
-      fps: 60,
-      mergeSegments: { deleteSegments: true, enabled: true },
-      postProcessMode: 'immediate',
-      recordingStartMode: 'blocking',
-      segmentOnWindowSwitch: true,
-      framePriming: true,
+      capture: { fps: 60, framePriming: true },
+      processing: {
+        merge: { deleteSegments: true, enabled: true },
+        timing: 'after-test',
+      },
+      concurrency: { startMode: 'blocking' },
+      recording: { windowChanges: 'segment' },
     })
     expect(explicit.logLevel).toBe('trace')
   })
@@ -175,39 +202,75 @@ describe('service option resolution', () => {
 
     expect(resolved.options).toMatchObject({
       outputDir: 'artifacts/videos',
-      recordingRetain: 'retries',
-      recordOnRetries: true,
-      specLevelRecording: true,
-      segmentOnWindowSwitch: false,
-      includeSpecPatterns: ['*critical*'],
-      excludeTagPatterns: ['@novideo'],
-      captureViewport: { width: 1440, height: 900 },
-      fps: 24,
-      captureQuality: 20,
-      captureScale: 0.5,
-      captureSpeed: 2,
-      captureCrop: { x: 10, y: 20, width: 1200, height: 800 },
-      framePriming: false,
-      puppeteerConnectionTimeoutMs: 1500,
-      outputFormat: 'mp4',
-      mp4Mode: 'transcode',
-      postProcessMode: 'deferred',
-      ffmpegPath: 'C:/tools/ffmpeg.exe',
-      ffmpegTimeoutMs: 5000,
-      maxConcurrentRecordings: 2,
-      maxGlobalRecordings: 4,
-      recordingStartMode: 'fastFail',
-      recordingStartTimeoutMs: 1200,
-      maxConcurrentPostProcesses: 3,
-      maxGlobalPostProcesses: 2,
-      postProcessStartMode: 'fastFail',
-      postProcessStartTimeoutMs: 900,
-      globalRecordingLockDir: '.locks',
-      fileNameStyle: 'testFull',
-      maxFileNameLength: 160,
-      fileNameOverflowStrategy: 'session',
+      recording: {
+        scope: 'spec',
+        attempts: 'retries',
+        retain: 'retries',
+        windowChanges: 'ignore',
+        filters: {
+          includeSpecs: ['*critical*'],
+          excludeTags: ['@novideo'],
+        },
+      },
+      capture: {
+        viewport: { width: 1440, height: 900 },
+        fps: 24,
+        quality: 20,
+        scale: 0.5,
+        speed: 2,
+        crop: { x: 10, y: 20, width: 1200, height: 800 },
+        framePriming: false,
+        connectionTimeoutMs: 1500,
+      },
+      processing: {
+        format: 'mp4',
+        mp4Mode: 'transcode',
+        timing: 'after-worker',
+        ffmpeg: { path: 'C:/tools/ffmpeg.exe', timeoutMs: 5000 },
+      },
+      concurrency: {
+        maxRecordingsPerProcess: 2,
+        maxRecordingsGlobal: 4,
+        startMode: 'fast-fail',
+        startTimeoutMs: 1200,
+        maxPostProcessesPerProcess: 3,
+        maxPostProcessesGlobal: 2,
+        postProcessStartMode: 'fast-fail',
+        postProcessStartTimeoutMs: 900,
+        lockDir: '.locks',
+      },
+      artifacts: {
+        naming: { style: 'test-full', maxLength: 160, overflow: 'session' },
+      },
       failurePolicy: 'error',
     })
+  })
+
+  it('returns a deeply immutable runtime contract', () => {
+    const options = resolveServiceConfiguration({
+      recording: { filters: { includeSpecs: ['spec-a'] } },
+      processing: { transcode: { ffmpegArgs: ['-crf', '28'] } },
+      integrations: { allure: {} },
+    }).options
+
+    expect(Object.isFrozen(options)).toBe(true)
+    expect(Object.isFrozen(options.recording)).toBe(true)
+    expect(Object.isFrozen(options.recording.filters)).toBe(true)
+    expect(Object.isFrozen(options.recording.filters.includeSpecs)).toBe(true)
+    expect(Object.isFrozen(options.capture)).toBe(true)
+    const explicit = resolveServiceConfiguration({
+      capture: {
+        viewport: { width: 1280, height: 720 },
+        crop: { x: 0, y: 0, width: 640, height: 360 },
+      },
+    }).options
+    expect(Object.isFrozen(explicit.capture.viewport)).toBe(true)
+    expect(Object.isFrozen(explicit.capture.crop)).toBe(true)
+    expect(Object.isFrozen(options.processing)).toBe(true)
+    expect(Object.isFrozen(options.processing.transcode.ffmpegArgs)).toBe(true)
+    expect(Object.isFrozen(options.concurrency)).toBe(true)
+    expect(Object.isFrozen(options.artifacts.naming)).toBe(true)
+    expect(Object.isFrozen(options.integrations.allure)).toBe(true)
   })
 
   it('rejects a removed beta option with a migration-specific message', () => {

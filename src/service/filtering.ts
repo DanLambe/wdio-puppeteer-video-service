@@ -25,10 +25,10 @@ interface TestTagLike {
 }
 
 export interface RecordingFilterConfiguration {
-  includeSpecPatterns?: string[]
-  excludeSpecPatterns?: string[]
-  includeTagPatterns?: string[]
-  excludeTagPatterns?: string[]
+  includeSpecs?: readonly string[]
+  excludeSpecs?: readonly string[]
+  includeTags?: readonly string[]
+  excludeTags?: readonly string[]
 }
 
 export const shouldRecordForFilters = (
@@ -37,10 +37,10 @@ export const shouldRecordForFilters = (
   context: unknown,
   wildcardPatternRegexCache: Map<string, RegExp>,
 ): boolean => {
-  const includeSpecPatterns = options.includeSpecPatterns ?? []
-  const excludeSpecPatterns = options.excludeSpecPatterns ?? []
-  const includeTagPatterns = options.includeTagPatterns ?? []
-  const excludeTagPatterns = options.excludeTagPatterns ?? []
+  const includeSpecPatterns = options.includeSpecs ?? []
+  const excludeSpecPatterns = options.excludeSpecs ?? []
+  const includeTagPatterns = options.includeTags ?? []
+  const excludeTagPatterns = options.excludeTags ?? []
 
   if (
     includeSpecPatterns.length === 0 &&
@@ -234,7 +234,7 @@ export const collectTagStrings = (source: unknown): string[] => {
 
 export const matchesAnyPattern = (
   value: string,
-  patterns: string[] | undefined,
+  patterns: readonly string[] | undefined,
   wildcardPatternRegexCache: Map<string, RegExp>,
 ): boolean => {
   if (!value || !patterns || patterns.length === 0) {

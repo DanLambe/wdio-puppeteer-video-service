@@ -40,7 +40,7 @@ describe('Puppeteer 25 capture controls', () => {
         speed: 1.5,
         crop: { x: 10, y: 20, width: 1000, height: 600 },
       },
-    }).options
+    }).options.capture
 
     await expect(
       startScreencast(
@@ -76,7 +76,7 @@ describe('Puppeteer 25 capture controls', () => {
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
     const capture = resolveServiceConfiguration({
       capture: { viewport: { width: 800, height: 600 } },
-    }).options
+    }).options.capture
     const page = {
       screencast: async () => {
         throw new Error('capture failed')
@@ -105,7 +105,7 @@ describe('Puppeteer 25 capture controls', () => {
       .mockRejectedValueOnce(restoreError)
     const capture = resolveServiceConfiguration({
       capture: { viewport: { width: 800, height: 600 } },
-    }).options
+    }).options.capture
 
     await expect(
       startScreencast(
@@ -128,7 +128,7 @@ describe('Puppeteer 25 capture controls', () => {
   it('does not emulate a viewport when capture.viewport is current', async () => {
     const recorder = createRecorder()
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
-    const capture = resolveServiceConfiguration({}).options
+    const capture = resolveServiceConfiguration({}).options.capture
 
     await startScreencast(
       {
@@ -149,7 +149,7 @@ describe('Puppeteer 25 capture controls', () => {
         crop: { x: 10, y: 20, width: 800, height: 400 },
         scale: 0.5,
       },
-    }).options
+    }).options.capture
 
     await expect(
       resolveCaptureDimensions(
@@ -160,7 +160,7 @@ describe('Puppeteer 25 capture controls', () => {
   })
 
   it('reads native viewport dimensions and handles unavailable dimensions', async () => {
-    const capture = resolveServiceConfiguration({}).options
+    const capture = resolveServiceConfiguration({}).options.capture
     await expect(
       resolveCaptureDimensions(
         {
@@ -182,7 +182,7 @@ describe('Puppeteer 25 capture controls', () => {
   })
 
   it('evaluates native browser dimensions through the page callback', async () => {
-    const capture = resolveServiceConfiguration({}).options
+    const capture = resolveServiceConfiguration({}).options.capture
     const page = {
       viewport: () => null,
       evaluate: async (callback: () => { width: number; height: number }) => {

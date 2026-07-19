@@ -101,7 +101,7 @@ describe('recording slot scheduler', () => {
           globalRecordingLockDir: tempDir,
           maxConcurrentPostProcesses: 1,
           maxGlobalPostProcesses: 1,
-          postProcessStartMode: 'fastFail',
+          postProcessStartMode: 'fast-fail',
           postProcessStartTimeoutMs: 150,
         },
         noopLogger,
@@ -120,7 +120,7 @@ describe('recording slot scheduler', () => {
       const blocked = new PostProcessSlotScheduler(
         {
           maxConcurrentPostProcesses: 1,
-          postProcessStartMode: 'fastFail',
+          postProcessStartMode: 'fast-fail',
           postProcessStartTimeoutMs: 20,
         },
         noopLogger,
@@ -172,7 +172,7 @@ describe('recording slot scheduler', () => {
     const scheduler = new RecordingSlotScheduler(
       {
         maxConcurrentRecordings: 1,
-        recordingStartMode: 'fastFail',
+        recordingStartMode: 'fast-fail',
         recordingStartTimeoutMs: 20,
       },
       noopLogger,
@@ -385,7 +385,7 @@ describe('recording slot scheduler', () => {
       {
         maxConcurrentRecordings: 1,
         maxGlobalRecordings: 1,
-        recordingStartMode: 'fastFail',
+        recordingStartMode: 'fast-fail',
         recordingStartTimeoutMs: 0,
       },
       noopLogger,

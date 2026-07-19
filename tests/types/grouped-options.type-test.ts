@@ -89,3 +89,8 @@ export const invalidAllureMode = {
     },
   },
 } satisfies WdioPuppeteerVideoServiceOptions
+
+export const explicitUndefinedOutputDir = {
+  outputDir: undefined,
+  // @ts-expect-error Exact optional properties reject explicitly undefined values.
+} satisfies WdioPuppeteerVideoServiceOptions

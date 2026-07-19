@@ -1,13 +1,12 @@
 import path from 'node:path'
 import type {
   ArtifactNameOverflowStrategy,
-  InternalArtifactNameStyle,
-  InternalPostProcessMode,
-  InternalRecordingStartMode,
+  ArtifactNameStyle,
   Mp4Mode,
   OutputFormat,
   ProcessingMergeOptions,
   ProcessingTranscodeOptions,
+  RecordingStartMode,
   ServiceProfile,
 } from '../types.js'
 import {
@@ -149,15 +148,6 @@ export const normalizePatternList = (
   return normalizedPatterns
 }
 
-export const normalizePostProcessMode = (
-  mode: InternalPostProcessMode | undefined,
-): InternalPostProcessMode => {
-  if (mode === 'deferred') {
-    return 'deferred'
-  }
-  return 'immediate'
-}
-
 export const normalizeCandidateValue = (value: string | undefined): string => {
   return (value ?? '').trim().toLowerCase()
 }
@@ -185,16 +175,16 @@ export const normalizeFileNameOverflowStrategy = (
 }
 
 export const normalizeFileNameStyle = (
-  style: InternalArtifactNameStyle | undefined,
-): InternalArtifactNameStyle => {
-  if (style === 'testFull') {
-    return 'testFull'
+  style: ArtifactNameStyle | undefined,
+): ArtifactNameStyle => {
+  if (style === 'test-full') {
+    return 'test-full'
   }
   if (style === 'session') {
     return 'session'
   }
-  if (style === 'sessionFull') {
-    return 'sessionFull'
+  if (style === 'session-full') {
+    return 'session-full'
   }
   return 'test'
 }
@@ -222,10 +212,10 @@ export const normalizePerformanceProfile = (
 }
 
 export const normalizeRecordingStartMode = (
-  mode: InternalRecordingStartMode | undefined,
-): InternalRecordingStartMode => {
-  if (mode === 'fastFail') {
-    return 'fastFail'
+  mode: RecordingStartMode | undefined,
+): RecordingStartMode => {
+  if (mode === 'fast-fail') {
+    return 'fast-fail'
   }
   return 'blocking'
 }

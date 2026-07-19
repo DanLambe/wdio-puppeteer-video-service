@@ -1,25 +1,22 @@
 import { describe, expect, it } from 'vitest'
+import { resolveServiceConfiguration } from '../../src/service/options.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 
 interface ConfigurationServiceProbe {
   _currentRecordingRetryCount: number
-  _options: {
-    recordOnRetries: boolean
-    recordingRetain: string
-  }
   _shouldKeepRecording: (passed: boolean) => boolean
 }
 
 describe('grouped 1.0 configuration API', () => {
-  it('validates and resolves grouped options in the service constructor', () => {
-    const service = new WdioPuppeteerVideoService({
+  it('validates and resolves grouped options through the resolver contract', () => {
+    const resolved = resolveServiceConfiguration({
       recording: { attempts: 'retries', retain: 'retries' },
-    }) as unknown as ConfigurationServiceProbe
+    })
 
-    expect(service._options).toMatchObject({
-      recordOnRetries: true,
-      recordingRetain: 'retries',
+    expect(resolved.options.recording).toMatchObject({
+      attempts: 'retries',
+      retain: 'retries',
     })
   })
 

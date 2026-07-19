@@ -1,3 +1,4 @@
+import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -45,7 +46,13 @@ describe('service runtime boundaries', () => {
       await handle.writeFile('boundary')
       await handle.close()
 
-      await expect(nodeFileSystem.readText(filePath)).resolves.toBe('boundary')
+      const writeStream = nodeFileSystem.createWriteStream(filePath, 'a')
+      writeStream.end('-stream')
+      await once(writeStream, 'finish')
+
+      await expect(nodeFileSystem.readText(filePath)).resolves.toBe(
+        'boundary-stream',
+      )
       await expect(nodeFileSystem.stat(filePath)).resolves.toMatchObject({
         mtimeMs: expect.any(Number),
       })

@@ -91,15 +91,15 @@ describe('normalization helpers', () => {
 
   it('normalizes filename styles without accepting unknown values', () => {
     expect(normalizeFileNameStyle('test')).toBe('test')
-    expect(normalizeFileNameStyle('testFull')).toBe('testFull')
+    expect(normalizeFileNameStyle('test-full')).toBe('test-full')
     expect(normalizeFileNameStyle('session')).toBe('session')
-    expect(normalizeFileNameStyle('sessionFull')).toBe('sessionFull')
+    expect(normalizeFileNameStyle('session-full')).toBe('session-full')
     expect(normalizeFileNameStyle('invalid' as never)).toBe('test')
   })
 
   it('normalizes recording start modes without accepting unknown values', () => {
     expect(normalizeRecordingStartMode('blocking')).toBe('blocking')
-    expect(normalizeRecordingStartMode('fastFail')).toBe('fastFail')
+    expect(normalizeRecordingStartMode('fast-fail')).toBe('fast-fail')
     expect(normalizeRecordingStartMode('invalid' as never)).toBe('blocking')
   })
 

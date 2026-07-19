@@ -1,14 +1,12 @@
 import type {
   AllureIntegrationOptions,
-  ArtifactNameStyle,
-  ConcurrencyOptions,
-  InternalArtifactNameStyle,
-  InternalPostProcessMode,
-  InternalRecordingStartMode,
   LogLevel,
   ProcessingMergeOptions,
   ProcessingOptions,
   RecordingOptions,
+  ResolvedAllureIntegrationOptions,
+  ResolvedProcessingMergeOptions,
+  ResolvedProcessingTranscodeOptions,
   ResolvedWdioPuppeteerVideoServiceOptions,
   ServiceProfile,
   WdioPuppeteerVideoServiceOptions,
@@ -68,68 +66,85 @@ export const resolveServiceConfiguration = (
   const ffmpegPath = normalization.normalizeOptionalDir(processing.ffmpeg?.path)
   const resolvedAllure = resolveAllureOptions(allure)
 
-  const resolvedOptions: ResolvedWdioPuppeteerVideoServiceOptions = {
+  const resolvedOptions = freezeResolvedOptions({
     outputDir: normalization.normalizeOutputDir(options.outputDir),
-    recordingRetain: retain,
-    captureViewport: capture.viewport ?? 'current',
-    fps: capture.fps ?? resolveProfileFps(profile),
-    captureQuality: capture.quality ?? 30,
-    captureScale: capture.scale ?? 1,
-    captureSpeed: capture.speed ?? 1,
-    framePriming: capture.framePriming ?? profile !== 'ci',
-    puppeteerConnectionTimeoutMs:
-      capture.connectionTimeoutMs ?? DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
-    recordOnRetries: recording.attempts === 'retries',
-    specLevelRecording: recording.scope === 'spec',
-    segmentOnWindowSwitch: resolveWindowSegmentation(recording, profile),
-    maxConcurrentRecordings: concurrency.maxRecordingsPerProcess ?? 0,
-    maxGlobalRecordings: concurrency.maxRecordingsGlobal ?? 0,
-    recordingStartMode: resolveRecordingStartMode(
-      concurrency.startMode,
-      profile === 'ci' ? 'fast-fail' : 'blocking',
-    ),
-    recordingStartTimeoutMs:
-      concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
-    maxConcurrentPostProcesses: concurrency.maxPostProcessesPerProcess ?? 0,
-    maxGlobalPostProcesses:
-      concurrency.maxPostProcessesGlobal ?? (profile === 'ci' ? 1 : 0),
-    postProcessStartMode: resolveRecordingStartMode(
-      concurrency.postProcessStartMode,
-      'blocking',
-    ),
-    postProcessStartTimeoutMs:
-      concurrency.postProcessStartTimeoutMs ??
-      DEFAULT_RECORDING_START_TIMEOUT_MS,
-    postProcessMode: resolvePostProcessMode(processing, profile),
-    includeSpecPatterns: normalization.normalizePatternList(
-      filters.includeSpecs,
-    ),
-    excludeSpecPatterns: normalization.normalizePatternList(
-      filters.excludeSpecs,
-    ),
-    includeTagPatterns: normalization.normalizePatternList(filters.includeTags),
-    excludeTagPatterns: normalization.normalizePatternList(filters.excludeTags),
-    performanceProfile: profile,
+    recording: {
+      scope: recording.scope ?? 'test',
+      attempts: recording.attempts ?? 'all',
+      retain,
+      windowChanges: resolveWindowChanges(recording, profile),
+      filters: {
+        includeSpecs: normalization.normalizePatternList(filters.includeSpecs),
+        excludeSpecs: normalization.normalizePatternList(filters.excludeSpecs),
+        includeTags: normalization.normalizePatternList(filters.includeTags),
+        excludeTags: normalization.normalizePatternList(filters.excludeTags),
+      },
+    },
+    capture: {
+      viewport: capture.viewport ?? 'current',
+      fps: capture.fps ?? resolveProfileFps(profile),
+      quality: capture.quality ?? 30,
+      scale: capture.scale ?? 1,
+      speed: capture.speed ?? 1,
+      framePriming: capture.framePriming ?? profile !== 'ci',
+      connectionTimeoutMs:
+        capture.connectionTimeoutMs ?? DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
+      ...(capture.crop ? { crop: capture.crop } : {}),
+    },
+    processing: {
+      format: processing.format ?? 'webm',
+      mp4Mode: processing.mp4Mode ?? 'auto',
+      timing: resolveProcessingTiming(processing, profile),
+      ffmpeg: {
+        timeoutMs: processing.ffmpeg?.timeoutMs ?? 0,
+        ...(ffmpegPath ? { path: ffmpegPath } : {}),
+      },
+      transcode: {
+        enabled: transcode.enabled ?? false,
+        deleteOriginal: transcode.deleteOriginal ?? true,
+        ...(transcode.ffmpegArgs ? { ffmpegArgs: transcode.ffmpegArgs } : {}),
+      },
+      merge: mergeSegments,
+    },
+    concurrency: {
+      maxRecordingsPerProcess: concurrency.maxRecordingsPerProcess ?? 0,
+      maxRecordingsGlobal: concurrency.maxRecordingsGlobal ?? 0,
+      startMode:
+        concurrency.startMode ?? (profile === 'ci' ? 'fast-fail' : 'blocking'),
+      startTimeoutMs:
+        concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
+      maxPostProcessesPerProcess: concurrency.maxPostProcessesPerProcess ?? 0,
+      maxPostProcessesGlobal:
+        concurrency.maxPostProcessesGlobal ?? (profile === 'ci' ? 1 : 0),
+      postProcessStartMode: concurrency.postProcessStartMode ?? 'blocking',
+      postProcessStartTimeoutMs:
+        concurrency.postProcessStartTimeoutMs ??
+        DEFAULT_RECORDING_START_TIMEOUT_MS,
+      ...(globalRecordingLockDir ? { lockDir: globalRecordingLockDir } : {}),
+    },
+    artifacts: {
+      naming: {
+        style: naming.style ?? 'test',
+        maxLength: naming.maxLength ?? platformMaxFilenameLength,
+        overflow: naming.overflow ?? 'truncate',
+      },
+    },
+    integrations: {
+      ...(resolvedAllure ? { allure: resolvedAllure } : {}),
+    },
+    profile,
+    logLevel,
     failurePolicy: options.failurePolicy ?? 'warn',
-    maxFileNameLength: naming.maxLength ?? platformMaxFilenameLength,
-    fileNameOverflowStrategy: naming.overflow ?? 'truncate',
-    fileNameStyle: toInternalNameStyle(naming.style ?? 'test'),
-    ffmpegTimeoutMs: processing.ffmpeg?.timeoutMs ?? 0,
-    outputFormat: processing.format ?? 'webm',
-    mp4Mode: processing.mp4Mode ?? 'auto',
-    transcode,
-    mergeSegments,
-    ...(resolvedAllure ? { allure: resolvedAllure } : {}),
-    ...(capture.crop ? { captureCrop: capture.crop } : {}),
-    ...(globalRecordingLockDir ? { globalRecordingLockDir } : {}),
-    ...(ffmpegPath ? { ffmpegPath } : {}),
-  }
+  })
 
   return {
     hasExplicitLogLevel,
     logLevel,
     maxSlugLength: normalization.computeMaxSlugLength(
-      resolvedOptions,
+      {
+        maxFileNameLength: resolvedOptions.artifacts.naming.maxLength,
+        outputDir: resolvedOptions.outputDir,
+      },
       platform,
     ),
     options: resolvedOptions,
@@ -148,38 +163,27 @@ const resolveProfileFps = (profile: ServiceProfile): number => {
   return profile === 'default' ? 30 : 24
 }
 
-const resolveWindowSegmentation = (
+const resolveWindowChanges = (
   recording: RecordingOptions,
   profile: ServiceProfile,
-): boolean => {
+): 'ignore' | 'segment' => {
   if (recording.windowChanges === undefined) {
-    return profile !== 'ci'
+    return profile === 'ci' ? 'ignore' : 'segment'
   }
-  return recording.windowChanges === 'segment'
+  return recording.windowChanges
 }
 
-const resolveRecordingStartMode = (
-  configuredMode: ConcurrencyOptions['startMode'],
-  defaultMode: NonNullable<ConcurrencyOptions['startMode']>,
-): InternalRecordingStartMode => {
-  return (configuredMode ?? defaultMode) === 'fast-fail'
-    ? 'fastFail'
-    : 'blocking'
-}
-
-const resolvePostProcessMode = (
+const resolveProcessingTiming = (
   processing: ProcessingOptions,
   profile: ServiceProfile,
-): InternalPostProcessMode => {
+): 'after-test' | 'after-worker' => {
   const defaultTiming = profile === 'ci' ? 'after-worker' : 'after-test'
-  return (processing.timing ?? defaultTiming) === 'after-worker'
-    ? 'deferred'
-    : 'immediate'
+  return processing.timing ?? defaultTiming
 }
 
 const resolveAllureOptions = (
   allure: AllureIntegrationOptions | undefined,
-): ResolvedWdioPuppeteerVideoServiceOptions['allure'] => {
+): ResolvedAllureIntegrationOptions | undefined => {
   if (!allure) {
     return undefined
   }
@@ -192,22 +196,65 @@ const resolveAllureOptions = (
 const resolveMergeOptions = (
   options: ProcessingMergeOptions | undefined,
   disableByProfile: boolean,
-): ProcessingMergeOptions => {
+): ResolvedProcessingMergeOptions => {
   const normalized = normalization.normalizeMergeOptions(options)
-  if (disableByProfile && options?.enabled === undefined) {
-    return { ...normalized, enabled: false }
+  return {
+    enabled:
+      disableByProfile && options?.enabled === undefined
+        ? false
+        : (normalized.enabled ?? false),
+    deleteSegments: normalized.deleteSegments ?? true,
   }
-  return normalized
 }
 
-const toInternalNameStyle = (
-  style: ArtifactNameStyle,
-): InternalArtifactNameStyle => {
-  if (style === 'test-full') {
-    return 'testFull'
-  }
-  if (style === 'session-full') {
-    return 'sessionFull'
-  }
-  return style
+const freezeResolvedOptions = (
+  options: ResolvedWdioPuppeteerVideoServiceOptions,
+): ResolvedWdioPuppeteerVideoServiceOptions => {
+  const freezeList = (values: readonly string[]): readonly string[] =>
+    Object.freeze([...values])
+  const recordingFilters = Object.freeze({
+    includeSpecs: freezeList(options.recording.filters.includeSpecs),
+    excludeSpecs: freezeList(options.recording.filters.excludeSpecs),
+    includeTags: freezeList(options.recording.filters.includeTags),
+    excludeTags: freezeList(options.recording.filters.excludeTags),
+  })
+  const transcode = Object.freeze({
+    ...options.processing.transcode,
+    ...(options.processing.transcode.ffmpegArgs
+      ? { ffmpegArgs: freezeList(options.processing.transcode.ffmpegArgs) }
+      : {}),
+  }) satisfies ResolvedProcessingTranscodeOptions
+
+  return Object.freeze({
+    ...options,
+    recording: Object.freeze({
+      ...options.recording,
+      filters: recordingFilters,
+    }),
+    capture: Object.freeze({
+      ...options.capture,
+      viewport:
+        options.capture.viewport === 'current'
+          ? 'current'
+          : Object.freeze({ ...options.capture.viewport }),
+      ...(options.capture.crop
+        ? { crop: Object.freeze({ ...options.capture.crop }) }
+        : {}),
+    }),
+    processing: Object.freeze({
+      ...options.processing,
+      ffmpeg: Object.freeze({ ...options.processing.ffmpeg }),
+      transcode,
+      merge: Object.freeze({ ...options.processing.merge }),
+    }),
+    concurrency: Object.freeze({ ...options.concurrency }),
+    artifacts: Object.freeze({
+      naming: Object.freeze({ ...options.artifacts.naming }),
+    }),
+    integrations: Object.freeze({
+      ...(options.integrations.allure
+        ? { allure: Object.freeze({ ...options.integrations.allure }) }
+        : {}),
+    }),
+  })
 }

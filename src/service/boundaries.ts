@@ -1,3 +1,5 @@
+import type { WriteStream } from 'node:fs'
+import { createWriteStream } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import fs from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -21,6 +23,7 @@ export interface FileStatsBoundary {
 }
 
 export interface FileSystemBoundary {
+  createWriteStream(filePath: string, flags: string): WriteStream
   mkdir(dirPath: string): Promise<void>
   openExclusive(filePath: string): Promise<FileHandle>
   readText(filePath: string): Promise<string>
@@ -60,6 +63,9 @@ export const systemClock: ClockBoundary = {
 }
 
 export const nodeFileSystem: FileSystemBoundary = {
+  createWriteStream(filePath, flags): WriteStream {
+    return createWriteStream(filePath, { flags })
+  },
   async mkdir(dirPath): Promise<void> {
     await fs.mkdir(dirPath, { recursive: true })
   },

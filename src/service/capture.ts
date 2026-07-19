@@ -4,21 +4,8 @@ import type {
   ScreenRecorder,
   Viewport,
 } from 'puppeteer-core'
-import type {
-  OutputFormat,
-  ResolvedWdioPuppeteerVideoServiceOptions,
-} from '../types.js'
+import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
-
-type ResolvedCaptureOptions = Pick<
-  ResolvedWdioPuppeteerVideoServiceOptions,
-  | 'captureCrop'
-  | 'captureQuality'
-  | 'captureScale'
-  | 'captureSpeed'
-  | 'captureViewport'
-  | 'fps'
->
 
 export interface StartScreencastOptions {
   capture: ResolvedCaptureOptions
@@ -37,14 +24,14 @@ export const startScreencast = async (
   options: StartScreencastOptions,
 ): Promise<ScreenRecorder> => {
   const originalViewport = page.viewport()
-  if (options.capture.captureViewport !== 'current') {
-    await page.setViewport(options.capture.captureViewport)
+  if (options.capture.viewport !== 'current') {
+    await page.setViewport(options.capture.viewport)
   }
 
   try {
     return await page.screencast(createScreencastOptions(options))
   } finally {
-    if (options.capture.captureViewport !== 'current') {
+    if (options.capture.viewport !== 'current') {
       await page.setViewport(originalViewport).catch((error) => {
         options.onViewportRestoreError?.(error)
       })
@@ -59,11 +46,11 @@ export const createScreencastOptions = (
   return {
     format: options.format,
     fps: capture.fps,
-    quality: capture.captureQuality,
-    scale: capture.captureScale,
-    speed: capture.captureSpeed,
+    quality: capture.quality,
+    scale: capture.scale,
+    speed: capture.speed,
     ffmpegPath: options.ffmpegPath,
-    ...(capture.captureCrop ? { crop: capture.captureCrop } : {}),
+    ...(capture.crop ? { crop: capture.crop } : {}),
   }
 }
 
@@ -74,16 +61,16 @@ export const resolveCaptureDimensions = async (
   const currentViewport =
     typeof page.viewport === 'function' ? page.viewport() : null
   const viewport =
-    capture.captureViewport === 'current'
+    capture.viewport === 'current'
       ? (currentViewport ?? (await readCurrentViewport(page)))
-      : capture.captureViewport
-  const source = capture.captureCrop ?? viewport
+      : capture.viewport
+  const source = capture.crop ?? viewport
   if (!source) {
     return undefined
   }
   return {
-    width: Math.max(1, Math.round(source.width * capture.captureScale)),
-    height: Math.max(1, Math.round(source.height * capture.captureScale)),
+    width: Math.max(1, Math.round(source.width * capture.scale)),
+    height: Math.max(1, Math.round(source.height * capture.scale)),
   }
 }
 
