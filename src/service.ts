@@ -1,11 +1,5 @@
 import path from 'node:path'
-import { finished } from 'node:stream/promises'
 import type { Frameworks, Services } from '@wdio/types'
-import type {
-  Page,
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import * as artifactIntegrity from './service/artifact-integrity.js'
 import type {
@@ -13,12 +7,9 @@ import type {
   FileSystemBoundary,
   ProcessBoundary,
 } from './service/boundaries.js'
-import * as capture from './service/capture.js'
+import { CaptureSession } from './service/capture-session.js'
 import {
   createWorkerCompositionRoot,
-  type PuppeteerConnector,
-  type ScreencastStarter,
-  type UuidFactory,
   type WorkerCompositionOverrides,
   type WorkerFfmpegRunner,
 } from './service/composition.js'
@@ -30,11 +21,7 @@ import {
   type DeferredTranscodeTask,
   type MergeExecutionOptions,
   type OutputFormat,
-  RECORDER_STOP_TIMEOUT_MS,
   type ResolvedTranscodeOptions,
-  SEGMENT_SWITCH_DELAY_MS,
-  WINDOW_SEGMENT_COMMANDS,
-  WRITE_STREAM_TIMEOUT_MS,
 } from './service/constants.js'
 import * as ffmpeg from './service/ffmpeg.js'
 import type { FfmpegProcessRegistry } from './service/ffmpeg-runner.js'
@@ -45,7 +32,6 @@ import {
 import * as logging from './service/logging.js'
 import {
   hasManifestWorkerContexts,
-  type ManifestCaptureDimensions,
   ManifestWorkerRecorder,
   normalizeManifestFramework,
   readManifestRunContext,
@@ -53,15 +39,10 @@ import {
 } from './service/manifest-runtime.js'
 import * as normalization from './service/normalization.js'
 import { resolveServiceConfiguration } from './service/options.js'
-import * as pageLookup from './service/page-lookup.js'
 import * as artifactPaths from './service/paths.js'
 import * as postProcess from './service/post-process.js'
-import {
-  classifySessionProtocol,
-  describePuppeteerConnectionFailure,
-  isChromiumSession,
-  type SessionProtocol,
-} from './service/protocol.js'
+import { isChromiumSession } from './service/protocol.js'
+import { PuppeteerCaptureEngine } from './service/puppeteer-capture-engine.js'
 import {
   normalizeScenarioEntity,
   normalizeScenarioOutcome,
@@ -118,26 +99,16 @@ const validateLauncherWorkerConfiguration = (config: unknown): void => {
 export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
-  private _browser: Browser | undefined
   private readonly _options: ResolvedWdioPuppeteerVideoServiceOptions
   private readonly _clock: ClockBoundary
   private readonly _fileSystem: FileSystemBoundary
   private readonly _process: ProcessBoundary
-  private readonly _uuid: UuidFactory
-  private readonly _connectPuppeteer: PuppeteerConnector
-  private readonly _startScreencast: ScreencastStarter
   private readonly _runFfmpegProcess: WorkerFfmpegRunner
   private readonly _writeLog: typeof logging.writeLog
-  private _recorder: ScreenRecorder | undefined
-  private _activeSegment: ActiveSegment | undefined
-  private _currentSegment = 0
-  private _currentTestSlug = ''
-  private readonly _recordedSegments = new Set<string>()
+  private readonly _captureSession: CaptureSession
+  private readonly _captureEngine: PuppeteerCaptureEngine
   private _isChromium = false
-  private _puppeteerBrowser: PuppeteerBrowser | undefined
-  private _sessionProtocol: SessionProtocol = 'unsupported'
   private _recordingDisabledReason: string | undefined
-  private _currentWindowHandle: string | undefined
   private _sessionIdToken = ''
   private _sessionIdFullToken = ''
   private _logLevel: LogLevel = 'warn'
@@ -160,9 +131,7 @@ export default class WdioPuppeteerVideoService
   private readonly _postProcessSlotScheduler: PostProcessSlotScheduler
   private readonly _recordingLifecycle = new RecordingLifecycle()
   private readonly _ffmpegProcessRegistry: FfmpegProcessRegistry
-  private _pageMarkerCounter = 0
   private _manifestRecorder: ManifestWorkerRecorder | undefined
-  private _manifestCaptureDimensions: ManifestCaptureDimensions | undefined
   private readonly _recordingCoordinator: WorkerRecordingCoordinatorPort
 
   constructor(
@@ -183,12 +152,29 @@ export default class WdioPuppeteerVideoService
     this._clock = composition.clock
     this._fileSystem = composition.fileSystem
     this._process = composition.process
-    this._uuid = composition.uuid
-    this._connectPuppeteer = composition.connectPuppeteer
-    this._startScreencast = composition.startScreencast
     this._runFfmpegProcess = composition.runFfmpeg
     this._writeLog = composition.writeLog
     this._ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
+    this._captureSession = new CaptureSession()
+    this._captureEngine = new PuppeteerCaptureEngine({
+      capture: this._options.capture,
+      clock: this._clock,
+      connectPuppeteer: composition.connectPuppeteer,
+      fileSystem: this._fileSystem,
+      getSessionToken: () => this._sessionIdToken,
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      onConnectionFailure: (reason) => {
+        this._disableRecordingForWorker(reason)
+      },
+      onProtocolChanged: (protocol) => {
+        this._manifestRecorder?.updateProtocol(protocol)
+      },
+      session: this._captureSession,
+      startScreencast: composition.startScreencast,
+      uuid: composition.uuid,
+    })
     const allureIntegration = composition.createAllureIntegration(
       this._options.integrations.allure,
       (level, message, details) => {
@@ -217,8 +203,8 @@ export default class WdioPuppeteerVideoService
             ? { reason: this._recordingDisabledReason }
             : {}),
         }),
-        getRecordedPaths: () => [...this._recordedSegments],
-        isRecordingActive: () => this._isRecordingActive(),
+        getRecordedPaths: () => this._captureSession.recordedPaths,
+        isRecordingActive: () => this._captureSession.isRecordingActive,
         resetRecording: () => this._resetTestState(),
         runSerialized: (task) => this._runSerializedRecordingTask(task),
         startRecording: (metadata, retryCount) =>
@@ -279,7 +265,7 @@ export default class WdioPuppeteerVideoService
     specs: string[],
     browser: Browser,
   ): Promise<void> {
-    this._browser = browser
+    this._captureSession.setBrowser(browser)
     this._recordingDisabledReason = undefined
     this._recordingCoordinator.beginWorker(specs)
 
@@ -292,15 +278,14 @@ export default class WdioPuppeteerVideoService
     this._sessionIdFullToken = buildFullSessionIdToken(browser.sessionId)
     const caps = browser.capabilities
     this._isChromium = isChromiumSession(caps)
-    this._puppeteerBrowser = undefined
-    this._sessionProtocol = 'unsupported'
+    this._captureEngine.resetConnection()
     const browserVersion = caps.browserVersion
     const browserName = caps.browserName
     this._manifestRecorder?.configureSession({
       sessionId: browser.sessionId,
       ...(typeof browserName === 'string' ? { browserName } : {}),
       ...(typeof browserVersion === 'string' ? { browserVersion } : {}),
-      protocol: this._sessionProtocol,
+      protocol: this._captureSession.protocol,
     })
 
     if (!this._isChromium) {
@@ -388,10 +373,8 @@ export default class WdioPuppeteerVideoService
     } catch (error) {
       failure ??= { error }
     } finally {
-      this._browser = undefined
+      this._captureSession.clearBrowser()
       this._isChromium = false
-      this._puppeteerBrowser = undefined
-      this._sessionProtocol = 'unsupported'
     }
     if (failure) {
       throw failure.error
@@ -400,11 +383,10 @@ export default class WdioPuppeteerVideoService
 
   async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
     await this._teardownRecording('onReload')
-    this._puppeteerBrowser = undefined
-    this._sessionProtocol = 'unsupported'
+    this._captureEngine.resetConnection()
     this._sessionIdToken = buildSessionIdToken(newSessionId)
     this._sessionIdFullToken = buildFullSessionIdToken(newSessionId)
-    const capabilities = this._browser?.capabilities as
+    const capabilities = this._captureSession.browser?.capabilities as
       | WebdriverIO.Capabilities
       | undefined
     const browserVersion = capabilities?.browserVersion
@@ -413,7 +395,7 @@ export default class WdioPuppeteerVideoService
       sessionId: newSessionId,
       ...(typeof browserName === 'string' ? { browserName } : {}),
       ...(typeof browserVersion === 'string' ? { browserVersion } : {}),
-      protocol: 'unsupported',
+      protocol: this._captureSession.protocol,
     })
     this._log(
       'debug',
@@ -432,8 +414,11 @@ export default class WdioPuppeteerVideoService
 
     const task = this._runSerializedRecordingTask(async () => {
       try {
-        if (this._isRecordingActive()) {
-          if (this._recordingCoordinator.isSpecScope && this._currentTestSlug) {
+        if (this._captureSession.isRecordingActive) {
+          if (
+            this._recordingCoordinator.isSpecScope &&
+            this._captureSession.currentTestSlug
+          ) {
             await this._recordingCoordinator.finalizeSpecRecording()
           } else {
             await this._stopRecording()
@@ -444,7 +429,7 @@ export default class WdioPuppeteerVideoService
         await this._flushDeferredPostProcessTasks()
       } finally {
         if (
-          this._isRecordingActive() ||
+          this._captureSession.isRecordingActive ||
           this._recordingSlotScheduler.ownsRecordingSlot ||
           this._recordingSlotScheduler.ownsGlobalRecordingSlot
         ) {
@@ -476,7 +461,7 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    if (!this._currentTestSlug) {
+    if (!this._captureSession.currentTestSlug) {
       return
     }
 
@@ -484,11 +469,11 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    if (commandName === 'closeWindow') {
-      await this._runSerializedRecordingTask(async () => {
-        await this._stopRecording()
-      })
-    }
+    await this._captureEngine.beforeWindowCommand(commandName, {
+      runSerialized: (task) => this._runSerializedRecordingTask(task),
+      startRecording: () => this._startRecording(),
+      stopRecording: () => this._stopRecording(),
+    })
   }
 
   async afterCommand(commandName: string): Promise<void> {
@@ -496,7 +481,7 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    if (!this._currentTestSlug) {
+    if (!this._captureSession.currentTestSlug) {
       return
     }
 
@@ -504,46 +489,19 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    if (!WINDOW_SEGMENT_COMMANDS.has(commandName)) {
-      return
-    }
-
-    await this._runSerializedRecordingTask(async () => {
-      if (!this._browser) {
-        return
-      }
-
-      if (commandName === 'closeWindow') {
-        const handleAfterClose = await this._browser
-          .getWindowHandle()
-          .catch(() => undefined /* window may already be closed */)
-        if (!handleAfterClose) {
-          this._currentWindowHandle = undefined
-          return
-        }
-
-        this._currentSegment++
-        await this._clock.delay(SEGMENT_SWITCH_DELAY_MS)
-        await this._startRecording()
-        return
-      }
-
-      const handle = await this._browser
-        .getWindowHandle()
-        .catch(() => undefined /* window may already be closed */)
-
-      if (!handle || this._currentWindowHandle === handle) {
-        return
-      }
-
-      await this._stopRecording()
-      this._currentSegment++
-      await this._startRecording()
+    await this._captureEngine.afterWindowCommand(commandName, {
+      runSerialized: (task) => this._runSerializedRecordingTask(task),
+      startRecording: () => this._startRecording(),
+      stopRecording: () => this._stopRecording(),
     })
   }
 
   private async _startRecording(): Promise<boolean> {
-    if (!this._browser || !this._currentTestSlug || this._recorder) {
+    if (
+      !this._captureSession.browser ||
+      !this._captureSession.currentTestSlug ||
+      this._captureSession.recorder
+    ) {
       return false
     }
 
@@ -553,8 +511,10 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _startRecordingOperation(): Promise<boolean> {
-    const browser = this._browser
-    if (!browser || !this._currentTestSlug) {
+    if (
+      !this._captureSession.browser ||
+      !this._captureSession.currentTestSlug
+    ) {
       return false
     }
 
@@ -568,112 +528,21 @@ export default class WdioPuppeteerVideoService
       return false
     }
 
-    let pendingRecorder: ScreenRecorder | undefined
-    let pendingSegment: ActiveSegment | undefined
-    let pendingRecordingPath: string | undefined
     try {
-      const activePage = await this._prepareRecordingPage(browser)
-      if (!activePage) {
+      const result = await this._captureEngine.startCapture({
+        createOutput: async () =>
+          this._reserveRecordingOutput(this._createRecordingOutput()),
+        ffmpegPath: this._resolveFfmpegPath(),
+        transcodeOptions: this._createResolvedTranscodeOptions(),
+      })
+      if (!result.started) {
         return false
       }
-
-      const { page, windowHandle } = activePage
-      this._manifestCaptureDimensions = await capture.resolveCaptureDimensions(
-        page,
-        this._options.capture,
-      )
-      const recordingOutput = await this._reserveRecordingOutput(
-        this._createRecordingOutput(),
-      )
-      pendingRecordingPath = recordingOutput.recordingPath
-
-      const ffmpegPath = this._resolveFfmpegPath()
-      const recorder = await this._startScreencast(page, {
-        capture: this._options.capture,
-        ffmpegPath,
-        format: recordingOutput.recordingFormat,
-        onViewportRestoreError: (error) => {
-          this._log(
-            'warn',
-            `[WdioPuppeteerVideoService] Failed to restore the browser viewport after capture initialization: ${normalization.describeError(error)}`,
-          )
-        },
-      })
-      pendingRecorder = recorder
-
-      const writeStream = this._fileSystem.createWriteStream(
-        recordingOutput.recordingPath,
-        'r+',
-      )
-      const writeStreamDone = finished(writeStream)
-      let activeSegmentRef: ActiveSegment | undefined
-      const onWriteStreamError = (error: NodeJS.ErrnoException) => {
-        if (activeSegmentRef?.writeStreamErrored) {
-          return
-        }
-        const writeErrorMessage = normalization.describeError(error)
-        if (activeSegmentRef) {
-          activeSegmentRef.writeStreamErrored = true
-          activeSegmentRef.writeStreamErrorMessage = writeErrorMessage
-        }
-        if (normalization.isBenignStreamWriteError(error)) {
-          this._log(
-            'debug',
-            `[WdioPuppeteerVideoService] Recording stream closed while recorder was still flushing (${writeErrorMessage}).`,
-          )
-        } else {
-          this._log(
-            'warn',
-            `[WdioPuppeteerVideoService] Recording stream error: ${writeErrorMessage}`,
-          )
-        }
-      }
-      let recorderErrorLogged = false
-      const onRecorderError = (error: unknown) => {
-        if (recorderErrorLogged) {
-          return
-        }
-        recorderErrorLogged = true
-        this._log(
-          'warn',
-          `[WdioPuppeteerVideoService] Recorder stream error: ${normalization.describeError(error)}`,
-        )
-      }
-      writeStream.on('error', onWriteStreamError)
-      recorder.on('error', onRecorderError)
-
-      const transcodeOptions = this._createResolvedTranscodeOptions()
-      pendingSegment = {
-        recordingPath: recordingOutput.recordingPath,
-        outputPath: recordingOutput.outputPath,
-        outputFormat: recordingOutput.outputFormat,
-        recordingFormat: recordingOutput.recordingFormat,
-        transcode: recordingOutput.transcodeEnabled,
-        transcodeOptions,
-        writeStream,
-        writeStreamDone,
-        writeStreamErrored: false,
-        onWriteStreamError,
-        onRecorderError,
-      }
-      activeSegmentRef = pendingSegment
-      recorder.pipe(writeStream)
-
-      this._currentWindowHandle = windowHandle
       this._log(
         'debug',
-        `[WdioPuppeteerVideoService] Recording segment ${this._currentSegment} to ${recordingOutput.outputPath}`,
+        `[WdioPuppeteerVideoService] Recording segment ${this._captureSession.currentSegment} to ${this._captureSession.activeSegment?.outputPath ?? 'unknown output'}`,
       )
-
-      await this._kickOffScreencastFramesIfEnabled(page)
-      this._recorder = recorder
-      this._activeSegment = pendingSegment
-      this._manifestRecorder?.markCaptureStarted(
-        this._manifestCaptureDimensions,
-      )
-      pendingRecorder = undefined
-      pendingSegment = undefined
-      pendingRecordingPath = undefined
+      this._manifestRecorder?.markCaptureStarted(result.dimensions)
       return true
     } catch (e) {
       this._log(
@@ -681,73 +550,10 @@ export default class WdioPuppeteerVideoService
         '[WdioPuppeteerVideoService] Failed to start recording:',
         e,
       )
-      await this._cleanupPartialRecording(pendingRecorder, pendingSegment)
-      if (pendingRecordingPath) {
-        await this._fileSystem.unlink(pendingRecordingPath).catch(() => {
-          /* best-effort exclusive-reservation cleanup */
-        })
-      }
       return false
     } finally {
-      if (acquiredRecordingSlot && !this._recorder) {
+      if (acquiredRecordingSlot && !this._captureSession.recorder) {
         await this._recordingSlotScheduler.release()
-      }
-    }
-  }
-
-  private async _cleanupPartialRecording(
-    recorder: ScreenRecorder | undefined,
-    segment: ActiveSegment | undefined,
-  ): Promise<void> {
-    if (recorder) {
-      await this._stopRecorder(recorder)
-      if (!recorder.destroyed) {
-        recorder.destroy()
-      }
-    }
-
-    if (!segment) {
-      return
-    }
-
-    recorder?.off('error', segment.onRecorderError)
-    segment.writeStream.off('error', segment.onWriteStreamError)
-    if (!segment.writeStream.destroyed) {
-      segment.writeStream.destroy()
-    }
-    await this._waitForWriteStreamCompletion(segment)
-    await this._fileSystem.unlink(segment.recordingPath).catch(() => {
-      /* best-effort partial recording cleanup */
-    })
-  }
-
-  private async _stopRecorder(recorder: ScreenRecorder): Promise<void> {
-    let timeout: NodeJS.Timeout | undefined
-    const timeoutTask = new Promise<never>((_resolve, reject) => {
-      timeout = this._clock.setTimeout(() => {
-        reject(
-          new Error(
-            `Recorder stop timed out after ${RECORDER_STOP_TIMEOUT_MS.toString()}ms`,
-          ),
-        )
-      }, RECORDER_STOP_TIMEOUT_MS)
-      timeout.unref?.()
-    })
-
-    try {
-      await Promise.race([recorder.stop(), timeoutTask])
-    } catch (error) {
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] Error stopping recorder:',
-        error,
-      )
-      if (!recorder.destroyed) {
-        recorder.destroy()
-      }
-    } finally {
-      if (timeout) {
-        this._clock.clearTimeout(timeout)
       }
     }
   }
@@ -768,103 +574,6 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Recording slot acquisition failed${timeoutSuffix}. Recording skipped for this segment.`,
     )
     return false
-  }
-
-  private async _prepareRecordingPage(browser: Browser): Promise<
-    | {
-        page: Page
-        windowHandle: string | undefined
-      }
-    | undefined
-  > {
-    const puppeteerBrowser = await this._getPuppeteerBrowser(browser)
-    if (!puppeteerBrowser) {
-      return undefined
-    }
-    const windowHandle = await browser
-      .getWindowHandle()
-      .catch(() => undefined /* window may already be closed */)
-
-    const targetId = this._nextPageMarkerId()
-    await browser.execute(
-      (property: string, id: string) => {
-        Object.defineProperty(globalThis, property, {
-          configurable: true,
-          enumerable: false,
-          value: id,
-          writable: false,
-        })
-      },
-      pageLookup.PAGE_MARKER_PROPERTY,
-      targetId,
-    )
-
-    const page = await pageLookup
-      .findActivePage(puppeteerBrowser, targetId, { clock: this._clock })
-      .finally(async () => {
-        await browser
-          .execute(
-            (property: string, id: string) => {
-              if (Reflect.get(globalThis, property) === id) {
-                Reflect.deleteProperty(globalThis, property)
-              }
-            },
-            pageLookup.PAGE_MARKER_PROPERTY,
-            targetId,
-          )
-          .catch(() => {
-            /* best-effort marker cleanup during navigation or target closure */
-          })
-      })
-    if (!page) {
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] Could not find puppeteer page match. Recording skipped.',
-      )
-      return undefined
-    }
-
-    await page.bringToFront().catch(() => {
-      /* best-effort focus */
-    })
-
-    return {
-      page,
-      windowHandle,
-    }
-  }
-
-  private async _getPuppeteerBrowser(
-    browser: Browser,
-  ): Promise<PuppeteerBrowser | undefined> {
-    if (this._puppeteerBrowser && this._puppeteerBrowser.connected !== false) {
-      return this._puppeteerBrowser
-    }
-
-    try {
-      const puppeteerBrowser = await this._connectPuppeteer(
-        browser,
-        this._options.capture.connectionTimeoutMs,
-      )
-      this._puppeteerBrowser = puppeteerBrowser
-      this._sessionProtocol = classifySessionProtocol(
-        browser.capabilities,
-        true,
-      )
-      this._manifestRecorder?.updateProtocol(this._sessionProtocol)
-      this._log(
-        'info',
-        `[WdioPuppeteerVideoService] Session protocol classified as ${this._sessionProtocol}: WDIO controls the browser through ${this._sessionProtocol === 'bidi+cdp' ? 'WebDriver BiDi' : 'classic WebDriver'}, while Puppeteer capture attaches through CDP.`,
-      )
-      return puppeteerBrowser
-    } catch (error) {
-      this._puppeteerBrowser = undefined
-      this._sessionProtocol = 'unsupported'
-      this._disableRecordingForWorker(
-        describePuppeteerConnectionFailure(browser, error),
-      )
-      return undefined
-    }
   }
 
   private _createRecordingOutput(): {
@@ -897,15 +606,15 @@ export default class WdioPuppeteerVideoService
       outputFormat,
       outputPath: artifactPaths.getSegmentPath(
         this._options.outputDir,
-        this._currentTestSlug,
-        this._currentSegment,
+        this._captureSession.currentTestSlug,
+        this._captureSession.currentSegment,
         outputFormat,
       ),
       recordingFormat,
       recordingPath: artifactPaths.getSegmentPath(
         this._options.outputDir,
-        this._currentTestSlug,
-        this._currentSegment,
+        this._captureSession.currentTestSlug,
+        this._captureSession.currentSegment,
         recordingFormat,
       ),
       transcodeEnabled,
@@ -931,7 +640,7 @@ export default class WdioPuppeteerVideoService
     metadata: Readonly<SlugMetadata>,
     _retryCount: number,
   ): Promise<boolean> {
-    if (this._currentTestSlug) {
+    if (this._captureSession.currentTestSlug) {
       return true
     }
 
@@ -941,15 +650,12 @@ export default class WdioPuppeteerVideoService
     )
 
     const baseSlug = this._buildTestSlugFromMetadata(metadata)
-    this._currentTestSlug = reserveUniqueSlug(
+    const slug = reserveUniqueSlug(
       baseSlug,
       this._maxSlugLength,
       this._slugUsageCount,
     )
-    this._currentSegment = 1
-    this._recordedSegments.clear()
-    this._currentWindowHandle = undefined
-    this._activeSegment = undefined
+    this._captureSession.beginRecording(slug)
 
     return this._startRecording()
   }
@@ -958,7 +664,7 @@ export default class WdioPuppeteerVideoService
     passed: boolean,
     keepArtifacts: boolean,
   ): Promise<{ deferred: boolean; paths: readonly string[] }> {
-    if (!this._currentTestSlug) {
+    if (!this._captureSession.currentTestSlug) {
       return { deferred: false, paths: [] }
     }
 
@@ -989,13 +695,13 @@ export default class WdioPuppeteerVideoService
 
     return {
       deferred: this._deferredPostProcessTasks.length > deferredTaskCount,
-      paths: [...this._recordedSegments],
+      paths: this._captureSession.recordedPaths,
     }
   }
 
   private async _stopRecording(): Promise<void> {
-    let recorder: ScreenRecorder | undefined
     let activeSegment: ActiveSegment | undefined
+    let streamOk = false
     let recordingSlotReleased = false
     const releaseRecordingSlot = async (): Promise<void> => {
       if (recordingSlotReleased) {
@@ -1004,51 +710,33 @@ export default class WdioPuppeteerVideoService
       recordingSlotReleased = true
       await this._recordingSlotScheduler.release()
     }
-    const hadWorkAtInvocation = !!this._recorder || !!this._activeSegment
+    const hadWorkAtInvocation = this._captureSession.hasCapture
     await this._recordingLifecycle.stop({
-      hasWork: () => !!this._recorder || !!this._activeSegment,
+      hasWork: () => this._captureSession.hasCapture,
       stopCapture: async () => {
-        recorder = this._recorder
-        activeSegment = this._activeSegment
-        this._recorder = undefined
-        this._activeSegment = undefined
-        if (recorder) {
-          await this._stopRecorder(recorder)
-        }
+        const stoppedCapture = await this._captureEngine.stopCapture()
+        activeSegment = stoppedCapture.segment
+        streamOk = stoppedCapture.streamOk
       },
       processCapture: async () => {
         try {
-          if (!recorder || !activeSegment) {
-            if (recorder && !recorder.destroyed) {
-              recorder.destroy()
-            }
-            await this._cleanupPartialRecording(undefined, activeSegment)
+          if (!activeSegment) {
             return
           }
-
-          const streamOk = await this._waitForWriteStream(activeSegment)
           if (!streamOk) {
             this._log(
               'warn',
               `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
             )
-            this._markSegmentAsUnclean(activeSegment)
           }
 
           await releaseRecordingSlot()
           await this._finalizeSegment(activeSegment)
           this._log(
             'debug',
-            `[WdioPuppeteerVideoService] Finalized segment ${this._currentSegment} (${activeSegment.outputPath})`,
+            `[WdioPuppeteerVideoService] Finalized segment ${this._captureSession.currentSegment} (${activeSegment.outputPath})`,
           )
         } finally {
-          if (recorder && activeSegment) {
-            recorder.off('error', activeSegment.onRecorderError)
-            activeSegment.writeStream.off(
-              'error',
-              activeSegment.onWriteStreamError,
-            )
-          }
           await releaseRecordingSlot()
         }
       },
@@ -1064,7 +752,7 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _deleteSegments(): Promise<void> {
-    const filesToDelete = [...this._recordedSegments]
+    const filesToDelete = [...this._captureSession.recordedPaths]
     await Promise.all(
       filesToDelete.map((file) =>
         this._fileSystem.unlink(file).catch(() => {
@@ -1073,17 +761,18 @@ export default class WdioPuppeteerVideoService
       ),
     )
     this._dropDeferredPostProcessTasksForPaths(filesToDelete)
-    this._recordedSegments.clear()
+    this._captureSession.clearRecordedPaths()
   }
 
   private async _queueDeferredMergeForCurrentTest(): Promise<void> {
-    if (!this._currentTestSlug) {
+    const currentTestSlug = this._captureSession.currentTestSlug
+    if (!currentTestSlug) {
       return
     }
 
     const segmentPaths = artifactPaths.collectCurrentTestSegmentPaths(
-      this._currentTestSlug,
-      this._recordedSegments,
+      currentTestSlug,
+      this._captureSession.recordedPaths,
     )
     if (segmentPaths.length === 0) {
       return
@@ -1106,7 +795,7 @@ export default class WdioPuppeteerVideoService
       getMergedOutputPath: (format) =>
         artifactPaths.getMergedOutputPath(
           this._options.outputDir,
-          this._currentTestSlug,
+          currentTestSlug,
           format,
         ),
       mergedFormat,
@@ -1129,13 +818,14 @@ export default class WdioPuppeteerVideoService
   }
 
   private async _mergeSegmentsForCurrentTest(): Promise<void> {
-    if (!this._currentTestSlug) {
+    const currentTestSlug = this._captureSession.currentTestSlug
+    if (!currentTestSlug) {
       return
     }
 
     const segmentPaths = artifactPaths.collectCurrentTestSegmentPaths(
-      this._currentTestSlug,
-      this._recordedSegments,
+      currentTestSlug,
+      this._captureSession.recordedPaths,
     )
 
     if (segmentPaths.length === 0) {
@@ -1156,7 +846,7 @@ export default class WdioPuppeteerVideoService
 
     const mergedPath = artifactPaths.getMergedOutputPath(
       this._options.outputDir,
-      this._currentTestSlug,
+      currentTestSlug,
       mergedFormat,
     )
     this._log(
@@ -1178,10 +868,10 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    this._recordedSegments.add(publishedMergedPath)
+    this._captureSession.addRecordedPath(publishedMergedPath)
     if (deleteSegments) {
       for (const segmentPath of segmentPaths) {
-        this._recordedSegments.delete(segmentPath)
+        this._captureSession.deleteRecordedPath(segmentPath)
       }
     }
   }
@@ -1338,81 +1028,6 @@ export default class WdioPuppeteerVideoService
     }
   }
 
-  private async _kickOffScreencastFrames(page: Page): Promise<void> {
-    await capture.primeScreencastFrames(page, this._clock)
-  }
-
-  private async _kickOffScreencastFramesIfEnabled(page: Page): Promise<void> {
-    if (!this._options.capture.framePriming) {
-      return
-    }
-
-    await this._kickOffScreencastFrames(page)
-  }
-
-  private async _waitForWriteStream(segment: ActiveSegment): Promise<boolean> {
-    if (segment.writeStreamErrored) {
-      await this._waitForWriteStreamCompletion(segment)
-      return false
-    }
-
-    const ok = await Promise.race([
-      segment.writeStreamDone.then(() => true).catch(() => false),
-      this._createWriteStreamTimeout(),
-    ])
-
-    if (!ok) {
-      this._log(
-        'warn',
-        `[WdioPuppeteerVideoService] Timed out waiting for recording stream to finish: ${segment.recordingPath}`,
-      )
-      await this._destroyTimedOutWriteStream(segment)
-      return false
-    }
-
-    return true
-  }
-
-  private async _createWriteStreamTimeout(): Promise<false> {
-    await this._clock.delay(WRITE_STREAM_TIMEOUT_MS)
-    return false
-  }
-
-  private _markSegmentAsUnclean(segment: ActiveSegment): void {
-    segment.transcode = false
-    segment.outputPath = segment.recordingPath
-    segment.outputFormat = segment.recordingFormat
-  }
-
-  private async _waitForWriteStreamCompletion(
-    segment: Pick<ActiveSegment, 'writeStreamDone'>,
-  ): Promise<void> {
-    await segment.writeStreamDone.catch(() => {
-      /* already errored */
-    })
-  }
-
-  private async _destroyTimedOutWriteStream(
-    segment: Pick<
-      ActiveSegment,
-      | 'recordingPath'
-      | 'writeStream'
-      | 'writeStreamDone'
-      | 'writeStreamErrored'
-      | 'writeStreamErrorMessage'
-    >,
-  ): Promise<void> {
-    const timeoutMessage = `Timed out waiting for recording stream to finish: ${segment.recordingPath}`
-    segment.writeStreamErrored = true
-    segment.writeStreamErrorMessage = timeoutMessage
-
-    if (!segment.writeStream.destroyed) {
-      segment.writeStream.destroy(new Error(timeoutMessage))
-    }
-
-    await this._waitForWriteStreamCompletion(segment)
-  }
-
   private async _finalizeSegment(segment: ActiveSegment): Promise<void> {
     const recordedSize = await this._fileSystem
       .stat(segment.recordingPath)
@@ -1431,12 +1046,12 @@ export default class WdioPuppeteerVideoService
     }
 
     if (!segment.transcode) {
-      this._recordedSegments.add(segment.outputPath)
+      this._captureSession.addRecordedPath(segment.outputPath)
       return
     }
 
     if (this._shouldDeferPostProcessing()) {
-      this._recordedSegments.add(segment.recordingPath)
+      this._captureSession.addRecordedPath(segment.recordingPath)
 
       if (this._options.processing.merge.enabled) {
         return
@@ -1466,7 +1081,7 @@ export default class WdioPuppeteerVideoService
     )
     if (transcodedPath) {
       segment.outputPath = transcodedPath
-      this._recordedSegments.add(transcodedPath)
+      this._captureSession.addRecordedPath(transcodedPath)
       if (
         segment.transcodeOptions.deleteOriginal &&
         segment.recordingPath !== segment.outputPath
@@ -1482,7 +1097,7 @@ export default class WdioPuppeteerVideoService
       'warn',
       `[WdioPuppeteerVideoService] Transcode failed, keeping original recording: ${segment.recordingPath}`,
     )
-    this._recordedSegments.add(segment.recordingPath)
+    this._captureSession.addRecordedPath(segment.recordingPath)
     this._reportPostProcessFailure(
       `Transcode failed, keeping original recording: ${segment.recordingPath}`,
       true,
@@ -1827,7 +1442,7 @@ export default class WdioPuppeteerVideoService
   private _canUseRecordingHooks(): boolean {
     return (
       this._isChromium &&
-      !!this._browser &&
+      !!this._captureSession.browser &&
       this._recordingDisabledReason === undefined
     )
   }
@@ -1845,19 +1460,9 @@ export default class WdioPuppeteerVideoService
 
   private async _resetTestState(): Promise<void> {
     await this._recordingLifecycle.reset(async () => {
-      this._recorder = undefined
-      this._activeSegment = undefined
-      this._currentSegment = 0
-      this._currentTestSlug = ''
-      this._currentWindowHandle = undefined
-      this._manifestCaptureDimensions = undefined
-      this._recordedSegments.clear()
+      await this._captureEngine.resetRecording()
       await this._recordingSlotScheduler.release()
     })
-  }
-
-  private _isRecordingActive(): boolean {
-    return !!this._currentTestSlug || !!this._recorder || !!this._activeSegment
   }
 
   /** @internal Exposed for unit testing only. */
@@ -1878,12 +1483,5 @@ export default class WdioPuppeteerVideoService
       sessionIdToken: this._sessionIdToken,
       sessionIdFullToken: this._sessionIdFullToken,
     })
-  }
-
-  private _nextPageMarkerId(): string {
-    this._pageMarkerCounter += 1
-    const sessionToken =
-      this._sessionIdToken || this._sessionIdFullToken || 'session'
-    return `wdio-video-${sessionToken}-${this._pageMarkerCounter.toString(36)}-${this._uuid()}`
   }
 }

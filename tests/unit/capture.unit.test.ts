@@ -7,13 +7,6 @@ import {
   startScreencast,
 } from '../../src/service/capture.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
-import { PAGE_MARKER_PROPERTY } from '../../src/service/page-lookup.js'
-import WdioPuppeteerVideoService from '../../src/service.js'
-
-interface CaptureServiceProbe {
-  _prepareRecordingPage: (browser: unknown) => Promise<unknown>
-  _sessionProtocol: string
-}
 
 const createRecorder = (): ScreenRecorder => {
   return { id: 'recorder' } as unknown as ScreenRecorder
@@ -23,7 +16,6 @@ describe('Puppeteer 25 capture controls', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.useRealTimers()
-    Reflect.deleteProperty(globalThis, PAGE_MARKER_PROPERTY)
   })
 
   it('passes supported options directly and restores an explicit viewport', async () => {
@@ -250,62 +242,5 @@ describe('Puppeteer 25 capture controls', () => {
     )
     expect(setViewport).toHaveBeenCalledTimes(2)
     expect(delay).toHaveBeenCalledWith(50)
-  })
-
-  it('uses a unique non-enumerable page marker and removes it after lookup', async () => {
-    const descriptors: Array<PropertyDescriptor | undefined> = []
-    const markerIds: string[] = []
-    const page = {
-      bringToFront: async () => {},
-      evaluate: async (
-        callback: (property: string) => unknown,
-        property: string,
-      ) => {
-        descriptors.push(Object.getOwnPropertyDescriptor(globalThis, property))
-        return callback(property)
-      },
-    }
-    const execute = async (
-      callback: (property: string, id: string) => void,
-      property: string,
-      id: string,
-    ) => {
-      markerIds.push(id)
-      callback(property, id)
-    }
-    const browser = {
-      capabilities: {
-        browserName: 'chrome',
-        webSocketUrl: 'ws://localhost/bidi',
-      },
-      execute,
-      getPuppeteer: async () => ({
-        connected: true,
-        pages: async () => [page],
-      }),
-      getWindowHandle: async () => 'window-1',
-      options: { hostname: 'localhost' },
-    }
-    const firstService = new WdioPuppeteerVideoService({
-      logLevel: 'silent',
-    }) as unknown as CaptureServiceProbe
-    const secondService = new WdioPuppeteerVideoService({
-      logLevel: 'silent',
-    }) as unknown as CaptureServiceProbe
-
-    await expect(
-      firstService._prepareRecordingPage(browser),
-    ).resolves.toBeTruthy()
-    await expect(
-      secondService._prepareRecordingPage(browser),
-    ).resolves.toBeTruthy()
-
-    expect(descriptors).toHaveLength(2)
-    expect(
-      descriptors.every((descriptor) => descriptor?.enumerable === false),
-    ).toBe(true)
-    expect(markerIds[0]).not.toBe(markerIds[2])
-    expect(Reflect.has(globalThis, PAGE_MARKER_PROPERTY)).toBe(false)
-    expect(firstService._sessionProtocol).toBe('bidi+cdp')
   })
 })

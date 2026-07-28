@@ -5,6 +5,7 @@ import type { Frameworks } from '@wdio/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { isVideoManifest, type VideoManifestV1 } from '../../src/manifest.js'
+import type { CaptureSession } from '../../src/service/capture-session.js'
 import { assignLauncherWorkerContext } from '../../src/service/launcher-context.js'
 import {
   aggregateManifestRun,
@@ -232,30 +233,25 @@ describe('service manifest hooks', () => {
     })
     await service.beforeSession(config, { browserName: 'chrome' }, [], '3-2')
     const internals = service as unknown as {
-      _browser: unknown
+      _captureSession: CaptureSession
       _isChromium: boolean
       _manifestRecorder: {
         flush: () => Promise<void>
       }
-      _puppeteerBrowser: unknown
-      _sessionProtocol: string
       _teardownRecording: (source: string) => Promise<void>
     }
-    internals._browser = createBrowser('chrome')
+    internals._captureSession.setBrowser(createBrowser('chrome'))
     internals._isChromium = true
-    internals._puppeteerBrowser = {}
-    internals._sessionProtocol = 'classic+cdp'
+    internals._captureSession.setConnection({} as never, 'classic+cdp')
     internals._teardownRecording = vi.fn().mockResolvedValue(undefined)
     vi.spyOn(internals._manifestRecorder, 'flush').mockRejectedValue(
       new Error('flush unavailable'),
     )
 
     await expect(service.afterSession()).rejects.toThrow('flush unavailable')
-    expect(internals).toMatchObject({
-      _browser: undefined,
-      _isChromium: false,
-      _puppeteerBrowser: undefined,
-      _sessionProtocol: 'unsupported',
-    })
+    expect(internals._captureSession.browser).toBeUndefined()
+    expect(internals._captureSession.puppeteerBrowser).toBeUndefined()
+    expect(internals._captureSession.protocol).toBe('unsupported')
+    expect(internals._isChromium).toBe(false)
   })
 })
