@@ -7,7 +7,6 @@ import type {
   ScreenRecorder,
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
-import type { AllureVideoIntegration } from './service/allure-integration.js'
 import * as artifactIntegrity from './service/artifact-integrity.js'
 import type {
   ClockBoundary,
@@ -32,7 +31,6 @@ import {
   type MergeExecutionOptions,
   type OutputFormat,
   RECORDER_STOP_TIMEOUT_MS,
-  type ResolvedRetryContext,
   type ResolvedTranscodeOptions,
   SEGMENT_SWITCH_DELAY_MS,
   WINDOW_SEGMENT_COMMANDS,
@@ -40,14 +38,12 @@ import {
 } from './service/constants.js'
 import * as ffmpeg from './service/ffmpeg.js'
 import type { FfmpegProcessRegistry } from './service/ffmpeg-runner.js'
-import * as filtering from './service/filtering.js'
 import {
   createLauncherRegistrationError,
   inspectLauncherWorkerContext,
 } from './service/launcher-context.js'
 import * as logging from './service/logging.js'
 import {
-  type CompleteManifestEntryOptions,
   hasManifestWorkerContexts,
   type ManifestCaptureDimensions,
   ManifestWorkerRecorder,
@@ -66,11 +62,18 @@ import {
   isChromiumSession,
   type SessionProtocol,
 } from './service/protocol.js'
+import {
+  normalizeScenarioEntity,
+  normalizeScenarioOutcome,
+  normalizeTestEntity,
+  normalizeTestOutcome,
+} from './service/recording-entity.js'
 import { RecordingLifecycle } from './service/recording-lifecycle.js'
 import type {
   PostProcessSlotScheduler,
   RecordingSlotScheduler,
 } from './service/recording-slots.js'
+import type { WorkerRecordingCoordinatorPort } from './service/worker-recording-coordinator.js'
 import type {
   LogLevel,
   ResolvedWdioPuppeteerVideoServiceOptions,
@@ -83,7 +86,6 @@ import {
   collectSlugMetadata,
   reserveUniqueSlug,
   type SlugMetadata,
-  sanitizeFileToken,
 } from './video-name-utils.js'
 
 const replaceFileExtension = (
@@ -92,16 +94,6 @@ const replaceFileExtension = (
 ): string => {
   const parsed = path.parse(filePath)
   return path.join(parsed.dir, `${parsed.name}.${format}`)
-}
-
-const resolveManifestTestResult = (
-  pending: boolean,
-  passed: boolean,
-): 'failed' | 'passed' | 'skipped' => {
-  if (pending) {
-    return 'skipped'
-  }
-  return passed ? 'passed' : 'failed'
 }
 
 const validateLauncherWorkerConfiguration = (config: unknown): void => {
@@ -140,16 +132,11 @@ export default class WdioPuppeteerVideoService
   private _activeSegment: ActiveSegment | undefined
   private _currentSegment = 0
   private _currentTestSlug = ''
-  private _currentRecordingRetryCount = 0
   private readonly _recordedSegments = new Set<string>()
-  private readonly _entityAttemptCount = new Map<string, number>()
-  private _specFileRetryAttempt = 0
   private _isChromium = false
   private _puppeteerBrowser: PuppeteerBrowser | undefined
   private _sessionProtocol: SessionProtocol = 'unsupported'
   private _recordingDisabledReason: string | undefined
-  private _specHadFailure = false
-  private _specPaths: string[] = []
   private _currentWindowHandle: string | undefined
   private _sessionIdToken = ''
   private _sessionIdFullToken = ''
@@ -173,11 +160,10 @@ export default class WdioPuppeteerVideoService
   private readonly _postProcessSlotScheduler: PostProcessSlotScheduler
   private readonly _recordingLifecycle = new RecordingLifecycle()
   private readonly _ffmpegProcessRegistry: FfmpegProcessRegistry
-  private readonly _wildcardPatternRegexCache = new Map<string, RegExp>()
   private _pageMarkerCounter = 0
   private _manifestRecorder: ManifestWorkerRecorder | undefined
   private _manifestCaptureDimensions: ManifestCaptureDimensions | undefined
-  private readonly _allureIntegration: AllureVideoIntegration | undefined
+  private readonly _recordingCoordinator: WorkerRecordingCoordinatorPort
 
   constructor(
     options: WdioPuppeteerVideoServiceOptions = {},
@@ -203,7 +189,7 @@ export default class WdioPuppeteerVideoService
     this._runFfmpegProcess = composition.runFfmpeg
     this._writeLog = composition.writeLog
     this._ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
-    this._allureIntegration = composition.createAllureIntegration(
+    const allureIntegration = composition.createAllureIntegration(
       this._options.integrations.allure,
       (level, message, details) => {
         this._log(level, message, details)
@@ -221,6 +207,30 @@ export default class WdioPuppeteerVideoService
         this._log(level, message, details)
       },
     )
+    this._recordingCoordinator = composition.createRecordingCoordinator({
+      actions: {
+        finalizeMedia: (passed, keepArtifacts) =>
+          this._finalizeRecordingMedia(passed, keepArtifacts),
+        getAvailability: () => ({
+          available: this._canUseRecordingHooks(),
+          ...(this._recordingDisabledReason
+            ? { reason: this._recordingDisabledReason }
+            : {}),
+        }),
+        getRecordedPaths: () => [...this._recordedSegments],
+        isRecordingActive: () => this._isRecordingActive(),
+        resetRecording: () => this._resetTestState(),
+        runSerialized: (task) => this._runSerializedRecordingTask(task),
+        startRecording: (metadata, retryCount) =>
+          this._startRecordingForMetadata(metadata, retryCount),
+      },
+      ...(allureIntegration ? { allure: allureIntegration } : {}),
+      getLogLevel: () => this._logLevel,
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      options: this._options,
+    })
   }
 
   async beforeSession(
@@ -231,13 +241,14 @@ export default class WdioPuppeteerVideoService
   ): Promise<void> {
     validateLauncherWorkerConfiguration(config)
     const manifestContext = readManifestRunContext(config)
+    const framework = normalizeManifestFramework(
+      (config as { framework?: unknown } | undefined)?.framework,
+    )
     this._manifestRecorder = manifestContext
       ? new ManifestWorkerRecorder({
           context: manifestContext,
           cid,
-          framework: normalizeManifestFramework(
-            (config as { framework?: unknown } | undefined)?.framework,
-          ),
+          framework,
           failurePolicy: this._options.failurePolicy,
           onJournalError: (operation, error) => {
             this._log(
@@ -251,10 +262,15 @@ export default class WdioPuppeteerVideoService
     if (!workerContext) {
       throw createLauncherRegistrationError('malformed')
     }
-    this._specFileRetryAttempt = workerContext.specFileRetryAttempt
+    const specFileRetryAttempt = workerContext.specFileRetryAttempt
+    this._recordingCoordinator.configureSession({
+      framework,
+      ...(this._manifestRecorder ? { manifest: this._manifestRecorder } : {}),
+      specFileRetryAttempt,
+    })
     this._log(
       'debug',
-      `[WdioPuppeteerVideoService] Hydrated launcher retry context for cid=${cid}: ${this._specFileRetryAttempt.toString()}`,
+      `[WdioPuppeteerVideoService] Hydrated launcher retry context for cid=${cid}: ${specFileRetryAttempt.toString()}`,
     )
   }
 
@@ -264,10 +280,8 @@ export default class WdioPuppeteerVideoService
     browser: Browser,
   ): Promise<void> {
     this._browser = browser
-    this._specPaths = specs
-    this._specHadFailure = false
     this._recordingDisabledReason = undefined
-    this._entityAttemptCount.clear()
+    this._recordingCoordinator.beginWorker(specs)
 
     if (!this._hasExplicitLogLevel) {
       const inheritedLogLevel = logging.resolveWdioLogLevel(browser)
@@ -318,73 +332,14 @@ export default class WdioPuppeteerVideoService
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
-    const manifestScope = this._options.recording.scope
-    const manifestEntryAlreadyActive =
-      manifestScope === 'spec' && !!this._manifestRecorder?.currentEntryId
-    await this._manifestRecorder?.beginEntity({
-      test,
-      scope: manifestScope,
-      specPaths: this._specPaths,
-    })
-    if (!this._canUseRecordingHooks()) {
-      if (!manifestEntryAlreadyActive) {
-        await this._manifestRecorder?.completeCurrent({
-          decision: 'skipped',
-          result: test.pending ? 'skipped' : 'unknown',
-          reason:
-            this._recordingDisabledReason ?? 'recording-hooks-unavailable',
-          processingOutcome: 'skipped',
-        })
-      }
-      return
-    }
-
-    await this._runSerializedRecordingTask(async () => {
-      if (!this._shouldRecordForFilters(test, context)) {
-        if (!manifestEntryAlreadyActive) {
-          await this._manifestRecorder?.completeCurrent({
-            decision: 'skipped',
-            result: test.pending ? 'skipped' : 'unknown',
-            reason: 'filtered',
-            processingOutcome: 'skipped',
-          })
-        }
-        return
-      }
-
-      const retryContext = this._resolveRetryContextForEntity(test, context)
-      const retryCount = retryContext.effectiveRetryCount
-      this._manifestRecorder?.setCurrentAttempt(retryCount + 1)
-      const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
-      this._logRetryDecision(
-        retryContext,
-        test.title || test.fullTitle || 'test',
-        shouldRecordForRetry,
-      )
-      if (!shouldRecordForRetry) {
-        this._logRetrySkip(retryContext, test.title || test.fullTitle || 'test')
-        if (!manifestEntryAlreadyActive) {
-          await this._manifestRecorder?.completeCurrent({
-            decision: 'skipped',
-            result: test.pending ? 'skipped' : 'unknown',
-            reason: 'not-a-retry-attempt',
-            processingOutcome: 'skipped',
-          })
-        }
-        return
-      }
-
-      if (this._options.recording.scope === 'spec') {
-        if (this._currentTestSlug) {
-          return
-        }
-
-        await this._startSpecLevelRecording(retryCount)
-        return
-      }
-
-      await this._startRecordingForEntity(test, context, retryCount)
-    })
+    await this._recordingCoordinator.beginEntity(
+      normalizeTestEntity(
+        test,
+        context,
+        this._recordingCoordinator.framework,
+        this._options.artifacts.naming.style,
+      ),
+    )
   }
 
   async afterTest(
@@ -392,9 +347,8 @@ export default class WdioPuppeteerVideoService
     _context: unknown,
     result: Frameworks.TestResult,
   ): Promise<void> {
-    await this._recordManifestResultAndFinalize(
-      resolveManifestTestResult(!!test.pending, result.passed),
-      result.passed,
+    await this._recordingCoordinator.endEntity(
+      normalizeTestOutcome(test, result),
     )
   }
 
@@ -402,123 +356,20 @@ export default class WdioPuppeteerVideoService
     world: Frameworks.World,
     context: unknown,
   ): Promise<void> {
-    const cucumberEntity = {
-      title: world?.pickle?.name || 'scenario',
-      fullTitle: world?.pickle?.name || 'scenario',
-    } as Frameworks.Test
-    const manifestEntryAlreadyActive =
-      this._options.recording.scope === 'spec' &&
-      !!this._manifestRecorder?.currentEntryId
-    await this._manifestRecorder?.beginEntity({
-      test: cucumberEntity,
-      scope: this._options.recording.scope,
-      specPaths: this._specPaths,
-    })
-    if (!this._canUseRecordingHooks()) {
-      if (!manifestEntryAlreadyActive) {
-        await this._manifestRecorder?.completeCurrent({
-          decision: 'skipped',
-          result: 'unknown',
-          reason:
-            this._recordingDisabledReason ?? 'recording-hooks-unavailable',
-          processingOutcome: 'skipped',
-        })
-      }
-      return
-    }
-
-    await this._runSerializedRecordingTask(async () => {
-      const scenarioContext = context ?? world
-      if (!this._shouldRecordForFilters(cucumberEntity, scenarioContext)) {
-        if (!manifestEntryAlreadyActive) {
-          await this._manifestRecorder?.completeCurrent({
-            decision: 'skipped',
-            result: 'unknown',
-            reason: 'filtered',
-            processingOutcome: 'skipped',
-          })
-        }
-        return
-      }
-
-      const retryContext = this._resolveRetryContextForEntity(
-        cucumberEntity,
-        scenarioContext,
-      )
-      const retryCount = retryContext.effectiveRetryCount
-      this._manifestRecorder?.setCurrentAttempt(retryCount + 1)
-      const shouldRecordForRetry = this._shouldRecordForRetryCount(retryCount)
-      this._logRetryDecision(
-        retryContext,
-        cucumberEntity.title,
-        shouldRecordForRetry,
-      )
-      if (!shouldRecordForRetry) {
-        this._logRetrySkip(retryContext, cucumberEntity.title)
-        if (!manifestEntryAlreadyActive) {
-          await this._manifestRecorder?.completeCurrent({
-            decision: 'skipped',
-            result: 'unknown',
-            reason: 'not-a-retry-attempt',
-            processingOutcome: 'skipped',
-          })
-        }
-        return
-      }
-
-      if (this._options.recording.scope === 'spec') {
-        if (this._currentTestSlug) {
-          return
-        }
-
-        await this._startSpecLevelRecording(retryCount)
-        return
-      }
-
-      await this._startRecordingForEntity(
-        cucumberEntity,
-        scenarioContext,
-        retryCount,
-      )
-    })
+    await this._recordingCoordinator.beginEntity(
+      normalizeScenarioEntity(
+        world,
+        context,
+        this._options.artifacts.naming.style,
+      ),
+    )
   }
 
   async afterScenario(
     _world: Frameworks.World,
     result: Frameworks.PickleResult,
   ): Promise<void> {
-    await this._recordManifestResultAndFinalize(
-      result.passed ? 'passed' : 'failed',
-      result.passed,
-    )
-  }
-
-  private async _recordManifestResultAndFinalize(
-    result: 'failed' | 'passed' | 'skipped',
-    passed: boolean,
-  ): Promise<void> {
-    let manifestFailure: { error: unknown } | undefined
-    try {
-      await this._manifestRecorder?.recordResult(result)
-    } catch (error) {
-      manifestFailure = { error }
-    }
-
-    await this._afterTestOrScenario(passed)
-    if (manifestFailure) {
-      throw manifestFailure.error
-    }
-  }
-
-  private async _afterTestOrScenario(passed: boolean): Promise<void> {
-    if (this._options.recording.scope === 'spec') {
-      if (!passed) {
-        this._specHadFailure = true
-      }
-      return
-    }
-
-    await this._finalizeIfRecording(passed)
+    await this._recordingCoordinator.endEntity(normalizeScenarioOutcome(result))
   }
 
   async after(): Promise<void> {
@@ -582,11 +433,8 @@ export default class WdioPuppeteerVideoService
     const task = this._runSerializedRecordingTask(async () => {
       try {
         if (this._isRecordingActive()) {
-          if (
-            this._options.recording.scope === 'spec' &&
-            this._currentTestSlug
-          ) {
-            await this._finalizeCurrentTestRecording(!this._specHadFailure)
+          if (this._recordingCoordinator.isSpecScope && this._currentTestSlug) {
+            await this._recordingCoordinator.finalizeSpecRecording()
           } else {
             await this._stopRecording()
             await this._resetTestState()
@@ -608,8 +456,7 @@ export default class WdioPuppeteerVideoService
         ) {
           await this._postProcessSlotScheduler.release()
         }
-        this._entityAttemptCount.clear()
-        this._specHadFailure = false
+        this._recordingCoordinator.resetWorkerState()
         this._log(
           'trace',
           `[WdioPuppeteerVideoService] Recording teardown completed from ${source}.`,
@@ -1080,51 +927,12 @@ export default class WdioPuppeteerVideoService
     }
   }
 
-  private async _startRecordingForEntity(
-    test: Frameworks.Test,
-    context: unknown,
-    retryCount: number,
-  ): Promise<void> {
-    if (this._currentTestSlug) {
-      return
-    }
-
-    const metadata = this._applyRetryCountToMetadata(
-      collectSlugMetadata(test, context, this._options.artifacts.naming.style),
-      retryCount,
-    )
-    await this._startRecordingForMetadata(metadata, retryCount)
-  }
-
-  private async _startSpecLevelRecording(retryCount: number): Promise<void> {
-    const specMetadata = this._buildSpecLevelSlugMetadata(retryCount)
-    await this._startRecordingForMetadata(specMetadata, retryCount)
-  }
-
-  private _buildSpecLevelSlugMetadata(retryCount: number): SlugMetadata {
-    const firstSpecPath = this._specPaths[0] || 'spec'
-    const parsedSpecName = path.parse(firstSpecPath).name
-    const specToken = sanitizeFileToken(parsedSpecName, 120) || 'spec'
-    const specNameToken = specToken.endsWith('_spec')
-      ? specToken
-      : `${specToken}_spec`
-    const allSpecsToken =
-      this._specPaths.length > 0 ? this._specPaths.join('|') : firstSpecPath
-
-    return {
-      fileToken: specToken,
-      testNameToken: specNameToken,
-      retryToken: retryCount > 0 ? `_retry${retryCount}` : '',
-      hashInput: `spec|${allSpecsToken}|${retryCount}`,
-    }
-  }
-
   private async _startRecordingForMetadata(
-    metadata: SlugMetadata,
-    retryCount: number,
-  ): Promise<void> {
+    metadata: Readonly<SlugMetadata>,
+    _retryCount: number,
+  ): Promise<boolean> {
     if (this._currentTestSlug) {
-      return
+      return true
     }
 
     this._log(
@@ -1139,303 +947,50 @@ export default class WdioPuppeteerVideoService
       this._slugUsageCount,
     )
     this._currentSegment = 1
-    this._currentRecordingRetryCount = retryCount
     this._recordedSegments.clear()
     this._currentWindowHandle = undefined
     this._activeSegment = undefined
 
-    const started = await this._startRecording()
-    if (!started) {
-      try {
-        await this._manifestRecorder?.completeCurrent({
-          decision: 'failed',
-          result: 'unknown',
-          reason: this._recordingDisabledReason ?? 'recording-start-failed',
-          processingOutcome: 'failed',
-          processingOperation: 'capture',
-        })
-      } finally {
-        await this._resetTestState()
-      }
-    }
+    return this._startRecording()
   }
 
-  private _resolveRetryContextForEntity(
-    test: Frameworks.Test,
-    context: unknown,
-  ): ResolvedRetryContext {
-    const explicitFrameworkRetry = this._extractExplicitRetryCount(
-      test,
-      context,
-    )
-    let inferredEntityRetry: number | undefined
-
-    if (this._options.recording.attempts === 'retries') {
-      const metadata = collectSlugMetadata(
-        test,
-        context,
-        this._options.artifacts.naming.style,
-      )
-      const retryTrackingKey = `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
-      inferredEntityRetry = this._entityAttemptCount.get(retryTrackingKey) ?? 0
-      this._entityAttemptCount.set(retryTrackingKey, inferredEntityRetry + 1)
-    }
-
-    const effectiveRetryCount = Math.max(
-      explicitFrameworkRetry ?? 0,
-      this._specFileRetryAttempt,
-      inferredEntityRetry ?? 0,
-    )
-
-    return {
-      explicitFrameworkRetry,
-      specFileRetryAttempt: this._specFileRetryAttempt,
-      inferredEntityRetry,
-      effectiveRetryCount,
-    }
-  }
-
-  private _extractExplicitRetryCount(
-    test: Frameworks.Test,
-    context: unknown,
-  ): number | undefined {
-    const testRetryCount = this._extractRetryValue(
-      (test as Frameworks.Test & { _currentRetry?: unknown })._currentRetry,
-    )
-    if (testRetryCount !== undefined) {
-      return testRetryCount
-    }
-
-    const contextRecord =
-      context && typeof context === 'object'
-        ? (context as Record<string, unknown>)
-        : undefined
-    const contextRetryCount = this._extractRetryValue(
-      contextRecord?._currentRetry,
-    )
-    if (contextRetryCount !== undefined) {
-      return contextRetryCount
-    }
-
-    const currentTestRecord =
-      contextRecord &&
-      typeof contextRecord.currentTest === 'object' &&
-      contextRecord.currentTest
-        ? (contextRecord.currentTest as Record<string, unknown>)
-        : undefined
-    return this._extractRetryValue(currentTestRecord?._currentRetry)
-  }
-
-  private _extractRetryValue(value: unknown): number | undefined {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-      return undefined
-    }
-
-    return Math.floor(value)
-  }
-
-  private _applyRetryCountToMetadata(
-    metadata: SlugMetadata,
-    retryCount: number,
-  ): SlugMetadata {
-    if (retryCount <= 0) {
-      return {
-        ...metadata,
-        retryToken: '',
-      }
-    }
-
-    const retryToken = `_retry${retryCount}`
-    return {
-      ...metadata,
-      retryToken,
-      hashInput: `${metadata.hashInput}|retry=${retryCount}`,
-    }
-  }
-
-  private _shouldRecordForRetryCount(retryCount: number): boolean {
-    if (this._options.recording.attempts !== 'retries') {
-      return true
-    }
-
-    return retryCount > 0
-  }
-
-  private _logRetryDecision(
-    retryContext: ResolvedRetryContext,
-    entityLabel: string,
-    shouldRecord: boolean,
-  ): void {
-    if (
-      this._options.recording.attempts !== 'retries' ||
-      !logging.shouldLog('trace', this._logLevel)
-    ) {
-      return
-    }
-
-    this._log(
-      'trace',
-      `[WdioPuppeteerVideoService] Retry decision for "${entityLabel}": ${shouldRecord ? 'record' : 'skip'} (effectiveRetry=${retryContext.effectiveRetryCount}, frameworkRetry=${retryContext.explicitFrameworkRetry ?? 0}, specFileRetry=${retryContext.specFileRetryAttempt}, inferredRetry=${retryContext.inferredEntityRetry ?? 0}).`,
-    )
-  }
-
-  private _logRetrySkip(
-    retryContext: ResolvedRetryContext,
-    entityLabel: string,
-  ): void {
-    if (
-      this._options.recording.attempts !== 'retries' ||
-      !logging.shouldLog('debug', this._logLevel)
-    ) {
-      return
-    }
-
-    this._log(
-      'debug',
-      `[WdioPuppeteerVideoService] Skipping recording for "${entityLabel}" because retryCount=0 (frameworkRetry=${retryContext.explicitFrameworkRetry ?? 0}, specFileRetry=${retryContext.specFileRetryAttempt}, inferredRetry=${retryContext.inferredEntityRetry ?? 0}).`,
-    )
-  }
-
-  private _shouldRecordForFilters(
-    test: Frameworks.Test,
-    context: unknown,
-  ): boolean {
-    return filtering.shouldRecordForFilters(
-      this._options.recording.filters,
-      test,
-      context,
-      this._wildcardPatternRegexCache,
-    )
-  }
-
-  private async _finalizeIfRecording(passed: boolean): Promise<void> {
-    if (!this._isRecordingActive()) {
-      return
-    }
-
-    await this._runSerializedRecordingTask(async () => {
-      await this._finalizeCurrentTestRecording(passed)
-    })
-  }
-
-  private async _finalizeCurrentTestRecording(passed: boolean): Promise<void> {
+  private async _finalizeRecordingMedia(
+    passed: boolean,
+    keepArtifacts: boolean,
+  ): Promise<{ deferred: boolean; paths: readonly string[] }> {
     if (!this._currentTestSlug) {
-      return
+      return { deferred: false, paths: [] }
     }
 
-    let keepArtifacts = false
-    let allureError: Error | undefined
     const deferredTaskCount = this._deferredPostProcessTasks.length
-    try {
-      await this._recordingLifecycle.finalize({
-        stopRecording: async () => {
-          await this._stopRecording()
-        },
-        processArtifacts: async () => {
-          const shouldKeepArtifacts = this._shouldKeepRecording(passed)
-          keepArtifacts = shouldKeepArtifacts
-          this._log(
-            'debug',
-            `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${shouldKeepArtifacts}).`,
-          )
-          if (!shouldKeepArtifacts) {
-            await this._deleteSegments()
-            return
+    await this._recordingLifecycle.finalize({
+      stopRecording: async () => {
+        await this._stopRecording()
+      },
+      processArtifacts: async () => {
+        this._log(
+          'debug',
+          `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${keepArtifacts}).`,
+        )
+        if (!keepArtifacts) {
+          await this._deleteSegments()
+          return
+        }
+
+        if (this._options.processing.merge.enabled) {
+          if (this._shouldDeferPostProcessing()) {
+            await this._queueDeferredMergeForCurrentTest()
+          } else {
+            await this._mergeSegmentsForCurrentTest()
           }
+        }
+      },
+    })
 
-          if (this._options.processing.merge.enabled) {
-            if (this._shouldDeferPostProcessing()) {
-              await this._queueDeferredMergeForCurrentTest()
-            } else {
-              await this._mergeSegmentsForCurrentTest()
-            }
-          }
-        },
-      })
-      const paths = [...this._recordedSegments]
-      const deferred = this._deferredPostProcessTasks.length > deferredTaskCount
-      await this._manifestRecorder?.completeCurrent(
-        this._createCompletedManifestOptions({
-          deferred,
-          keepArtifacts,
-          passed,
-          paths,
-        }),
-      )
-      const allureResult = await this._allureIntegration?.attachRetainedVideos(
-        paths,
-        passed,
-      )
-      allureError = allureResult?.error
-    } catch (error) {
-      await this._manifestRecorder
-        ?.completeCurrent({
-          decision: 'failed',
-          result: passed ? 'passed' : 'failed',
-          paths: [...this._recordedSegments],
-          reason: normalization.describeError(error),
-          processingOutcome: 'failed',
-        })
-        .catch(() => undefined)
-      throw error
-    } finally {
-      await this._resetTestState()
-    }
-
-    if (allureError && this._options.failurePolicy === 'error') {
-      throw allureError
-    }
-  }
-
-  private _createCompletedManifestOptions(options: {
-    deferred: boolean
-    keepArtifacts: boolean
-    passed: boolean
-    paths: string[]
-  }): CompleteManifestEntryOptions {
-    let decision: CompleteManifestEntryOptions['decision'] = 'discarded'
-    if (options.keepArtifacts) {
-      decision = options.paths.length > 0 ? 'recorded' : 'failed'
-    }
-
-    let processingOutcome: CompleteManifestEntryOptions['processingOutcome'] =
-      'skipped'
-    if (options.deferred) {
-      processingOutcome = 'pending'
-    } else if (options.keepArtifacts) {
-      processingOutcome = this._isPostProcessingConfigured()
-        ? 'completed'
-        : 'not-required'
-    }
-
-    const processingOperation = this._resolveProcessingOperation()
     return {
-      decision,
-      result: options.passed ? 'passed' : 'failed',
-      paths: options.paths,
-      ...(!options.keepArtifacts ? { reason: 'retention-policy' } : {}),
-      processingOutcome,
-      ...(processingOperation ? { processingOperation } : {}),
+      deferred: this._deferredPostProcessTasks.length > deferredTaskCount,
+      paths: [...this._recordedSegments],
     }
-  }
-
-  private _isPostProcessingConfigured(): boolean {
-    return !!(
-      this._options.processing.merge.enabled ||
-      this._options.processing.transcode.enabled
-    )
-  }
-
-  private _resolveProcessingOperation():
-    | CompleteManifestEntryOptions['processingOperation']
-    | undefined {
-    if (this._options.processing.merge.enabled) {
-      return 'merge'
-    }
-    if (this._options.processing.transcode.enabled) {
-      return 'transcode'
-    }
-    return undefined
   }
 
   private async _stopRecording(): Promise<void> {
@@ -2269,17 +1824,6 @@ export default class WdioPuppeteerVideoService
     this._writeLog(this._logLevel, level, message, details)
   }
 
-  private _shouldKeepRecording(passed: boolean): boolean {
-    switch (this._options.recording.retain) {
-      case 'all':
-        return true
-      case 'retries':
-        return this._currentRecordingRetryCount > 0
-      default:
-        return !passed
-    }
-  }
-
   private _canUseRecordingHooks(): boolean {
     return (
       this._isChromium &&
@@ -2305,7 +1849,6 @@ export default class WdioPuppeteerVideoService
       this._activeSegment = undefined
       this._currentSegment = 0
       this._currentTestSlug = ''
-      this._currentRecordingRetryCount = 0
       this._currentWindowHandle = undefined
       this._manifestCaptureDimensions = undefined
       this._recordedSegments.clear()

@@ -7,6 +7,7 @@ import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
 import * as ffmpeg from '../../src/service/ffmpeg.js'
 import * as pageLookup from '../../src/service/page-lookup.js'
+import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoServiceRuntime from '../../src/service.js'
 import WdioPuppeteerVideoService, {
   type CharacterizedServiceOptions,
@@ -49,15 +50,6 @@ type RetryLauncherService = {
 }
 
 type RetryWorkerService = {
-  _isChromium: boolean
-  _ffmpegAvailable: boolean
-  _browser: unknown
-  _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-  _startRecordingForEntity: (
-    test: Frameworks.Test,
-    context: unknown,
-    retryCount: number,
-  ) => Promise<void>
   beforeSession: (
     config: unknown,
     capabilities: WebdriverIO.Capabilities,
@@ -144,26 +136,29 @@ const primeRetryStateForSecondWorker = async (
 const createRetryWorkerHarness = (
   outputDir: string,
 ): { workerService: RetryWorkerService; seenRetryCounts: number[] } => {
-  const workerService = new WdioPuppeteerVideoService({
-    outputDir,
-    recordOnRetries: true,
-  }) as unknown as RetryWorkerService
-
-  workerService._isChromium = true
-  workerService._ffmpegAvailable = true
-  workerService._browser = {}
-  workerService._runSerializedRecordingTask = async (task) => {
-    await task()
-  }
-
   const seenRetryCounts: number[] = []
-  workerService._startRecordingForEntity = async (
-    _test,
-    _context,
-    retryCount,
-  ) => {
-    seenRetryCounts.push(retryCount)
-  }
+  const workerService = new WdioPuppeteerVideoServiceRuntime(
+    {
+      outputDir,
+      recording: { attempts: 'retries' },
+    },
+    undefined,
+    undefined,
+    {
+      createRecordingCoordinator: (options) =>
+        new WorkerRecordingCoordinator({
+          ...options,
+          actions: {
+            ...options.actions,
+            getAvailability: () => ({ available: true }),
+            startRecording: async (_metadata, retryCount) => {
+              seenRetryCounts.push(retryCount)
+              return true
+            },
+          },
+        }),
+    },
+  )
 
   return {
     workerService,
@@ -369,113 +364,6 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(resolveAvailableFfmpegPath).toHaveBeenCalledOnce()
   })
 
-  it('startRecordingForEntity clears active state when recording start fails', async () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _currentTestSlug: string
-      _currentSegment: number
-      _startRecording: () => Promise<boolean>
-      _startRecordingForEntity: (
-        test: Frameworks.Test,
-        context: unknown,
-        retryCount: number,
-      ) => Promise<void>
-    }
-
-    service._startRecording = async () => false
-
-    await service._startRecordingForEntity(
-      createTest({ title: 'failed start reset' }),
-      {},
-      0,
-    )
-
-    expect(service._currentTestSlug).toBe('')
-    expect(service._currentSegment).toBe(0)
-  })
-
-  it('recordOnRetries starts test recording only on retry attempts', async () => {
-    const service = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-    }) as unknown as {
-      _isChromium: boolean
-      _ffmpegAvailable: boolean
-      _browser: unknown
-      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-      _startRecordingForEntity: (
-        test: Frameworks.Test,
-        context: unknown,
-        retryCount: number,
-      ) => Promise<void>
-      beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
-    }
-
-    service._isChromium = true
-    service._ffmpegAvailable = true
-    service._browser = {}
-    service._runSerializedRecordingTask = async (task) => {
-      await task()
-    }
-
-    const seenRetryCounts: number[] = []
-    service._startRecordingForEntity = async (_test, _context, retryCount) => {
-      seenRetryCounts.push(retryCount)
-    }
-
-    await service.beforeTest(createTest({ title: 'retry candidate' }), {})
-    await service.beforeTest(
-      createTest({
-        title: 'retry candidate',
-        _currentRetry: 1,
-      }),
-      {},
-    )
-
-    expect(seenRetryCounts).toEqual([1])
-  })
-
-  it('recordOnRetries works for cucumber when explicit retry count is absent', async () => {
-    const service = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-    }) as unknown as {
-      _isChromium: boolean
-      _ffmpegAvailable: boolean
-      _browser: unknown
-      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-      _startRecordingForEntity: (
-        test: Frameworks.Test,
-        context: unknown,
-        retryCount: number,
-      ) => Promise<void>
-      beforeScenario: (
-        world: Frameworks.World,
-        context: unknown,
-      ) => Promise<void>
-    }
-
-    service._isChromium = true
-    service._ffmpegAvailable = true
-    service._browser = {}
-    service._runSerializedRecordingTask = async (task) => {
-      await task()
-    }
-
-    const seenRetryCounts: number[] = []
-    service._startRecordingForEntity = async (_test, _context, retryCount) => {
-      seenRetryCounts.push(retryCount)
-    }
-
-    const world = {
-      pickle: {
-        name: 'user retries checkout',
-      },
-    } as Frameworks.World
-
-    await service.beforeScenario(world, { uri: 'tests/features/retry.feature' })
-    await service.beforeScenario(world, { uri: 'tests/features/retry.feature' })
-
-    expect(seenRetryCounts).toEqual([1])
-  })
-
   it('recordOnRetries hydrates spec-file retry attempts across worker restarts', async () => {
     await withTempDir(async (tempDir) => {
       const specs = RETRY_RECORDING_SPECS
@@ -555,433 +443,6 @@ describe('WdioPuppeteerVideoService unit', () => {
       expect(seenRetryCounts).toEqual([])
       await launcherService.onComplete()
     })
-  })
-
-  it('retry decision logging builds messages only when level is enabled', () => {
-    const service = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-      logLevel: 'warn',
-    }) as unknown as {
-      _logLevel: string
-      _log: (level: string, message: string, details?: unknown) => void
-      _logRetryDecision: (
-        retryContext: {
-          explicitFrameworkRetry: number | undefined
-          specFileRetryAttempt: number
-          inferredEntityRetry: number | undefined
-          effectiveRetryCount: number
-        },
-        entityLabel: string,
-        shouldRecord: boolean,
-      ) => void
-      _logRetrySkip: (
-        retryContext: {
-          explicitFrameworkRetry: number | undefined
-          specFileRetryAttempt: number
-          inferredEntityRetry: number | undefined
-          effectiveRetryCount: number
-        },
-        entityLabel: string,
-      ) => void
-    }
-
-    let logCalls = 0
-    service._log = () => {
-      logCalls += 1
-    }
-
-    const retryContext = {
-      explicitFrameworkRetry: 0,
-      specFileRetryAttempt: 0,
-      inferredEntityRetry: 0,
-      effectiveRetryCount: 0,
-    }
-    service._logRetryDecision(retryContext, 'entity', false)
-    service._logRetrySkip(retryContext, 'entity')
-    expect(logCalls).toBe(0)
-
-    service._logLevel = 'trace'
-    service._logRetryDecision(retryContext, 'entity', true)
-    expect(logCalls).toBe(1)
-
-    service._logLevel = 'debug'
-    service._logRetrySkip(retryContext, 'entity')
-    expect(logCalls).toBe(2)
-  })
-
-  it('shouldRecordForFilters supports spec and tag include/exclude rules', () => {
-    const specFilterService = new WdioPuppeteerVideoService({
-      includeSpecPatterns: ['*advanced/specs*'],
-      excludeSpecPatterns: ['*skip*'],
-    }) as unknown as {
-      _shouldRecordForFilters: (
-        test: Frameworks.Test,
-        context: unknown,
-      ) => boolean
-    }
-
-    expect(
-      specFilterService._shouldRecordForFilters(
-        createTest({
-          file: 'tests/advanced/specs/filter-spec-recording.spec.ts',
-        }),
-        {},
-      ),
-    ).toBe(true)
-    expect(
-      specFilterService._shouldRecordForFilters(
-        createTest({
-          file: 'tests/specs/e2e.test.ts',
-        }),
-        {},
-      ),
-    ).toBe(false)
-    expect(
-      specFilterService._shouldRecordForFilters(
-        createTest({
-          file: 'tests/advanced/specs/skip-this.spec.ts',
-        }),
-        {},
-      ),
-    ).toBe(false)
-
-    const tagFilterService = new WdioPuppeteerVideoService({
-      includeTagPatterns: ['@smoke*'],
-      excludeTagPatterns: ['@skip*'],
-    }) as unknown as {
-      _shouldRecordForFilters: (
-        test: Frameworks.Test,
-        context: unknown,
-      ) => boolean
-    }
-
-    expect(
-      tagFilterService._shouldRecordForFilters(createTest(), {
-        pickle: {
-          tags: [{ name: '@SmokeCheckout' }],
-        },
-      }),
-    ).toBe(true)
-    expect(
-      tagFilterService._shouldRecordForFilters(createTest(), {
-        pickle: {
-          tags: [{ name: '@skipVideo' }],
-        },
-      }),
-    ).toBe(false)
-  })
-
-  it('specLevelRecording starts once and finalizes once with aggregated result', async () => {
-    const service = new WdioPuppeteerVideoService({
-      specLevelRecording: true,
-    }) as unknown as {
-      _isChromium: boolean
-      _ffmpegAvailable: boolean
-      _browser: unknown
-      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-      _startSpecLevelRecording: (retryCount: number) => Promise<void>
-      _finalizeCurrentTestRecording: (passed: boolean) => Promise<void>
-      _currentTestSlug: string
-      beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
-      afterTest: (
-        test: Frameworks.Test,
-        context: unknown,
-        result: Frameworks.TestResult,
-      ) => Promise<void>
-      after: () => Promise<void>
-    }
-
-    service._isChromium = true
-    service._ffmpegAvailable = true
-    service._browser = {}
-    service._runSerializedRecordingTask = async (task) => {
-      await task()
-    }
-
-    let startCount = 0
-    service._startSpecLevelRecording = async () => {
-      startCount += 1
-      service._currentTestSlug = 'spec_level_slug'
-    }
-
-    const finalizedStatuses: boolean[] = []
-    service._finalizeCurrentTestRecording = async (passed) => {
-      finalizedStatuses.push(passed)
-    }
-
-    await service.beforeTest(createTest({ title: 'first spec test' }), {})
-    await service.beforeTest(createTest({ title: 'second spec test' }), {})
-    await service.afterTest(
-      createTest({ title: 'first spec test' }),
-      {},
-      {
-        passed: false,
-        duration: 100,
-        retries: { attempts: 0, limit: 0 },
-        exception: '',
-        status: 'failed',
-      },
-    )
-    await service.after()
-
-    expect(startCount).toBe(1)
-    expect(finalizedStatuses).toEqual([false])
-  })
-
-  it('specLevelRecording with recordOnRetries waits until retry attempt before start', async () => {
-    const service = new WdioPuppeteerVideoService({
-      specLevelRecording: true,
-      recordOnRetries: true,
-    }) as unknown as {
-      _isChromium: boolean
-      _ffmpegAvailable: boolean
-      _browser: unknown
-      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-      _startSpecLevelRecording: (retryCount: number) => Promise<void>
-      beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
-    }
-
-    service._isChromium = true
-    service._ffmpegAvailable = true
-    service._browser = {}
-    service._runSerializedRecordingTask = async (task) => {
-      await task()
-    }
-
-    const seenRetryCounts: number[] = []
-    service._startSpecLevelRecording = async (retryCount) => {
-      seenRetryCounts.push(retryCount)
-    }
-
-    await service.beforeTest(createTest({ title: 'spec retry case' }), {})
-    await service.beforeTest(createTest({ title: 'spec retry case' }), {})
-
-    expect(seenRetryCounts).toEqual([1])
-  })
-
-  it('buildSpecLevelSlugMetadata uses spec token and retry marker', () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _specPaths: string[]
-      _buildSpecLevelSlugMetadata: (retryCount: number) => {
-        fileToken: string
-        testNameToken: string
-        retryToken: string
-        hashInput: string
-      }
-    }
-
-    service._specPaths = ['tests/advanced/specs/spec-level-recording.spec.ts']
-    const metadata = service._buildSpecLevelSlugMetadata(2)
-
-    expect(metadata.fileToken).toBe('spec_level_recording_spec')
-    expect(metadata.testNameToken).toBe('spec_level_recording_spec')
-    expect(metadata.retryToken).toBe('_retry2')
-    expect(metadata.hashInput).toContain('spec|')
-  })
-
-  it('_startSpecLevelRecording preserves metadata built from every spec path', async () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _specPaths: string[]
-      _startRecordingForMetadata: (
-        metadata: {
-          fileToken: string
-          testNameToken: string
-          retryToken: string
-          hashInput: string
-        },
-        retryCount: number,
-      ) => Promise<void>
-      _startSpecLevelRecording: (retryCount: number) => Promise<void>
-    }
-
-    service._specPaths = ['tests/specs/a.test.ts', 'tests/specs/b.test.ts']
-
-    let capturedRetryCount = -1
-    let capturedMetadata:
-      | {
-          fileToken: string
-          testNameToken: string
-          retryToken: string
-          hashInput: string
-        }
-      | undefined
-    service._startRecordingForMetadata = async (metadata, retryCount) => {
-      capturedMetadata = metadata
-      capturedRetryCount = retryCount
-    }
-
-    await service._startSpecLevelRecording(2)
-
-    expect(capturedRetryCount).toBe(2)
-    expect(capturedMetadata).toEqual({
-      fileToken: 'a_test',
-      testNameToken: 'a_test_spec',
-      retryToken: '_retry2',
-      hashInput: 'spec|tests/specs/a.test.ts|tests/specs/b.test.ts|2',
-    })
-  })
-
-  it('extractRetryValue floors valid retries and rejects invalid values', () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _extractRetryValue: (value: unknown) => number | undefined
-    }
-
-    expect(service._extractRetryValue(2.9)).toBe(2)
-    expect(service._extractRetryValue(0)).toBe(0)
-    expect(service._extractRetryValue(-1)).toBeUndefined()
-    expect(service._extractRetryValue(Number.NaN)).toBeUndefined()
-    expect(service._extractRetryValue('2')).toBeUndefined()
-  })
-
-  it('extractExplicitRetryCount prefers test retry, then context, then currentTest', () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _extractExplicitRetryCount: (
-        test: Frameworks.Test,
-        context: unknown,
-      ) => number | undefined
-    }
-
-    expect(
-      service._extractExplicitRetryCount(createTest({ _currentRetry: 3 }), {
-        _currentRetry: 2,
-        currentTest: { _currentRetry: 1 },
-      }),
-    ).toBe(3)
-    expect(
-      service._extractExplicitRetryCount(createTest(), {
-        _currentRetry: 2,
-      }),
-    ).toBe(2)
-    expect(
-      service._extractExplicitRetryCount(createTest(), {
-        currentTest: { _currentRetry: 1 },
-      }),
-    ).toBe(1)
-  })
-
-  it('resolveRetryContextForEntity tracks inferred retries across repeated entities', () => {
-    const service = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-    }) as unknown as {
-      _collectSlugMetadata: () => {
-        fileToken: string
-        testNameToken: string
-        hashInput: string
-        retryToken: string
-      }
-      _resolveRetryContextForEntity: (
-        test: Frameworks.Test,
-        context: unknown,
-      ) => {
-        explicitFrameworkRetry: number | undefined
-        specFileRetryAttempt: number
-        inferredEntityRetry: number | undefined
-        effectiveRetryCount: number
-      }
-      _specFileRetryAttempt: number
-    }
-
-    service._collectSlugMetadata = () => ({
-      fileToken: 'checkout_spec',
-      testNameToken: 'adds_item',
-      hashInput: 'checkout|adds_item',
-      retryToken: '',
-    })
-    service._specFileRetryAttempt = 0
-
-    const firstAttempt = service._resolveRetryContextForEntity(createTest(), {})
-    const secondAttempt = service._resolveRetryContextForEntity(
-      createTest(),
-      {},
-    )
-
-    expect(firstAttempt.inferredEntityRetry).toBe(0)
-    expect(firstAttempt.effectiveRetryCount).toBe(0)
-    expect(secondAttempt.inferredEntityRetry).toBe(1)
-    expect(secondAttempt.effectiveRetryCount).toBe(1)
-  })
-
-  it('applyRetryCountToMetadata and shouldRecordForRetryCount respect retry-only mode', () => {
-    const alwaysRecordService = new WdioPuppeteerVideoService(
-      {},
-    ) as unknown as {
-      _applyRetryCountToMetadata: (
-        metadata: {
-          fileToken: string
-          testNameToken: string
-          hashInput: string
-          retryToken: string
-        },
-        retryCount: number,
-      ) => {
-        fileToken: string
-        testNameToken: string
-        hashInput: string
-        retryToken: string
-      }
-      _shouldRecordForRetryCount: (retryCount: number) => boolean
-    }
-    const retryOnlyService = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-    }) as unknown as {
-      _shouldRecordForRetryCount: (retryCount: number) => boolean
-    }
-
-    expect(
-      alwaysRecordService._applyRetryCountToMetadata(
-        {
-          fileToken: 'checkout_spec',
-          testNameToken: 'adds_item',
-          hashInput: 'checkout|adds_item',
-          retryToken: '',
-        },
-        2,
-      ),
-    ).toEqual({
-      fileToken: 'checkout_spec',
-      testNameToken: 'adds_item',
-      hashInput: 'checkout|adds_item|retry=2',
-      retryToken: '_retry2',
-    })
-    expect(
-      alwaysRecordService._applyRetryCountToMetadata(
-        {
-          fileToken: 'checkout_spec',
-          testNameToken: 'adds_item',
-          hashInput: 'checkout|adds_item',
-          retryToken: '_retry2',
-        },
-        0,
-      ).retryToken,
-    ).toBe('')
-    expect(alwaysRecordService._shouldRecordForRetryCount(0)).toBe(true)
-    expect(retryOnlyService._shouldRecordForRetryCount(0)).toBe(false)
-    expect(retryOnlyService._shouldRecordForRetryCount(1)).toBe(true)
-  })
-
-  it('retry-only recordings are kept even when retry passes', async () => {
-    const service = new WdioPuppeteerVideoService({
-      recordOnRetries: true,
-    }) as unknown as {
-      _currentTestSlug: string
-      _currentRecordingRetryCount: number
-      _stopRecording: () => Promise<void>
-      _deleteSegments: () => Promise<void>
-      _resetTestState: () => Promise<void>
-      _finalizeCurrentTestRecording: (passed: boolean) => Promise<void>
-    }
-
-    service._currentTestSlug = 'retry_slug'
-    service._currentRecordingRetryCount = 1
-    service._stopRecording = async () => {}
-    let deleted = false
-    service._deleteSegments = async () => {
-      deleted = true
-    }
-    service._resetTestState = async () => {}
-
-    await service._finalizeCurrentTestRecording(true)
-    expect(deleted).toBe(false)
   })
 
   it('skipViewPortKickoff bypasses viewport kickoff logic', async () => {
@@ -1413,32 +874,6 @@ describe('WdioPuppeteerVideoService unit', () => {
       await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source-media')
       await expect(fs.stat(outputPath)).rejects.toThrow()
     })
-  })
-
-  it('finalizeIfRecording only runs serialized finalize work when recording is active', async () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _currentTestSlug: string
-      _finalizeCurrentTestRecording: (passed: boolean) => Promise<void>
-      _finalizeIfRecording: (passed: boolean) => Promise<void>
-      _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
-    }
-
-    const finalized: boolean[] = []
-    let serializedRuns = 0
-    service._finalizeCurrentTestRecording = async (passed) => {
-      finalized.push(passed)
-    }
-    service._runSerializedRecordingTask = async (task) => {
-      serializedRuns += 1
-      await task()
-    }
-
-    await service._finalizeIfRecording(false)
-    service._currentTestSlug = 'active'
-    await service._finalizeIfRecording(true)
-
-    expect(serializedRuns).toBe(1)
-    expect(finalized).toEqual([true])
   })
 
   it('runSerializedRecordingTask logs task failures and continues with later tasks', async () => {
@@ -2401,7 +1836,6 @@ describe('WdioPuppeteerVideoService unit', () => {
   it('_resetTestState clears recording state and releases held slots', async () => {
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _activeSegment: unknown
-      _currentRecordingRetryCount: number
       _currentSegment: number
       _currentTestSlug: string
       _currentWindowHandle: string | undefined
@@ -2420,7 +1854,6 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._activeSegment = {}
     service._currentSegment = 3
     service._currentTestSlug = 'active'
-    service._currentRecordingRetryCount = 2
     service._currentWindowHandle = 'window-1'
     service._recordedSegments.add('segment.webm')
     service._recordingSlotScheduler = {
@@ -2436,7 +1869,6 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._isRecordingActive()).toBe(false)
     expect(service._currentSegment).toBe(0)
     expect(service._currentTestSlug).toBe('')
-    expect(service._currentRecordingRetryCount).toBe(0)
     expect(service._currentWindowHandle).toBeUndefined()
     expect(service._recordedSegments.size).toBe(0)
     expect(releaseCalls).toBe(1)

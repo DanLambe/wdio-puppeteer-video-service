@@ -31,10 +31,30 @@ export interface RecordingFilterConfiguration {
   excludeTags?: readonly string[]
 }
 
+export interface NormalizedFilterEntity {
+  readonly specPath: string
+  readonly tags: readonly string[]
+}
+
 export const shouldRecordForFilters = (
   options: RecordingFilterConfiguration,
   test: Frameworks.Test,
   context: unknown,
+  wildcardPatternRegexCache: Map<string, RegExp>,
+): boolean => {
+  return shouldRecordNormalizedEntity(
+    options,
+    {
+      specPath: resolveEntitySpecPath(test, context),
+      tags: extractEntityTagTokens(test, context),
+    },
+    wildcardPatternRegexCache,
+  )
+}
+
+export const shouldRecordNormalizedEntity = (
+  options: RecordingFilterConfiguration,
+  entity: NormalizedFilterEntity,
   wildcardPatternRegexCache: Map<string, RegExp>,
 ): boolean => {
   const includeSpecPatterns = options.includeSpecs ?? []
@@ -51,24 +71,30 @@ export const shouldRecordForFilters = (
     return true
   }
 
-  const specPath = resolveEntitySpecPath(test, context)
   if (
     includeSpecPatterns.length > 0 &&
-    !matchesAnyPattern(specPath, includeSpecPatterns, wildcardPatternRegexCache)
+    !matchesAnyPattern(
+      entity.specPath,
+      includeSpecPatterns,
+      wildcardPatternRegexCache,
+    )
   ) {
     return false
   }
 
   if (
     excludeSpecPatterns.length > 0 &&
-    matchesAnyPattern(specPath, excludeSpecPatterns, wildcardPatternRegexCache)
+    matchesAnyPattern(
+      entity.specPath,
+      excludeSpecPatterns,
+      wildcardPatternRegexCache,
+    )
   ) {
     return false
   }
 
-  const entityTags = extractEntityTagTokens(test, context)
   if (includeTagPatterns.length > 0) {
-    const includesAnyTag = entityTags.some((tagToken) =>
+    const includesAnyTag = entity.tags.some((tagToken) =>
       matchesAnyPattern(
         tagToken,
         includeTagPatterns,
@@ -81,7 +107,7 @@ export const shouldRecordForFilters = (
   }
 
   if (excludeTagPatterns.length > 0) {
-    const hasExcludedTag = entityTags.some((tagToken) =>
+    const hasExcludedTag = entity.tags.some((tagToken) =>
       matchesAnyPattern(
         tagToken,
         excludeTagPatterns,

@@ -368,20 +368,4 @@ describe('WdioPuppeteerVideoService lifecycle', () => {
     await expect(service.after()).resolves.toBeUndefined()
     expect(flushDeferredPostProcessTasks).toHaveBeenCalledTimes(2)
   })
-
-  it('routes Cucumber teardown through the shared finalizer', async () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _afterTestOrScenario: (passed: boolean) => Promise<void>
-      afterScenario: (
-        world: unknown,
-        result: { passed: boolean },
-      ) => Promise<void>
-    }
-    const finalize = vi.fn(async () => {})
-    service._afterTestOrScenario = finalize
-
-    await service.afterScenario({}, { passed: false })
-
-    expect(finalize).toHaveBeenCalledWith(false)
-  })
 })

@@ -36,6 +36,10 @@ import {
   PostProcessSlotScheduler,
   RecordingSlotScheduler,
 } from './recording-slots.js'
+import {
+  createWorkerRecordingCoordinator,
+  type RecordingCoordinatorFactory,
+} from './worker-recording-coordinator.js'
 
 export type UuidFactory = () => string
 export type PuppeteerConnector = (
@@ -59,6 +63,7 @@ export interface WorkerCompositionOverrides {
   readonly connectPuppeteer?: PuppeteerConnector
   readonly startScreencast?: ScreencastStarter
   readonly runFfmpeg?: WorkerFfmpegRunner
+  readonly createRecordingCoordinator?: RecordingCoordinatorFactory
   readonly ffmpeg?: Omit<FfmpegRunnerDependencies, 'clock' | 'processRegistry'>
   readonly writeLog?: typeof writeLog
 }
@@ -71,6 +76,7 @@ export interface WorkerCompositionRoot {
   readonly connectPuppeteer: PuppeteerConnector
   readonly startScreencast: ScreencastStarter
   readonly runFfmpeg: WorkerFfmpegRunner
+  readonly createRecordingCoordinator: RecordingCoordinatorFactory
   readonly writeLog: typeof writeLog
   createFfmpegProcessRegistry(): FfmpegProcessRegistry
   createAllureIntegration(
@@ -119,6 +125,8 @@ export const createWorkerCompositionRoot = (
     connectPuppeteer,
     startScreencast: overrides.startScreencast ?? startScreencast,
     runFfmpeg: runWorkerFfmpeg,
+    createRecordingCoordinator:
+      overrides.createRecordingCoordinator ?? createWorkerRecordingCoordinator,
     writeLog: overrides.writeLog ?? writeLog,
     createFfmpegProcessRegistry() {
       return new FfmpegProcessRegistry()

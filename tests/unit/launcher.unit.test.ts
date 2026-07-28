@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { initializeLauncherService } from '@wdio/utils'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { writeReporterFragment } from '../../src/reporter/fragments.js'
 import {
@@ -15,6 +15,7 @@ import {
   readManifestRunContext,
   readManifestWorkerContext,
 } from '../../src/service/manifest-runtime.js'
+import type { WorkerRecordingCoordinatorPort } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 
 const tempDirs: string[] = []
@@ -67,21 +68,27 @@ describe('WdioPuppeteerVideoLauncher', () => {
       specFileRetryAttempt: 1,
     })
 
+    let hydratedRetryAttempt: number | undefined
+    const coordinator: WorkerRecordingCoordinatorPort = {
+      framework: 'unknown',
+      isSpecScope: false,
+      beginEntity: vi.fn(async () => {}),
+      beginWorker: vi.fn(),
+      configureSession: (session) => {
+        hydratedRetryAttempt = session.specFileRetryAttempt
+      },
+      endEntity: vi.fn(async () => {}),
+      finalizeSpecRecording: vi.fn(async () => {}),
+      resetWorkerState: vi.fn(),
+    }
     const worker = new WdioPuppeteerVideoService(
       { outputDir, recording: { attempts: 'retries' } },
       capabilities,
       retryWorkerArgs,
-    ) as unknown as {
-      _specFileRetryAttempt: number
-      beforeSession: (
-        config: unknown,
-        workerCapabilities: WebdriverIO.Capabilities,
-        workerSpecs: string[],
-        cid: string,
-      ) => Promise<void>
-    }
+      { createRecordingCoordinator: () => coordinator },
+    )
     await worker.beforeSession(retryWorkerArgs, capabilities, specs, '0-0')
-    expect(worker._specFileRetryAttempt).toBe(1)
+    expect(hydratedRetryAttempt).toBe(1)
 
     await launcher.onComplete(0)
     await expect(

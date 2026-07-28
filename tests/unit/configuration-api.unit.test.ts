@@ -1,12 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
+import { shouldRetainRecording } from '../../src/service/recording-policy.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
-
-interface ConfigurationServiceProbe {
-  _currentRecordingRetryCount: number
-  _shouldKeepRecording: (passed: boolean) => boolean
-}
 
 describe('grouped 1.0 configuration API', () => {
   it('validates and resolves grouped options through the resolver contract', () => {
@@ -31,23 +27,44 @@ describe('grouped 1.0 configuration API', () => {
   })
 
   it('keeps capture attempts and artifact retention independent', () => {
-    const retryRetention = new WdioPuppeteerVideoService({
+    const retryRetention = resolveServiceConfiguration({
       recording: { attempts: 'all', retain: 'retries' },
-    }) as unknown as ConfigurationServiceProbe
-    retryRetention._currentRecordingRetryCount = 0
-    expect(retryRetention._shouldKeepRecording(false)).toBe(false)
-    retryRetention._currentRecordingRetryCount = 1
-    expect(retryRetention._shouldKeepRecording(true)).toBe(true)
+    }).options.recording
+    expect(
+      shouldRetainRecording({
+        retain: retryRetention.retain,
+        passed: false,
+        retryCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      shouldRetainRecording({
+        retain: retryRetention.retain,
+        passed: true,
+        retryCount: 1,
+      }),
+    ).toBe(true)
 
-    const failureRetention = new WdioPuppeteerVideoService({
-      recording: { retain: 'failures' },
-    }) as unknown as ConfigurationServiceProbe
-    expect(failureRetention._shouldKeepRecording(true)).toBe(false)
-    expect(failureRetention._shouldKeepRecording(false)).toBe(true)
-
-    const allRetention = new WdioPuppeteerVideoService({
-      recording: { retain: 'all' },
-    }) as unknown as ConfigurationServiceProbe
-    expect(allRetention._shouldKeepRecording(true)).toBe(true)
+    expect(
+      shouldRetainRecording({
+        retain: 'failures',
+        passed: true,
+        retryCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      shouldRetainRecording({
+        retain: 'failures',
+        passed: false,
+        retryCount: 0,
+      }),
+    ).toBe(true)
+    expect(
+      shouldRetainRecording({
+        retain: 'all',
+        passed: true,
+        retryCount: 0,
+      }),
+    ).toBe(true)
   })
 })

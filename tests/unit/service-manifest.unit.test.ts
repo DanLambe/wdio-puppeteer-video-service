@@ -221,36 +221,6 @@ describe('service manifest hooks', () => {
     expect(manifest.runs[0]?.entries[0]?.test).toBeUndefined()
   })
 
-  it('defers manifest error policy failures until recording finalization finishes', async () => {
-    const outputDir = await createTempDir()
-    const context = await createManifestRunContext(outputDir)
-    const config: Record<string, unknown> = { framework: 'mocha' }
-    assignWorkerConfiguration(config, '3-1', context)
-    const service = new WdioPuppeteerVideoService({
-      outputDir,
-      failurePolicy: 'error',
-    })
-    await service.beforeSession(config, { browserName: 'chrome' }, [], '3-1')
-    const internals = service as unknown as {
-      _afterTestOrScenario: (passed: boolean) => Promise<void>
-      _manifestRecorder: {
-        recordResult: (result: string) => Promise<void>
-      }
-    }
-    const finalize = vi.fn().mockResolvedValue(undefined)
-    internals._afterTestOrScenario = finalize
-    vi.spyOn(internals._manifestRecorder, 'recordResult').mockRejectedValue(
-      new Error('journal unavailable'),
-    )
-
-    await expect(
-      service.afterTest(createTest('manifest error', 'error.ts'), {}, {
-        passed: false,
-      } as Frameworks.TestResult),
-    ).rejects.toThrow('journal unavailable')
-    expect(finalize).toHaveBeenCalledWith(false)
-  })
-
   it('clears session state after an error-policy journal flush failure', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
