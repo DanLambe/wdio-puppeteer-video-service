@@ -5,8 +5,8 @@ import type { Frameworks } from '@wdio/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import type { CaptureSession } from '../../src/service/capture-session.js'
-import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
-import * as ffmpeg from '../../src/service/ffmpeg.js'
+import type { FfmpegRuntime } from '../../src/service/ffmpeg-runtime.js'
+import type { MediaPipeline } from '../../src/service/media-pipeline.js'
 import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoServiceRuntime from '../../src/service.js'
 import WdioPuppeteerVideoService, {
@@ -70,8 +70,8 @@ type RecordingOutput = {
 type RecordingOutputService = {
   _captureSession: CaptureSession
   _createRecordingOutput: () => RecordingOutput
+  _ffmpegRuntime: Pick<FfmpegRuntime, 'shouldTranscode'>
   _log: (level: string, message: string) => void
-  _shouldTranscode: () => boolean
 }
 
 const createRecordingOutputHarness = (
@@ -84,7 +84,7 @@ const createRecordingOutputHarness = (
   }) as unknown as RecordingOutputService
   const warnMessages: string[] = []
   service._captureSession.beginRecording('capture')
-  service._shouldTranscode = () => shouldTranscode
+  service._ffmpegRuntime.shouldTranscode = () => shouldTranscode
   service._log = (level, message) => {
     if (level === 'warn') {
       warnMessages.push(message)
@@ -200,108 +200,17 @@ describe('WdioPuppeteerVideoService unit', () => {
     ).toThrow('processing.format')
   })
 
-  it('shouldTranscode respects mp4 mode and transcode override', () => {
-    const autoService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'auto',
-    }) as unknown as {
-      _forceMp4Transcode: boolean
-      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
-    }
-
-    autoService._forceMp4Transcode = false
-    expect(autoService._shouldTranscode('mp4')).toBe(false)
-    autoService._forceMp4Transcode = true
-    expect(autoService._shouldTranscode('mp4')).toBe(true)
-    expect(autoService._shouldTranscode('webm')).toBe(false)
-
-    const directService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'direct',
-    }) as unknown as {
-      _forceMp4Transcode: boolean
-      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
-    }
-    directService._forceMp4Transcode = true
-    expect(directService._shouldTranscode('mp4')).toBe(false)
-
-    const transcodeService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'transcode',
-    }) as unknown as {
-      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
-    }
-    expect(transcodeService._shouldTranscode('mp4')).toBe(true)
-
-    const overrideService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'direct',
-      transcode: { enabled: true },
-    }) as unknown as {
-      _shouldTranscode: (outputFormat: 'webm' | 'mp4') => boolean
-    }
-    expect(overrideService._shouldTranscode('mp4')).toBe(true)
-  })
-
-  it('configureMp4RecordingMode enables fallback in auto mode only', async () => {
-    const probeDirectMp4Support = vi
-      .spyOn(ffmpeg, 'probeDirectMp4Support')
-      .mockResolvedValue(false)
-    const autoService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'auto',
-    }) as unknown as {
-      _forceMp4Transcode: boolean
-      _resolveFfmpegPath: () => string
-      _configureMp4RecordingMode: () => Promise<void>
-    }
-
-    autoService._resolveFfmpegPath = () => '/tmp/ffmpeg'
-    await autoService._configureMp4RecordingMode()
-    expect(autoService._forceMp4Transcode).toBe(true)
-
-    const directService = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'direct',
-    }) as unknown as {
-      _forceMp4Transcode: boolean
-      _resolveFfmpegPath: () => string
-      _configureMp4RecordingMode: () => Promise<void>
-    }
-    directService._resolveFfmpegPath = () => '/tmp/ffmpeg'
-    await directService._configureMp4RecordingMode()
-    expect(directService._forceMp4Transcode).toBe(false)
-    expect(probeDirectMp4Support).toHaveBeenCalledTimes(2)
-  })
-
-  it('configureMp4RecordingMode respects explicit transcode override', async () => {
-    const service = new WdioPuppeteerVideoService({
-      outputFormat: 'mp4',
-      mp4Mode: 'auto',
-      transcode: { enabled: true },
-    }) as unknown as {
-      _forceMp4Transcode: boolean
-      _configureMp4RecordingMode: () => Promise<void>
-    }
-
-    service._forceMp4Transcode = false
-    await service._configureMp4RecordingMode()
-    expect(service._forceMp4Transcode).toBe(false)
-  })
-
-  it('before hook does not probe ffmpeg eagerly', async () => {
-    const resolveAvailableFfmpegPath = vi.spyOn(
-      ffmpeg,
-      'resolveAvailableFfmpegPath',
-    )
+  it('before hook does not initialize FFmpeg eagerly', async () => {
+    const ensureReady = vi.fn(async () => true)
     const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _ffmpegInitializationCompleted: boolean
+      _ffmpegRuntime: Pick<FfmpegRuntime, 'ensureReady'>
       before: (
         capabilities: WebdriverIO.Capabilities,
         specs: string[],
         browser: unknown,
       ) => Promise<void>
     }
+    service._ffmpegRuntime.ensureReady = ensureReady
 
     await service.before({}, ['tests/specs/e2e.test.ts'], {
       sessionId: 'abc123',
@@ -310,24 +219,20 @@ describe('WdioPuppeteerVideoService unit', () => {
       },
     })
 
-    expect(resolveAvailableFfmpegPath).not.toHaveBeenCalled()
-    expect(service._ffmpegInitializationCompleted).toBe(false)
+    expect(ensureReady).not.toHaveBeenCalled()
   })
 
-  it('lazy ffmpeg probe runs only when retry recording actually starts', async () => {
-    const resolveAvailableFfmpegPath = vi
-      .spyOn(ffmpeg, 'resolveAvailableFfmpegPath')
-      .mockResolvedValue('/tmp/ffmpeg')
-    vi.spyOn(ffmpeg, 'probeDirectMp4Support').mockResolvedValue(true)
+  it('checks FFmpeg readiness only when retry recording actually starts', async () => {
+    const ensureReady = vi.fn(async () => true)
     const service = new WdioPuppeteerVideoService({
       recordOnRetries: true,
     }) as unknown as {
       _captureSession: CaptureSession
+      _ffmpegRuntime: Pick<FfmpegRuntime, 'ensureReady'>
       _isChromium: boolean
       _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
       beforeTest: (test: Frameworks.Test, context: unknown) => Promise<void>
       _startRecording: () => Promise<boolean>
-      _ensureFfmpegReady: () => Promise<boolean>
     }
 
     service._isChromium = true
@@ -335,11 +240,11 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._runSerializedRecordingTask = async (task) => {
       await task()
     }
-
-    service._startRecording = async () => service._ensureFfmpegReady()
+    service._ffmpegRuntime.ensureReady = ensureReady
+    service._startRecording = async () => service._ffmpegRuntime.ensureReady()
 
     await service.beforeTest(createTest({ title: 'retry lazy probe' }), {})
-    expect(resolveAvailableFfmpegPath).not.toHaveBeenCalled()
+    expect(ensureReady).not.toHaveBeenCalled()
 
     await service.beforeTest(
       createTest({
@@ -348,7 +253,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       }),
       {},
     )
-    expect(resolveAvailableFfmpegPath).toHaveBeenCalledOnce()
+    expect(ensureReady).toHaveBeenCalledOnce()
 
     service._captureSession.resetRecording()
     await service.beforeTest(
@@ -358,7 +263,7 @@ describe('WdioPuppeteerVideoService unit', () => {
       }),
       {},
     )
-    expect(resolveAvailableFfmpegPath).toHaveBeenCalledOnce()
+    expect(ensureReady).toHaveBeenCalledTimes(2)
   })
 
   it('recordOnRetries hydrates spec-file retry attempts across worker restarts', async () => {
@@ -448,14 +353,12 @@ describe('WdioPuppeteerVideoService unit', () => {
     }) as unknown as {
       _captureSession: CaptureSession
       _isChromium: boolean
-      _ffmpegAvailable: boolean
       _runSerializedRecordingTask: (task: () => Promise<void>) => Promise<void>
       beforeCommand: (commandName: string) => Promise<void>
       afterCommand: (commandName: string) => Promise<void>
     }
 
     service._isChromium = true
-    service._ffmpegAvailable = true
     service._captureSession.setBrowser({} as never)
     service._captureSession.beginRecording('active_test')
     let serializedTaskRuns = 0
@@ -476,7 +379,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         startCapture: typeof startCapture
       }
       _captureSession: CaptureSession
-      _ensureFfmpegReady: () => Promise<boolean>
+      _ffmpegRuntime: Pick<FfmpegRuntime, 'ensureReady'>
       _recordingSlotScheduler: {
         acquire: () => Promise<boolean>
         release: () => Promise<void>
@@ -487,7 +390,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._captureSession.setBrowser({} as never)
     service._captureSession.beginRecording('slot-order')
     service._captureEngine.startCapture = startCapture
-    service._ensureFfmpegReady = async () => true
+    service._ffmpegRuntime.ensureReady = async () => true
     service._recordingSlotScheduler = {
       acquire: async () => false,
       release: async () => {},
@@ -508,7 +411,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         startCapture: typeof startCapture
       }
       _captureSession: CaptureSession
-      _ensureFfmpegReady: () => Promise<boolean>
+      _ffmpegRuntime: Pick<FfmpegRuntime, 'ensureReady'>
       _recordingSlotScheduler: {
         acquire: () => Promise<boolean>
         release: () => Promise<void>
@@ -519,7 +422,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     service._captureSession.setBrowser({} as never)
     service._captureSession.beginRecording('slot-release')
     service._captureEngine.startCapture = startCapture
-    service._ensureFfmpegReady = async () => true
+    service._ffmpegRuntime.ensureReady = async () => true
     service._recordingSlotScheduler = {
       acquire: async () => {
         callOrder.push('acquireRecordingSlot')
@@ -640,92 +543,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     }
   })
 
-  it('createResolvedTranscodeOptions preserves deleteOriginal and ffmpegArgs', () => {
-    const service = new WdioPuppeteerVideoService({
-      performanceProfile: 'ci',
-      transcode: {
-        deleteOriginal: false,
-        ffmpegArgs: ['-preset', 'slow'],
-      },
-    }) as unknown as {
-      _createResolvedTranscodeOptions: () => {
-        deleteOriginal: boolean
-        ffmpegArgs?: string[]
-      }
-    }
-
-    expect(service._createResolvedTranscodeOptions()).toEqual({
-      deleteOriginal: false,
-      ffmpegArgs: ['-preset', 'slow'],
-    })
-  })
-
-  it('createResolvedTranscodeOptions uses conservative CI defaults when args are unset', () => {
-    const service = new WdioPuppeteerVideoService({
-      performanceProfile: 'ci',
-    }) as unknown as {
-      _createResolvedTranscodeOptions: () => {
-        deleteOriginal: boolean
-        ffmpegArgs?: string[]
-      }
-    }
-
-    expect(service._createResolvedTranscodeOptions()).toEqual({
-      deleteOriginal: true,
-      ffmpegArgs: [...CI_TRANSCODE_FFMPEG_ARGS],
-    })
-  })
-
-  it('createResolvedTranscodeOptions lets an explicit empty array opt out of CI defaults', () => {
-    const service = new WdioPuppeteerVideoService({
-      performanceProfile: 'ci',
-      transcode: {
-        ffmpegArgs: [],
-      },
-    }) as unknown as {
-      _createResolvedTranscodeOptions: () => {
-        deleteOriginal: boolean
-        ffmpegArgs?: string[]
-      }
-    }
-
-    expect(service._createResolvedTranscodeOptions()).toEqual({
-      deleteOriginal: true,
-      ffmpegArgs: [],
-    })
-  })
-
-  it('transcodeToH264Mp4WithArgs removes partial output after failure', async () => {
-    await withTempDir(async (tempDir) => {
-      const inputPath = path.join(tempDir, 'input.webm')
-      const outputPath = path.join(tempDir, 'output.mp4')
-      await fs.writeFile(inputPath, 'source', 'utf8')
-
-      const service = new WdioPuppeteerVideoService() as unknown as {
-        _runFfmpeg: (args: string[]) => Promise<boolean>
-        _transcodeToH264Mp4WithArgs: (
-          inputPath: string,
-          outputPath: string,
-          ffmpegArgs: string[] | undefined,
-        ) => Promise<string | undefined>
-      }
-      service._runFfmpeg = async (args) => {
-        const temporaryPath = args.at(-1)
-        if (temporaryPath) {
-          await fs.writeFile(temporaryPath, 'partial', 'utf8')
-        }
-        return false
-      }
-
-      await expect(
-        service._transcodeToH264Mp4WithArgs(inputPath, outputPath, undefined),
-      ).resolves.toBeUndefined()
-      await expect(fs.stat(outputPath)).rejects.toThrow()
-      await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source')
-    })
-  })
-
-  it('applies error failure policy only after preserving media and releasing post-processing capacity', async () => {
+  it('records the original media before applying the error failure policy', async () => {
     await withTempDir(async (tempDir) => {
       const inputPath = path.join(tempDir, 'input.webm')
       const outputPath = path.join(tempDir, 'output.mp4')
@@ -747,13 +565,16 @@ describe('WdioPuppeteerVideoService unit', () => {
           transcode: true
           transcodeOptions: { deleteOriginal: boolean }
         }) => Promise<void>
-        _postProcessSlotScheduler: {
-          ownsPostProcessSlot: boolean
-        }
         _captureSession: CaptureSession
-        _runFfmpeg: () => Promise<boolean>
+        _mediaPipeline: Pick<MediaPipeline, 'reportFailure' | 'transcode'>
       }
-      service._runFfmpeg = async () => false
+      const transcode = vi.fn(async () => undefined)
+      const reportFailure = vi.fn((message: string) => {
+        expect(service._captureSession.recordedPaths).toContain(inputPath)
+        throw new Error(`[WdioPuppeteerVideoService] ${message}`)
+      })
+      service._mediaPipeline.transcode = transcode
+      service._mediaPipeline.reportFailure = reportFailure
 
       await expect(
         service._finalizeSegment({
@@ -766,10 +587,17 @@ describe('WdioPuppeteerVideoService unit', () => {
         }),
       ).rejects.toThrow('keeping original recording')
 
+      expect(transcode).toHaveBeenCalledWith({
+        deleteOriginal: true,
+        inputPath,
+        outputPath,
+      })
+      expect(reportFailure).toHaveBeenCalledWith(
+        `Transcode failed, keeping original recording: ${inputPath}`,
+        true,
+      )
       expect(service._captureSession.recordedPaths).toContain(inputPath)
-      expect(service._postProcessSlotScheduler.ownsPostProcessSlot).toBe(false)
       await expect(fs.readFile(inputPath, 'utf8')).resolves.toBe('source-media')
-      await expect(fs.stat(outputPath)).rejects.toThrow()
     })
   })
 
@@ -820,45 +648,29 @@ describe('WdioPuppeteerVideoService unit', () => {
           deleteOriginal: boolean
           ffmpegArgs?: string[]
         }>
-        _transcodeToH264Mp4WithArgs: (
-          inPath: string,
-          outPath: string,
-          ffmpegArgs: string[] | undefined,
-        ) => Promise<boolean>
+        _mediaPipeline: Pick<MediaPipeline, 'transcode'>
         _flushDeferredPostProcessTasks: () => Promise<void>
       }
 
-      const seenCalls: Array<{
-        inPath: string
-        outPath: string
-        ffmpegArgs: string[] | undefined
-      }> = []
+      const seenCalls: Array<Parameters<MediaPipeline['transcode']>[0]> = []
       service._deferredPostProcessTasks.push({
         kind: 'transcode',
         inputPath,
         outputPath,
         deleteOriginal: false,
       })
-      service._transcodeToH264Mp4WithArgs = async (
-        inPath,
-        outPath,
-        ffmpegArgs,
-      ) => {
-        seenCalls.push({
-          inPath,
-          outPath,
-          ffmpegArgs,
-        })
-        return true
+      service._mediaPipeline.transcode = async (options) => {
+        seenCalls.push(options)
+        return outputPath
       }
 
       await service._flushDeferredPostProcessTasks()
 
       expect(seenCalls).toEqual([
         {
-          inPath: inputPath,
-          outPath: outputPath,
-          ffmpegArgs: undefined,
+          deleteOriginal: false,
+          inputPath,
+          outputPath,
         },
       ])
       expect(service._deferredPostProcessTasks).toHaveLength(0)
@@ -965,7 +777,7 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._deferredPostProcessTasks).toHaveLength(0)
   })
 
-  it('executeDeferredTranscodeTask skips missing inputs and deletes originals after success', async () => {
+  it('reports missing deferred inputs and dispatches existing inputs to the media pipeline', async () => {
     await withTempDir(async (tempDir) => {
       const inputPath = path.join(tempDir, 'input.webm')
       const outputPath = path.join(tempDir, 'output.mp4')
@@ -977,18 +789,13 @@ describe('WdioPuppeteerVideoService unit', () => {
           deleteOriginal: boolean
           ffmpegArgs?: string[]
         }) => Promise<void>
-        _transcodeToH264Mp4WithArgs: (
-          inputPath: string,
-          outputPath: string,
-          ffmpegArgs: string[] | undefined,
-        ) => Promise<boolean>
+        _mediaPipeline: Pick<MediaPipeline, 'reportFailure' | 'transcode'>
       }
 
-      let transcodeCalls = 0
-      service._transcodeToH264Mp4WithArgs = async () => {
-        transcodeCalls += 1
-        return true
-      }
+      const transcode = vi.fn(async () => outputPath)
+      const reportFailure = vi.fn()
+      service._mediaPipeline.transcode = transcode
+      service._mediaPipeline.reportFailure = reportFailure
 
       await service._executeDeferredTranscodeTask({
         kind: 'transcode',
@@ -996,7 +803,10 @@ describe('WdioPuppeteerVideoService unit', () => {
         outputPath,
         deleteOriginal: true,
       })
-      expect(transcodeCalls).toBe(0)
+      expect(transcode).not.toHaveBeenCalled()
+      expect(reportFailure).toHaveBeenCalledWith(
+        `Deferred transcode input is missing: ${inputPath}`,
+      )
 
       await fs.writeFile(inputPath, 'source', 'utf8')
       await service._executeDeferredTranscodeTask({
@@ -1007,9 +817,35 @@ describe('WdioPuppeteerVideoService unit', () => {
         ffmpegArgs: ['-preset', 'slow'],
       })
 
-      expect(transcodeCalls).toBe(1)
-      await expect(fs.stat(inputPath)).rejects.toThrow()
+      expect(transcode).toHaveBeenCalledWith({
+        deleteOriginal: true,
+        ffmpegArgs: ['-preset', 'slow'],
+        inputPath,
+        outputPath,
+      })
     })
+  })
+
+  it('applies the error failure policy to a missing deferred input', async () => {
+    const service = new WdioPuppeteerVideoService({
+      failurePolicy: 'error',
+    }) as unknown as {
+      _executeDeferredTranscodeTask: (task: {
+        kind: 'transcode'
+        inputPath: string
+        outputPath: string
+        deleteOriginal: boolean
+      }) => Promise<void>
+    }
+
+    await expect(
+      service._executeDeferredTranscodeTask({
+        kind: 'transcode',
+        inputPath: 'missing-input.webm',
+        outputPath: 'unused-output.mp4',
+        deleteOriginal: true,
+      }),
+    ).rejects.toThrow('Deferred transcode input is missing')
   })
 
   it('executeDeferredMergeTask creates a follow-up transcode task when configured', async () => {
@@ -1032,7 +868,7 @@ describe('WdioPuppeteerVideoService unit', () => {
         deleteOriginal: boolean
         ffmpegArgs?: string[]
       }) => Promise<void>
-      _mergeSegmentPathsToOutput: () => Promise<string | undefined>
+      _mediaPipeline: Pick<MediaPipeline, 'merge'>
     }
 
     const transcodeTasks: Array<{
@@ -1042,7 +878,8 @@ describe('WdioPuppeteerVideoService unit', () => {
       deleteOriginal: boolean
       ffmpegArgs?: string[]
     }> = []
-    service._mergeSegmentPathsToOutput = async () => 'merged.webm'
+    const merge = vi.fn(async () => 'merged.webm')
+    service._mediaPipeline.merge = merge
     service._executeDeferredTranscodeTask = async (task) => {
       transcodeTasks.push(task)
     }
@@ -1059,6 +896,13 @@ describe('WdioPuppeteerVideoService unit', () => {
       },
     })
 
+    expect(merge).toHaveBeenCalledWith({
+      segmentPaths: ['part1.webm', 'part2.webm'],
+      mergedPath: 'merged.webm',
+      deleteSegments: true,
+      writeFailureContext: 'deferred merge',
+      ffmpegOperation: 'deferred segment merge',
+    })
     expect(transcodeTasks).toEqual([
       {
         kind: 'transcode',
@@ -1331,54 +1175,6 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(slug.length).toBeLessThanOrEqual(maxSlugLength)
   })
 
-  it('ffmpeg path resolution prefers explicit option', () => {
-    const service = new WdioPuppeteerVideoService({
-      ffmpegPath: '/custom/ffmpeg',
-    }) as unknown as {
-      _resolveFfmpegPath: () => string
-    }
-
-    expect(service._resolveFfmpegPath()).toBe('/custom/ffmpeg')
-  })
-
-  it('ffmpeg path resolution prefers discovered binary when available', () => {
-    const service = new WdioPuppeteerVideoService({}) as unknown as {
-      _resolvedFfmpegPath?: string
-      _resolveFfmpegPath: () => string
-    }
-
-    service._resolvedFfmpegPath = '/detected/ffmpeg'
-    expect(service._resolveFfmpegPath()).toBe('/detected/ffmpeg')
-  })
-
-  it('ffmpeg path resolution uses FFMPEG_PATH when option is unset', () => {
-    const previousFfmpegPath = process.env.FFMPEG_PATH
-    try {
-      process.env.FFMPEG_PATH = '/env/ffmpeg'
-
-      const service = new WdioPuppeteerVideoService({}) as unknown as {
-        _resolveFfmpegPath: () => string
-      }
-      expect(service._resolveFfmpegPath()).toBe('/env/ffmpeg')
-    } finally {
-      process.env.FFMPEG_PATH = previousFfmpegPath
-    }
-  })
-
-  it('ffmpeg path defaults to PATH lookup when no override exists', () => {
-    const previousFfmpegPath = process.env.FFMPEG_PATH
-    try {
-      delete process.env.FFMPEG_PATH
-
-      const service = new WdioPuppeteerVideoService({}) as unknown as {
-        _resolveFfmpegPath: () => string
-      }
-      expect(service._resolveFfmpegPath()).toBe('ffmpeg')
-    } finally {
-      process.env.FFMPEG_PATH = previousFfmpegPath
-    }
-  })
-
   it('before() logs a warning and continues when outputDir mkdir fails', async () => {
     await withTempDir(async (tempDir) => {
       // Block dir creation by placing a file where the dir should be
@@ -1497,14 +1293,13 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(warnMessages).toHaveLength(0)
   })
 
-  it('_warnMissingFfmpeg and _disableRecordingForWorker only log once', () => {
+  it('_disableRecordingForWorker logs only once', () => {
     const service = new WdioPuppeteerVideoService({}) as unknown as {
       _captureSession: CaptureSession
       _canUseRecordingHooks: () => boolean
       _disableRecordingForWorker: (reason: string) => void
       _isChromium: boolean
       _log: (level: string, message: string) => void
-      _warnMissingFfmpeg: (reason: string) => void
     }
 
     const warnMessages: string[] = []
@@ -1518,15 +1313,10 @@ describe('WdioPuppeteerVideoService unit', () => {
 
     expect(service._canUseRecordingHooks()).toBe(true)
 
-    service._warnMissingFfmpeg('ffmpeg missing')
-    service._warnMissingFfmpeg('ffmpeg missing again')
     service._disableRecordingForWorker('worker disabled')
     service._disableRecordingForWorker('worker disabled again')
 
     expect(service._canUseRecordingHooks()).toBe(false)
-    expect(
-      warnMessages.filter((message) => message.includes('ffmpeg')),
-    ).toHaveLength(1)
     expect(
       warnMessages.filter((message) =>
         message.includes('Recording disabled for this worker'),

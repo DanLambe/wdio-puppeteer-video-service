@@ -1,17 +1,16 @@
 import { type ChildProcess, spawn } from 'node:child_process'
-import path from 'node:path'
 import { type ClockBoundary, systemClock } from './boundaries.js'
-import { FFMPEG_TERMINATION_GRACE_MS } from './constants.js'
+import {
+  FFMPEG_TERMINATION_GRACE_MS,
+  FFMPEG_TERMINATION_HELPER_TIMEOUT_MS,
+} from './constants.js'
 import type { ServiceLogger } from './logging.js'
+import {
+  type FfmpegProcess,
+  type TerminateFfmpegProcessTree,
+  terminateFfmpegProcessTree,
+} from './process-supervisor.js'
 import { Utf8TailBuffer } from './utf8-tail-buffer.js'
-
-export interface FfmpegProcess {
-  pid?: number | undefined
-  stderr?: NodeJS.ReadableStream | null
-  kill(signal?: NodeJS.Signals | number): boolean
-  on(event: 'close', listener: (code: number | null) => void): this
-  on(event: 'error', listener: (error: Error) => void): this
-}
 
 export type SpawnFfmpegProcess = (
   ffmpegPath: string,
@@ -36,13 +35,8 @@ export interface FfmpegRunnerDependencies {
   terminateProcessTree?: TerminateFfmpegProcessTree
 }
 
-export type TerminateFfmpegProcessTree = (
-  process: FfmpegProcess,
-  force: boolean,
-) => void
-
 interface RegisteredFfmpegProcess {
-  terminate: () => void
+  terminate: () => Promise<void>
 }
 
 export class FfmpegProcessRegistry {
@@ -59,10 +53,10 @@ export class FfmpegProcessRegistry {
     }
   }
 
-  terminateAll(): void {
-    for (const process of this.activeProcesses) {
-      process.terminate()
-    }
+  async terminateAll(): Promise<void> {
+    await Promise.allSettled(
+      [...this.activeProcesses].map((process) => process.terminate()),
+    )
   }
 }
 
@@ -75,44 +69,6 @@ export const spawnFfmpegProcess: SpawnFfmpegProcess = (
     detached: process.platform !== 'win32',
     windowsHide: true,
   })
-}
-
-export const terminateFfmpegProcessTree: TerminateFfmpegProcessTree = (
-  ffmpegProcess,
-  force,
-): void => {
-  const pid = ffmpegProcess.pid
-  if (pid && process.platform === 'win32') {
-    const taskkillPath = path.join(
-      process.env.SystemRoot ?? String.raw`C:\Windows`,
-      'System32',
-      'taskkill.exe',
-    )
-    const terminator = spawn(
-      taskkillPath,
-      ['/PID', pid.toString(), '/T', ...(force ? ['/F'] : [])],
-      {
-        stdio: 'ignore',
-        windowsHide: true,
-      },
-    )
-    terminator.on('error', () => {
-      ffmpegProcess.kill(force ? 'SIGKILL' : 'SIGTERM')
-    })
-    terminator.unref()
-    return
-  }
-
-  if (pid) {
-    try {
-      process.kill(-pid, force ? 'SIGKILL' : 'SIGTERM')
-      return
-    } catch {
-      /* fall back when the child is not a process-group leader */
-    }
-  }
-
-  ffmpegProcess.kill(force ? 'SIGKILL' : 'SIGTERM')
 }
 
 export const runFfmpeg = async (
@@ -132,14 +88,25 @@ export const runFfmpeg = async (
   const terminateProcessTree =
     dependencies.terminateProcessTree ?? terminateFfmpegProcessTree
 
+  let proc: FfmpegProcess
+  try {
+    proc = spawnProcess(options.ffmpegPath, options.args)
+  } catch (error) {
+    reportSpawnFailure(options, error)
+    return false
+  }
+
   return new Promise<boolean>((resolve) => {
-    const proc = spawnProcess(options.ffmpegPath, options.args)
     const stderr = new Utf8TailBuffer(32_768)
     let settled = false
     let timeout: NodeJS.Timeout | undefined
-    let terminationTimeout: NodeJS.Timeout | undefined
     let timedOut = false
+    let terminationTask: Promise<void> | undefined
     let unregisterProcess = (): void => {}
+    let resolveSettlement = (): void => {}
+    const settlement = new Promise<void>((resolveSettlementPromise) => {
+      resolveSettlement = resolveSettlementPromise
+    })
 
     const settle = (value: boolean): void => {
       if (settled) {
@@ -150,25 +117,30 @@ export const runFfmpeg = async (
       if (timeout) {
         clock.clearTimeout(timeout)
       }
-      if (terminationTimeout) {
-        clock.clearTimeout(terminationTimeout)
-      }
       unregisterProcess()
+      resolveSettlement()
       resolve(value)
     }
+    const isSettled = (): boolean => settled
 
-    const terminate = (): void => {
-      if (settled || timedOut) {
-        return
+    const terminate = (): Promise<void> => {
+      if (settled) {
+        return Promise.resolve()
+      }
+      if (terminationTask) {
+        return terminationTask
       }
 
       timedOut = true
-      terminateProcessTree(proc, false)
-      terminationTimeout = clock.setTimeout(() => {
-        terminateProcessTree(proc, true)
-        settle(false)
-      }, FFMPEG_TERMINATION_GRACE_MS)
-      terminationTimeout.unref?.()
+      terminationTask = terminateFfmpegAfterGrace({
+        clock,
+        ffmpegProcess: proc,
+        isSettled,
+        settle,
+        settlement,
+        terminateProcessTree,
+      })
+      return terminationTask
     }
     unregisterProcess = processRegistry?.register({ terminate }) ?? (() => {})
 
@@ -178,7 +150,7 @@ export const runFfmpeg = async (
           'warn',
           `[WdioPuppeteerVideoService] ffmpeg ${options.operation} timed out after ${options.timeoutMs.toString()}ms`,
         )
-        terminate()
+        void terminate()
       }, options.timeoutMs)
       timeout.unref?.()
     }
@@ -196,14 +168,7 @@ export const runFfmpeg = async (
         return
       }
 
-      options.markUnavailable()
-      options.warnMissing(
-        `ffmpeg ${options.operation} failed to start: ${error.message}`,
-      )
-      options.log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to spawn ffmpeg for ${options.operation}: ${error.message}`,
-      )
+      reportSpawnFailure(options, error)
       settle(false)
     })
 
@@ -229,5 +194,92 @@ export const runFfmpeg = async (
       )
       settle(false)
     })
+  })
+}
+
+const reportSpawnFailure = (
+  options: RunFfmpegOptions,
+  error: unknown,
+): void => {
+  const message = error instanceof Error ? error.message : String(error)
+  options.markUnavailable()
+  options.warnMissing(`ffmpeg ${options.operation} failed to start: ${message}`)
+  options.log(
+    'warn',
+    `[WdioPuppeteerVideoService] Failed to spawn ffmpeg for ${options.operation}: ${message}`,
+  )
+}
+
+interface TerminateFfmpegAfterGraceOptions {
+  clock: ClockBoundary
+  ffmpegProcess: FfmpegProcess
+  isSettled: () => boolean
+  settle: (value: boolean) => void
+  settlement: Promise<void>
+  terminateProcessTree: TerminateFfmpegProcessTree
+}
+
+const terminateFfmpegAfterGrace = async (
+  options: TerminateFfmpegAfterGraceOptions,
+): Promise<void> => {
+  await runBoundedTermination(
+    () => options.terminateProcessTree(options.ffmpegProcess, false),
+    options.clock,
+  )
+  if (options.isSettled()) {
+    return
+  }
+
+  await waitForSettlementOrGrace(options.settlement, options.clock)
+  if (options.isSettled()) {
+    return
+  }
+
+  await runBoundedTermination(
+    () => options.terminateProcessTree(options.ffmpegProcess, true),
+    options.clock,
+  )
+  options.settle(false)
+}
+
+const runBoundedTermination = async (
+  terminate: () => Promise<void>,
+  clock: ClockBoundary,
+): Promise<void> => {
+  await waitForTaskOrTimeout(
+    Promise.resolve().then(terminate),
+    FFMPEG_TERMINATION_HELPER_TIMEOUT_MS,
+    clock,
+  )
+}
+
+const waitForSettlementOrGrace = async (
+  settlement: Promise<void>,
+  clock: ClockBoundary,
+): Promise<void> => {
+  await waitForTaskOrTimeout(settlement, FFMPEG_TERMINATION_GRACE_MS, clock)
+}
+
+const waitForTaskOrTimeout = async (
+  task: Promise<unknown>,
+  timeoutMs: number,
+  clock: ClockBoundary,
+): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    let settled = false
+    let timeout: NodeJS.Timeout | undefined
+    const settle = (): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (timeout) {
+        clock.clearTimeout(timeout)
+      }
+      resolve()
+    }
+    timeout = clock.setTimeout(settle, timeoutMs)
+    timeout.unref?.()
+    void task.then(settle, settle)
   })
 }

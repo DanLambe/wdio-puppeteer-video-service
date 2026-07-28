@@ -98,8 +98,13 @@ export const publishAtomicArtifact = async (
       return undefined
     }
 
-    await fs.rename(reservation.temporaryPath, reservation.outputPath)
+    await fs.link(reservation.temporaryPath, reservation.outputPath)
     published = true
+    await fs.unlink(reservation.temporaryPath).catch((error: unknown) => {
+      options.warn(
+        `[WdioPuppeteerVideoService] Published artifact but could not remove its temporary link ${reservation.temporaryPath}: ${String(error)}`,
+      )
+    })
     return reservation.outputPath
   } catch (error) {
     options.warn(
@@ -154,6 +159,15 @@ const acquireArtifactReservation = async (
       await fileHandle.writeFile(JSON.stringify(metadata), 'utf8')
       await fileHandle.close()
       fileHandle = undefined
+
+      // The output can appear after the initial existence check but before this
+      // reservation is acquired. Recheck while we own the reservation so a
+      // POSIX rename cannot replace an artifact published by another worker.
+      if (await pathExists(outputPath)) {
+        await releaseArtifactReservation(reservationPath, ownerId)
+        continue
+      }
+
       return { outputPath, ownerId, reservationPath, temporaryPath }
     } catch (error) {
       await fileHandle?.close().catch(() => {

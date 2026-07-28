@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { CI_TRANSCODE_FFMPEG_ARGS } from '../../src/service/constants.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 
@@ -115,6 +116,9 @@ describe('service option resolution', () => {
       processing: {
         merge: { deleteSegments: true, enabled: false },
         timing: 'after-worker',
+        transcode: {
+          ffmpegArgs: [...CI_TRANSCODE_FFMPEG_ARGS],
+        },
       },
       concurrency: {
         startMode: 'fast-fail',
@@ -146,6 +150,13 @@ describe('service option resolution', () => {
       recording: { windowChanges: 'segment' },
     })
     expect(explicit.logLevel).toBe('trace')
+
+    expect(
+      resolveServiceConfiguration({
+        profile: 'ci',
+        processing: { transcode: { ffmpegArgs: [] } },
+      }).options.processing.transcode.ffmpegArgs,
+    ).toEqual([])
   })
 
   it('maps the documented 0.8 migration example to the existing runtime behavior', () => {

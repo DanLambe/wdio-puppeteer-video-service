@@ -12,6 +12,7 @@ import type {
   WdioPuppeteerVideoServiceOptions,
 } from '../types.js'
 import {
+  CI_TRANSCODE_FFMPEG_ARGS,
   DEFAULT_MAX_FILENAME_LENGTH,
   DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
   DEFAULT_RECORDING_START_TIMEOUT_MS,
@@ -65,6 +66,9 @@ export const resolveServiceConfiguration = (
   )
   const ffmpegPath = normalization.normalizeOptionalDir(processing.ffmpeg?.path)
   const resolvedAllure = resolveAllureOptions(allure)
+  const transcodeFfmpegArgs =
+    transcode.ffmpegArgs ??
+    (profile === 'ci' ? [...CI_TRANSCODE_FFMPEG_ARGS] : undefined)
 
   const resolvedOptions = freezeResolvedOptions({
     outputDir: normalization.normalizeOutputDir(options.outputDir),
@@ -102,7 +106,9 @@ export const resolveServiceConfiguration = (
       transcode: {
         enabled: transcode.enabled ?? false,
         deleteOriginal: transcode.deleteOriginal ?? true,
-        ...(transcode.ffmpegArgs ? { ffmpegArgs: transcode.ffmpegArgs } : {}),
+        ...(transcodeFfmpegArgs === undefined
+          ? {}
+          : { ffmpegArgs: transcodeFfmpegArgs }),
       },
       merge: mergeSegments,
     },
@@ -220,9 +226,9 @@ const freezeResolvedOptions = (
   })
   const transcode = Object.freeze({
     ...options.processing.transcode,
-    ...(options.processing.transcode.ffmpegArgs
-      ? { ffmpegArgs: freezeList(options.processing.transcode.ffmpegArgs) }
-      : {}),
+    ...(options.processing.transcode.ffmpegArgs === undefined
+      ? {}
+      : { ffmpegArgs: freezeList(options.processing.transcode.ffmpegArgs) }),
   }) satisfies ResolvedProcessingTranscodeOptions
 
   return Object.freeze({

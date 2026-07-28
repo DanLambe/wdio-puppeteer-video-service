@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events'
-import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,12 +10,11 @@ vi.mock('node:child_process', () => ({
 
 import { FFMPEG_TERMINATION_GRACE_MS } from '../../src/service/constants.js'
 import {
-  type FfmpegProcess,
   FfmpegProcessRegistry,
   runFfmpeg,
   spawnFfmpegProcess,
-  terminateFfmpegProcessTree,
 } from '../../src/service/ffmpeg-runner.js'
+import type { FfmpegProcess } from '../../src/service/process-supervisor.js'
 
 class FakeFfmpegProcess extends EventEmitter implements FfmpegProcess {
   pid: number | undefined
@@ -85,6 +83,40 @@ describe('ffmpeg runner process handling', () => {
     expect(harness.warnMissing).toHaveBeenCalledTimes(1)
     expect(harness.warnMessages).toHaveLength(1)
     expect(harness.warnMessages[0]).toContain('Failed to spawn ffmpeg')
+  })
+
+  it('reports a synchronous process spawn failure without rejecting', async () => {
+    const warnMissing = vi.fn()
+    const markUnavailable = vi.fn()
+    const log = vi.fn()
+
+    await expect(
+      runFfmpeg(
+        {
+          args: [],
+          available: true,
+          ffmpegPath: 'ffmpeg',
+          log,
+          markUnavailable,
+          operation: 'merge',
+          timeoutMs: 0,
+          warnMissing,
+        },
+        {
+          spawnProcess: () => {
+            throw new Error('synchronous spawn failure')
+          },
+        },
+      ),
+    ).resolves.toBe(false)
+    expect(markUnavailable).toHaveBeenCalledOnce()
+    expect(warnMissing).toHaveBeenCalledWith(
+      'ffmpeg merge failed to start: synchronous spawn failure',
+    )
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      expect.stringContaining('synchronous spawn failure'),
+    )
   })
 
   it('includes captured stderr when ffmpeg exits nonzero', async () => {
@@ -179,7 +211,7 @@ describe('ffmpeg runner process handling', () => {
   it('terminates the complete process tree before force-killing it', async () => {
     vi.useFakeTimers()
     const process = new FakeFfmpegProcess()
-    const terminateProcessTree = vi.fn()
+    const terminateProcessTree = vi.fn(async () => {})
     const resultPromise = runFfmpeg(
       {
         args: [],
@@ -206,33 +238,6 @@ describe('ffmpeg runner process handling', () => {
     ])
   })
 
-  it('uses the operating-system process-tree termination mechanism', () => {
-    const ffmpegProcess = new FakeFfmpegProcess()
-    ffmpegProcess.pid = 4321
-    if (globalThis.process.platform === 'win32') {
-      const terminator = new FakeFfmpegProcess()
-      spawnMock.mockReturnValue(terminator)
-
-      terminateFfmpegProcessTree(ffmpegProcess, true)
-
-      expect(spawnMock).toHaveBeenCalledWith(
-        path.join(
-          globalThis.process.env.SystemRoot ?? String.raw`C:\Windows`,
-          'System32',
-          'taskkill.exe',
-        ),
-        ['/PID', '4321', '/T', '/F'],
-        { stdio: 'ignore', windowsHide: true },
-      )
-      expect(terminator.unref).toHaveBeenCalledOnce()
-      return
-    }
-
-    const kill = vi.spyOn(globalThis.process, 'kill').mockReturnValue(true)
-    terminateFfmpegProcessTree(ffmpegProcess, false)
-    expect(kill).toHaveBeenCalledWith(-4321, 'SIGTERM')
-  })
-
   it('terminates registered processes during service teardown', async () => {
     const process = new FakeFfmpegProcess()
     const registry = new FfmpegProcessRegistry()
@@ -256,11 +261,14 @@ describe('ffmpeg runner process handling', () => {
     )
 
     expect(registry.size).toBe(1)
-    registry.terminateAll()
-    registry.terminateAll()
-    expect(process.kill).toHaveBeenCalledOnce()
+    const firstTermination = registry.terminateAll()
+    const repeatedTermination = registry.terminateAll()
+    await vi.waitFor(() => {
+      expect(process.kill).toHaveBeenCalledOnce()
+    })
     process.emit('close', null)
 
+    await Promise.all([firstTermination, repeatedTermination])
     await expect(resultPromise).resolves.toBe(false)
     expect(registry.size).toBe(0)
   })

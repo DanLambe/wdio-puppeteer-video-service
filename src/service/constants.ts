@@ -1,14 +1,10 @@
 import type { WriteStream } from 'node:fs'
-import type {
-  LogLevel,
-  OutputFormat,
-  ProcessingTranscodeOptions,
-} from '../types.js'
+import type { LogLevel, OutputFormat } from '../types.js'
 
-export type ResolvedTranscodeOptions = Required<
-  Pick<ProcessingTranscodeOptions, 'deleteOriginal'>
-> &
-  Pick<ProcessingTranscodeOptions, 'ffmpegArgs'>
+export interface ResolvedTranscodeOptions {
+  readonly deleteOriginal: boolean
+  readonly ffmpegArgs?: readonly string[]
+}
 
 export type { OutputFormat }
 
@@ -85,6 +81,7 @@ export const RECORDER_STOP_TIMEOUT_MS = 5_000
 export const WRITE_STREAM_TIMEOUT_MS = 30_000
 export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 export const FFMPEG_TERMINATION_GRACE_MS = 1_000
+export const FFMPEG_TERMINATION_HELPER_TIMEOUT_MS = 500
 export const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
 export const DEFAULT_MAX_FILENAME_LENGTH = 255
 export const WINDOWS_MAX_PATH_LENGTH = 259

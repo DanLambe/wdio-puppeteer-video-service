@@ -66,7 +66,7 @@ describe('artifact integrity', () => {
     ).resolves.toBe(desiredPath)
 
     expect(validate).toHaveBeenCalledOnce()
-    expect(unlink).not.toHaveBeenCalledWith(producedTemporaryPath)
+    expect(unlink).toHaveBeenCalledWith(producedTemporaryPath)
     await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
       'complete-media',
     )
@@ -233,6 +233,63 @@ describe('artifact integrity', () => {
       }),
     ).resolves.toBe(path.join(tempDir, 'existing_run2.webm'))
     await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe('original')
+  })
+
+  it('does not replace output published while acquiring its reservation', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'raced.webm')
+    const reservationPath = `${desiredPath}.wdio-reserve`
+    const open = fs.open.bind(fs)
+
+    vi.spyOn(fs, 'open').mockImplementation(async (filePath, flags, mode) => {
+      const fileHandle = await open(filePath, flags, mode)
+      if (filePath === reservationPath) {
+        await fs.writeFile(desiredPath, 'first-worker', 'utf8')
+      }
+      return fileHandle
+    })
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'second-worker', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(path.join(tempDir, 'raced_run2.webm'))
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe('first-worker')
+    await expect(
+      fs.readFile(path.join(tempDir, 'raced_run2.webm'), 'utf8'),
+    ).resolves.toBe('second-worker')
+  })
+
+  it('does not replace output created while producing an artifact', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'late-collision.webm')
+    const warn = vi.fn()
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce: async (temporaryPath) => {
+          await fs.writeFile(temporaryPath, 'processed-media', 'utf8')
+          await fs.writeFile(desiredPath, 'direct-recording', 'utf8')
+          return true
+        },
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
+      'direct-recording',
+    )
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to publish artifact'),
+    )
+    expect(await fs.readdir(tempDir)).toEqual(['late-collision.webm'])
   })
 
   it('treats output removed by a producer as empty and cleans the reservation', async () => {

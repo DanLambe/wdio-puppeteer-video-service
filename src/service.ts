@@ -1,30 +1,21 @@
 import path from 'node:path'
 import type { Frameworks, Services } from '@wdio/types'
 import type { Browser } from 'webdriverio'
-import * as artifactIntegrity from './service/artifact-integrity.js'
-import type {
-  ClockBoundary,
-  FileSystemBoundary,
-  ProcessBoundary,
-} from './service/boundaries.js'
+import { reserveArtifactPath } from './service/artifact-integrity.js'
+import type { ClockBoundary, FileSystemBoundary } from './service/boundaries.js'
 import { CaptureSession } from './service/capture-session.js'
 import {
   createWorkerCompositionRoot,
   type WorkerCompositionOverrides,
-  type WorkerFfmpegRunner,
 } from './service/composition.js'
-import {
-  type ActiveSegment,
-  CI_TRANSCODE_FFMPEG_ARGS,
-  type DeferredMergeTask,
-  type DeferredPostProcessTask,
-  type DeferredTranscodeTask,
-  type MergeExecutionOptions,
-  type OutputFormat,
-  type ResolvedTranscodeOptions,
+import type {
+  ActiveSegment,
+  DeferredMergeTask,
+  DeferredPostProcessTask,
+  DeferredTranscodeTask,
+  OutputFormat,
 } from './service/constants.js'
-import * as ffmpeg from './service/ffmpeg.js'
-import type { FfmpegProcessRegistry } from './service/ffmpeg-runner.js'
+import { FfmpegRuntime } from './service/ffmpeg-runtime.js'
 import {
   createLauncherRegistrationError,
   inspectLauncherWorkerContext,
@@ -37,6 +28,7 @@ import {
   readManifestRunContext,
   readManifestWorkerContext,
 } from './service/manifest-runtime.js'
+import { MediaPipeline } from './service/media-pipeline.js'
 import * as normalization from './service/normalization.js'
 import { resolveServiceConfiguration } from './service/options.js'
 import * as artifactPaths from './service/paths.js'
@@ -50,10 +42,7 @@ import {
   normalizeTestOutcome,
 } from './service/recording-entity.js'
 import { RecordingLifecycle } from './service/recording-lifecycle.js'
-import type {
-  PostProcessSlotScheduler,
-  RecordingSlotScheduler,
-} from './service/recording-slots.js'
+import type { RecordingSlotScheduler } from './service/recording-slots.js'
 import type { WorkerRecordingCoordinatorPort } from './service/worker-recording-coordinator.js'
 import type {
   LogLevel,
@@ -102,35 +91,25 @@ export default class WdioPuppeteerVideoService
   private readonly _options: ResolvedWdioPuppeteerVideoServiceOptions
   private readonly _clock: ClockBoundary
   private readonly _fileSystem: FileSystemBoundary
-  private readonly _process: ProcessBoundary
-  private readonly _runFfmpegProcess: WorkerFfmpegRunner
   private readonly _writeLog: typeof logging.writeLog
   private readonly _captureSession: CaptureSession
   private readonly _captureEngine: PuppeteerCaptureEngine
+  private readonly _ffmpegRuntime: FfmpegRuntime
+  private readonly _mediaPipeline: MediaPipeline
   private _isChromium = false
   private _recordingDisabledReason: string | undefined
   private _sessionIdToken = ''
   private _sessionIdFullToken = ''
   private _logLevel: LogLevel = 'warn'
   private readonly _hasExplicitLogLevel: boolean
-  private _ffmpegAvailable = false
-  private _resolvedFfmpegPath: string | undefined
-  private _ffmpegCandidates: string[] = []
-  private _ffmpegInitializationTask: Promise<boolean> | undefined
-  private _ffmpegInitializationCompleted = false
   private _recordingTask: Promise<void> = Promise.resolve()
   private _teardownTask: Promise<void> | undefined
   private readonly _deferredPostProcessTasks: DeferredPostProcessTask[] = []
   private _warnedAboutMp4Compatibility = false
-  private _warnedAboutMp4AutoFallback = false
-  private _warnedAboutMissingFfmpeg = false
-  private _forceMp4Transcode = false
   private readonly _slugUsageCount = new Map<string, number>()
   private readonly _maxSlugLength: number
   private readonly _recordingSlotScheduler: RecordingSlotScheduler
-  private readonly _postProcessSlotScheduler: PostProcessSlotScheduler
   private readonly _recordingLifecycle = new RecordingLifecycle()
-  private readonly _ffmpegProcessRegistry: FfmpegProcessRegistry
   private _manifestRecorder: ManifestWorkerRecorder | undefined
   private readonly _recordingCoordinator: WorkerRecordingCoordinatorPort
 
@@ -151,10 +130,7 @@ export default class WdioPuppeteerVideoService
     const composition = createWorkerCompositionRoot(compositionOverrides)
     this._clock = composition.clock
     this._fileSystem = composition.fileSystem
-    this._process = composition.process
-    this._runFfmpegProcess = composition.runFfmpeg
     this._writeLog = composition.writeLog
-    this._ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
     this._captureSession = new CaptureSession()
     this._captureEngine = new PuppeteerCaptureEngine({
       capture: this._options.capture,
@@ -187,12 +163,36 @@ export default class WdioPuppeteerVideoService
         this._log(level, message, details)
       },
     )
-    this._postProcessSlotScheduler = composition.createPostProcessSlotScheduler(
+    const ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
+    const postProcessSlotScheduler = composition.createPostProcessSlotScheduler(
       this._options,
       (level, message, details) => {
         this._log(level, message, details)
       },
     )
+    this._ffmpegRuntime = new FfmpegRuntime({
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      onVersion: async (version) => {
+        await this._manifestRecorder?.noteFfmpegVersion(version)
+      },
+      options: this._options,
+      postProcessSlotScheduler,
+      process: composition.process,
+      processRegistry: ffmpegProcessRegistry,
+      runFfmpeg: composition.runFfmpeg,
+    })
+    this._mediaPipeline = new MediaPipeline({
+      failurePolicy: this._options.failurePolicy,
+      fileSystem: this._fileSystem,
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      outputDir: this._options.outputDir,
+      process: composition.process,
+      runtime: this._ffmpegRuntime,
+    })
     this._recordingCoordinator = composition.createRecordingCoordinator({
       actions: {
         finalizeMedia: (passed, keepArtifacts) =>
@@ -301,11 +301,7 @@ export default class WdioPuppeteerVideoService
       )
       return
     }
-    this._ffmpegAvailable = false
-    this._resolvedFfmpegPath = undefined
-    this._ffmpegCandidates = []
-    this._ffmpegInitializationTask = undefined
-    this._ffmpegInitializationCompleted = false
+    this._ffmpegRuntime.resetForSession()
 
     await this._fileSystem.mkdir(this._options.outputDir).catch((error) => {
       this._log(
@@ -383,6 +379,7 @@ export default class WdioPuppeteerVideoService
 
   async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
     await this._teardownRecording('onReload')
+    this._ffmpegRuntime.resumeAfterTeardown()
     this._captureEngine.resetConnection()
     this._sessionIdToken = buildSessionIdToken(newSessionId)
     this._sessionIdFullToken = buildFullSessionIdToken(newSessionId)
@@ -406,53 +403,64 @@ export default class WdioPuppeteerVideoService
   private async _teardownRecording(
     source: 'after' | 'afterSession' | 'onReload',
   ): Promise<void> {
-    this._ffmpegProcessRegistry.terminateAll()
     if (this._teardownTask) {
       await this._teardownTask
       return
     }
 
-    const task = this._runSerializedRecordingTask(async () => {
-      try {
-        if (this._captureSession.isRecordingActive) {
-          if (
-            this._recordingCoordinator.isSpecScope &&
-            this._captureSession.currentTestSlug
-          ) {
-            await this._recordingCoordinator.finalizeSpecRecording()
-          } else {
-            await this._stopRecording()
-            await this._resetTestState()
-          }
-        }
-
-        await this._flushDeferredPostProcessTasks()
-      } finally {
-        if (
-          this._captureSession.isRecordingActive ||
-          this._recordingSlotScheduler.ownsRecordingSlot ||
-          this._recordingSlotScheduler.ownsGlobalRecordingSlot
-        ) {
-          await this._resetTestState()
-        }
-        if (
-          this._postProcessSlotScheduler.ownsPostProcessSlot ||
-          this._postProcessSlotScheduler.ownsGlobalPostProcessSlot
-        ) {
-          await this._postProcessSlotScheduler.release()
-        }
-        this._recordingCoordinator.resetWorkerState()
-        this._log(
-          'trace',
-          `[WdioPuppeteerVideoService] Recording teardown completed from ${source}.`,
-        )
-      }
-    })
+    const task = this._performRecordingTeardown(source)
     this._teardownTask = task
     try {
       await task
     } finally {
-      this._teardownTask = undefined
+      if (this._teardownTask === task) {
+        this._teardownTask = undefined
+      }
+    }
+  }
+
+  private async _performRecordingTeardown(
+    source: 'after' | 'afterSession' | 'onReload',
+  ): Promise<void> {
+    await this._ffmpegRuntime.terminateAll()
+    try {
+      await this._runSerializedRecordingTask(async () => {
+        this._ffmpegRuntime.resumeAfterTeardown()
+        try {
+          if (this._captureSession.isRecordingActive) {
+            if (
+              this._recordingCoordinator.isSpecScope &&
+              this._captureSession.currentTestSlug
+            ) {
+              await this._recordingCoordinator.finalizeSpecRecording()
+            } else {
+              await this._stopRecording()
+              await this._resetTestState()
+            }
+          }
+
+          await this._flushDeferredPostProcessTasks()
+        } finally {
+          if (
+            this._captureSession.isRecordingActive ||
+            this._recordingSlotScheduler.ownsRecordingSlot ||
+            this._recordingSlotScheduler.ownsGlobalRecordingSlot
+          ) {
+            await this._resetTestState()
+          }
+          this._recordingCoordinator.resetWorkerState()
+          this._log(
+            'trace',
+            `[WdioPuppeteerVideoService] Recording teardown completed from ${source}.`,
+          )
+        }
+      })
+    } finally {
+      try {
+        await this._ffmpegRuntime.terminateAll()
+      } finally {
+        await this._ffmpegRuntime.releaseHeldPostProcessSlot()
+      }
     }
   }
 
@@ -518,7 +526,7 @@ export default class WdioPuppeteerVideoService
       return false
     }
 
-    const ffmpegReady = await this._ensureFfmpegReady()
+    const ffmpegReady = await this._ffmpegRuntime.ensureReady()
     if (!ffmpegReady) {
       return false
     }
@@ -532,8 +540,8 @@ export default class WdioPuppeteerVideoService
       const result = await this._captureEngine.startCapture({
         createOutput: async () =>
           this._reserveRecordingOutput(this._createRecordingOutput()),
-        ffmpegPath: this._resolveFfmpegPath(),
-        transcodeOptions: this._createResolvedTranscodeOptions(),
+        ffmpegPath: this._ffmpegRuntime.resolvePath(),
+        transcodeOptions: this._options.processing.transcode,
       })
       if (!result.started) {
         return false
@@ -584,7 +592,7 @@ export default class WdioPuppeteerVideoService
     transcodeEnabled: boolean
   } {
     const outputFormat: OutputFormat = this._options.processing.format
-    const transcodeEnabled = this._shouldTranscode(outputFormat)
+    const transcodeEnabled = this._ffmpegRuntime.shouldTranscode(outputFormat)
 
     if (
       outputFormat === 'mp4' &&
@@ -624,9 +632,7 @@ export default class WdioPuppeteerVideoService
   private async _reserveRecordingOutput(
     output: ReturnType<WdioPuppeteerVideoService['_createRecordingOutput']>,
   ): Promise<ReturnType<WdioPuppeteerVideoService['_createRecordingOutput']>> {
-    const recordingPath = await artifactIntegrity.reserveArtifactPath(
-      output.recordingPath,
-    )
+    const recordingPath = await reserveArtifactPath(output.recordingPath)
     return {
       ...output,
       recordingPath,
@@ -801,8 +807,8 @@ export default class WdioPuppeteerVideoService
       mergedFormat,
       outputFormat: this._options.processing.format,
       segmentPaths,
-      shouldTranscodeMergedOutput: this._shouldTranscode('mp4'),
-      transcodeOptions: this._createResolvedTranscodeOptions(),
+      shouldTranscodeMergedOutput: this._ffmpegRuntime.shouldTranscode('mp4'),
+      transcodeOptions: this._options.processing.transcode,
     })
     const manifestEntryId = this._manifestRecorder?.currentEntryId
     if (manifestEntryId) {
@@ -854,7 +860,7 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Attempting merge for ${segmentPaths.length} segments into ${mergedPath}`,
     )
 
-    const publishedMergedPath = await this._mergeSegmentPathsToOutput({
+    const publishedMergedPath = await this._mediaPipeline.merge({
       segmentPaths,
       mergedPath,
       deleteSegments,
@@ -862,7 +868,7 @@ export default class WdioPuppeteerVideoService
       ffmpegOperation: 'segment merge',
     })
     if (!publishedMergedPath) {
-      this._reportPostProcessFailure(
+      this._mediaPipeline.reportFailure(
         `Merge failed, keeping ${segmentPaths.length.toString()} original segment(s).`,
       )
       return
@@ -873,158 +879,6 @@ export default class WdioPuppeteerVideoService
       for (const segmentPath of segmentPaths) {
         this._captureSession.deleteRecordedPath(segmentPath)
       }
-    }
-  }
-
-  private async _mergeSegmentPathsToOutput(
-    options: MergeExecutionOptions,
-  ): Promise<string | undefined> {
-    return this._withPostProcessSlot(options.ffmpegOperation, () =>
-      postProcess.mergeSegmentPathsToOutput({
-        ...options,
-        outputDir: this._options.outputDir,
-        runFfmpeg: (args, operation) => this._runFfmpeg(args, operation),
-        warn: (message) => {
-          this._log('warn', message)
-        },
-      }),
-    )
-  }
-
-  private _createResolvedTranscodeOptions(): ResolvedTranscodeOptions {
-    const configuredFfmpegArgs = this._options.processing.transcode.ffmpegArgs
-    const profileFfmpegArgs =
-      this._options.profile === 'ci' ? [...CI_TRANSCODE_FFMPEG_ARGS] : undefined
-    const ffmpegArgs = configuredFfmpegArgs
-      ? [...configuredFfmpegArgs]
-      : profileFfmpegArgs
-
-    return {
-      deleteOriginal: this._options.processing.transcode.deleteOriginal,
-      ...(ffmpegArgs === undefined ? {} : { ffmpegArgs }),
-    }
-  }
-
-  private _resolveFfmpegPath(): string {
-    const configuredPath = this._options.processing.ffmpeg.path?.trim()
-    const envPath = this._process.environment('FFMPEG_PATH')?.trim()
-    return this._resolvedFfmpegPath || configuredPath || envPath || 'ffmpeg'
-  }
-
-  private async _ensureFfmpegReady(): Promise<boolean> {
-    if (this._ffmpegAvailable) {
-      return true
-    }
-
-    if (this._ffmpegInitializationCompleted) {
-      return false
-    }
-
-    this._ffmpegInitializationTask ??= this._initializeFfmpeg().finally(() => {
-      this._ffmpegInitializationCompleted = true
-      this._ffmpegInitializationTask = undefined
-    })
-
-    return this._ffmpegInitializationTask
-  }
-
-  private async _initializeFfmpeg(): Promise<boolean> {
-    this._ffmpegCandidates = ffmpeg.getFfmpegCandidates(
-      this._options.processing.ffmpeg.path?.trim(),
-      this._process.environment('FFMPEG_PATH')?.trim(),
-    )
-    this._resolvedFfmpegPath = await ffmpeg.resolveAvailableFfmpegPath(
-      this._ffmpegCandidates,
-    )
-    this._ffmpegAvailable = !!this._resolvedFfmpegPath
-    const ffmpegPath = this._resolvedFfmpegPath
-    if (!this._ffmpegAvailable || !ffmpegPath) {
-      this._warnMissingFfmpeg('Video recording is disabled for this worker.')
-      return false
-    }
-
-    this._log(
-      'info',
-      `[WdioPuppeteerVideoService] Using ffmpeg binary: ${this._resolvedFfmpegPath}`,
-    )
-    const ffmpegVersion = await ffmpeg.readFfmpegVersion(ffmpegPath)
-    if (ffmpegVersion) {
-      await this._manifestRecorder?.noteFfmpegVersion(ffmpegVersion)
-    }
-    await this._configureMp4RecordingMode()
-    return true
-  }
-
-  private _shouldTranscode(outputFormat: OutputFormat): boolean {
-    if (outputFormat !== 'mp4') {
-      return false
-    }
-
-    if (this._options.processing.transcode.enabled) {
-      return true
-    }
-
-    const mode = this._options.processing.mp4Mode
-    return mode === 'transcode' || (mode === 'auto' && this._forceMp4Transcode)
-  }
-
-  private async _configureMp4RecordingMode(): Promise<void> {
-    this._forceMp4Transcode = false
-
-    const outputFormat = this._options.processing.format
-    if (outputFormat !== 'mp4') {
-      return
-    }
-
-    if (this._options.processing.transcode.enabled) {
-      return
-    }
-
-    const mode = this._options.processing.mp4Mode
-    if (mode === 'transcode') {
-      this._forceMp4Transcode = true
-      this._log(
-        'info',
-        '[WdioPuppeteerVideoService] MP4 strategy is set to transcode mode.',
-      )
-      return
-    }
-
-    const ffmpegPath = this._resolveFfmpegPath()
-    const supportsDirectMp4 =
-      (await this._withPostProcessSlot('direct MP4 capability probe', () =>
-        ffmpeg.probeDirectMp4Support(ffmpegPath, {
-          onProbeFailure: (details) => {
-            this._log(
-              'debug',
-              `[WdioPuppeteerVideoService] Direct MP4 probe failed: ${details}`,
-            )
-          },
-        }),
-      )) ?? false
-    if (supportsDirectMp4) {
-      this._log(
-        'info',
-        '[WdioPuppeteerVideoService] Detected ffmpeg support for direct MP4 recording.',
-      )
-      return
-    }
-
-    if (mode === 'direct') {
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] MP4 strategy is `direct`, but detected ffmpeg may not support Puppeteer direct MP4 mode. Consider using `mp4Mode: transcode` or `mp4Mode: auto`.',
-      )
-      return
-    }
-
-    this._forceMp4Transcode = true
-    if (!this._warnedAboutMp4AutoFallback) {
-      this._warnedAboutMp4AutoFallback = true
-      this._log(
-        'warn',
-        '[WdioPuppeteerVideoService] Direct MP4 compatibility probe failed. Falling back to MP4 transcode mode (`mp4Mode: auto`).',
-      )
     }
   }
 
@@ -1074,22 +928,17 @@ export default class WdioPuppeteerVideoService
       return
     }
 
-    const transcodedPath = await this._transcodeToH264Mp4(
-      segment.recordingPath,
-      segment.outputPath,
-      segment,
-    )
+    const transcodedPath = await this._mediaPipeline.transcode({
+      deleteOriginal: segment.transcodeOptions.deleteOriginal,
+      ...(segment.transcodeOptions.ffmpegArgs === undefined
+        ? {}
+        : { ffmpegArgs: segment.transcodeOptions.ffmpegArgs }),
+      inputPath: segment.recordingPath,
+      outputPath: segment.outputPath,
+    })
     if (transcodedPath) {
       segment.outputPath = transcodedPath
       this._captureSession.addRecordedPath(transcodedPath)
-      if (
-        segment.transcodeOptions.deleteOriginal &&
-        segment.recordingPath !== segment.outputPath
-      ) {
-        await this._fileSystem.unlink(segment.recordingPath).catch(() => {
-          /* best-effort cleanup */
-        })
-      }
       return
     }
 
@@ -1098,126 +947,9 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Transcode failed, keeping original recording: ${segment.recordingPath}`,
     )
     this._captureSession.addRecordedPath(segment.recordingPath)
-    this._reportPostProcessFailure(
+    this._mediaPipeline.reportFailure(
       `Transcode failed, keeping original recording: ${segment.recordingPath}`,
       true,
-    )
-  }
-
-  private async _transcodeToH264Mp4(
-    inputPath: string,
-    outputPath: string,
-    segment: ActiveSegment,
-  ): Promise<string | undefined> {
-    return this._transcodeToH264Mp4WithArgs(
-      inputPath,
-      outputPath,
-      segment.transcodeOptions.ffmpegArgs,
-    )
-  }
-
-  private async _transcodeToH264Mp4WithArgs(
-    inputPath: string,
-    outputPath: string,
-    ffmpegArgs: string[] | undefined,
-  ): Promise<string | undefined> {
-    return this._withPostProcessSlot('transcode', () =>
-      artifactIntegrity.publishAtomicArtifact({
-        desiredPath: outputPath,
-        process: this._process,
-        produce: (temporaryPath) =>
-          this._runFfmpeg(
-            postProcess.buildH264TranscodeArgs(
-              inputPath,
-              temporaryPath,
-              ffmpegArgs,
-            ),
-            'transcode',
-          ),
-        validate: (temporaryPath) =>
-          this._runFfmpeg(
-            postProcess.buildMediaValidationArgs(temporaryPath),
-            'transcode validation',
-          ),
-        warn: (message) => {
-          this._log('warn', message)
-        },
-      }),
-    )
-  }
-
-  private async _runFfmpeg(
-    args: string[],
-    operation: string,
-  ): Promise<boolean> {
-    return this._runFfmpegProcess(
-      {
-        args,
-        available: this._ffmpegAvailable,
-        ffmpegPath: this._resolveFfmpegPath(),
-        log: (level, message, details) => {
-          this._log(level, message, details)
-        },
-        markUnavailable: () => {
-          this._ffmpegAvailable = false
-        },
-        operation,
-        timeoutMs: this._options.processing.ffmpeg.timeoutMs,
-        warnMissing: (reason) => {
-          this._warnMissingFfmpeg(reason)
-        },
-      },
-      this._ffmpegProcessRegistry,
-    )
-  }
-
-  private async _withPostProcessSlot<T>(
-    operation: string,
-    task: () => Promise<T>,
-  ): Promise<T | undefined> {
-    const acquired = await this._postProcessSlotScheduler.acquire()
-    if (!acquired) {
-      const timeout = this._options.concurrency.postProcessStartTimeoutMs
-      const message = `Unable to start ${operation} within ${timeout.toString()}ms because post-processing capacity is exhausted.`
-      this._log('warn', `[WdioPuppeteerVideoService] ${message}`)
-      return undefined
-    }
-
-    try {
-      return await task()
-    } finally {
-      await this._postProcessSlotScheduler.release()
-    }
-  }
-
-  private _reportPostProcessFailure(
-    message: string,
-    alreadyLogged = false,
-  ): void {
-    if (!alreadyLogged) {
-      this._log('warn', `[WdioPuppeteerVideoService] ${message}`)
-    }
-    if (this._options.failurePolicy === 'error') {
-      throw new Error(`[WdioPuppeteerVideoService] ${message}`)
-    }
-  }
-
-  private _warnMissingFfmpeg(reason: string): void {
-    if (this._warnedAboutMissingFfmpeg) {
-      return
-    }
-
-    this._warnedAboutMissingFfmpeg = true
-    const configuredPath = this._options.processing.ffmpeg.path
-      ? `Configured ffmpegPath: ${this._options.processing.ffmpeg.path}.`
-      : 'No ffmpegPath was provided.'
-    const candidateList =
-      this._ffmpegCandidates.length > 0
-        ? ` Checked candidates: ${this._ffmpegCandidates.join(', ')}.`
-        : ''
-    this._log(
-      'warn',
-      `[WdioPuppeteerVideoService] FFmpeg is required but unavailable. ${configuredPath}${candidateList} Install FFmpeg and make it available on PATH, set \`ffmpegPath\`, or install \`ffmpeg-static\` in your project. ${reason}`,
     )
   }
 
@@ -1307,14 +1039,18 @@ export default class WdioPuppeteerVideoService
           processingOperation: 'transcode',
         })
       }
+      this._mediaPipeline.reportFailure(
+        `Deferred transcode input is missing: ${task.inputPath}`,
+      )
       return
     }
 
-    const transcodedPath = await this._transcodeToH264Mp4WithArgs(
-      task.inputPath,
-      task.outputPath,
-      task.ffmpegArgs,
-    )
+    const transcodedPath = await this._mediaPipeline.transcode({
+      deleteOriginal: task.deleteOriginal,
+      ...(task.ffmpegArgs === undefined ? {} : { ffmpegArgs: task.ffmpegArgs }),
+      inputPath: task.inputPath,
+      outputPath: task.outputPath,
+    })
     if (!transcodedPath) {
       if (task.manifestEntryId) {
         await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
@@ -1325,17 +1061,12 @@ export default class WdioPuppeteerVideoService
           processingOperation: 'transcode',
         })
       }
-      this._reportPostProcessFailure(
+      this._mediaPipeline.reportFailure(
         `Deferred transcode failed, keeping original recording: ${task.inputPath}`,
       )
       return
     }
 
-    if (task.deleteOriginal && task.inputPath !== transcodedPath) {
-      await this._fileSystem.unlink(task.inputPath).catch(() => {
-        /* best-effort cleanup */
-      })
-    }
     if (task.manifestEntryId) {
       await this._manifestRecorder?.completeDeferred(task.manifestEntryId, {
         decision: 'recorded',
@@ -1349,7 +1080,7 @@ export default class WdioPuppeteerVideoService
   private async _executeDeferredMergeTask(
     task: DeferredMergeTask,
   ): Promise<void> {
-    const mergedPath = await this._mergeSegmentPathsToOutput({
+    const mergedPath = await this._mediaPipeline.merge({
       segmentPaths: task.segmentPaths,
       mergedPath: task.mergedPath,
       deleteSegments: task.deleteSegments,
@@ -1366,7 +1097,7 @@ export default class WdioPuppeteerVideoService
           processingOperation: 'merge',
         })
       }
-      this._reportPostProcessFailure(
+      this._mediaPipeline.reportFailure(
         `Deferred merge failed, keeping ${task.segmentPaths.length.toString()} original segment(s).`,
       )
       return

@@ -22,7 +22,7 @@ export const createDeferredTranscodeTask = (
     deleteOriginal: transcodeOptions.deleteOriginal,
     ...(transcodeOptions.ffmpegArgs === undefined
       ? {}
-      : { ffmpegArgs: transcodeOptions.ffmpegArgs }),
+      : { ffmpegArgs: [...transcodeOptions.ffmpegArgs] }),
   }
 }
 
@@ -54,7 +54,7 @@ export const createDeferredMergeTask = (options: {
           deleteOriginal: transcodeOptions.deleteOriginal,
           ...(transcodeOptions.ffmpegArgs === undefined
             ? {}
-            : { ffmpegArgs: transcodeOptions.ffmpegArgs }),
+            : { ffmpegArgs: [...transcodeOptions.ffmpegArgs] }),
         }
       : undefined
 
