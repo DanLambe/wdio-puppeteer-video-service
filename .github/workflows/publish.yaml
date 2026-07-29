@@ -145,7 +145,7 @@ jobs:
           if [[ "$version" == *-* ]]; then
             dist_tag='next'
           fi
-          corepack npm publish release-artifacts/*.tgz --access public --provenance --tag "$dist_tag"
+          corepack npm publish ./release-artifacts/*.tgz --allow-file=all --access public --provenance --tag "$dist_tag"
 
   github-release:
     needs:
