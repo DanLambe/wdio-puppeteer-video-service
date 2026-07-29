@@ -343,16 +343,19 @@ describe('manifest v1 validator', () => {
     )
   })
 
-  it.each(['/rooted.webm', 'C:/private.webm', 'folder\\file.webm'])(
-    'rejects unsafe artifact path %s',
-    (unsafePath) => {
-      const manifest = clone()
-      const run = firstRun(manifest)
-      const entry = firstEntry(run)
-      const capture = entry.capture as Record<string, unknown>
-      const artifact = firstRecord(capture.segments)
-      artifact.path = unsafePath
-      expect(validateVideoManifest(manifest).valid).toBe(false)
-    },
-  )
+  it.each([
+    '/rooted.webm',
+    'C:/private.webm',
+    'C:private.webm',
+    'c:',
+    'folder\\file.webm',
+  ])('rejects unsafe artifact path %s', (unsafePath) => {
+    const manifest = clone()
+    const run = firstRun(manifest)
+    const entry = firstEntry(run)
+    const capture = entry.capture as Record<string, unknown>
+    const artifact = firstRecord(capture.segments)
+    artifact.path = unsafePath
+    expect(validateVideoManifest(manifest).valid).toBe(false)
+  })
 })

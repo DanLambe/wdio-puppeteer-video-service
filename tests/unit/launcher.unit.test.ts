@@ -35,11 +35,11 @@ afterEach(async () => {
 })
 
 describe('WdioPuppeteerVideoLauncher', () => {
-  it('passes versioned run and CID-scoped retry contexts to workers', async () => {
+  it('passes versioned run and policy-independent retry contexts to workers', async () => {
     const outputDir = await createTempDir()
     const launcher = new WdioPuppeteerVideoLauncher({
       outputDir,
-      recording: { attempts: 'retries' },
+      recording: { attempts: 'all', retain: 'retries' },
     })
     const sharedArgs: Record<string, unknown> = {}
     const capabilities = { browserName: 'chrome' }
@@ -82,7 +82,7 @@ describe('WdioPuppeteerVideoLauncher', () => {
       resetWorkerState: vi.fn(),
     }
     const worker = new WdioPuppeteerVideoService(
-      { outputDir, recording: { attempts: 'retries' } },
+      { outputDir, recording: { attempts: 'all', retain: 'retries' } },
       capabilities,
       retryWorkerArgs,
       { createRecordingCoordinator: () => coordinator },

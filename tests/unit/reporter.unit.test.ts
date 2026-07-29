@@ -18,6 +18,7 @@ import {
   writeReporterFragment,
 } from '../../src/reporter/fragments.js'
 import { generateVideoReportForRun } from '../../src/reporter/report-generator.js'
+import { createReportModel } from '../../src/reporter/report-model.js'
 import type {
   ReporterBrowserIdentity,
   ReporterFragmentV1,
@@ -394,6 +395,38 @@ describe('WdioPuppeteerVideoReporter', () => {
       }),
     ])
   })
+
+  it('does not classify a first-attempt pass as retried merely because retries are enabled', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const config: Record<string, unknown> = { specFileRetries: 1 }
+    assignManifestRunContext(config, context)
+    assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
+    const reporter = new WdioPuppeteerVideoReporter({ outputDir })
+    const runner = {
+      cid: '0-0',
+      config,
+      specs: [path.resolve('tests/specs/first-attempt.ts')],
+      capabilities: { browserName: 'chrome' },
+      start: new Date('2026-07-18T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    reporter.onRunnerStart(runner)
+    reporter.onTestPass({
+      uid: 'first-attempt-pass',
+      title: 'passes immediately',
+      state: 'passed',
+      duration: 1,
+      retries: 0,
+    } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+
+    const { fragments } = await readReporterFragments(outputDir, context.runId)
+    expect(fragments[0]?.outcomes[0]).toMatchObject({
+      attempt: 1,
+      retried: false,
+    })
+  })
 })
 
 describe('static report generation', () => {
@@ -613,6 +646,66 @@ describe('static report generation', () => {
     expect(html).toContain('2.0 KiB')
   })
 
+  it('associates duplicate test identities with distinct manifest entries', async () => {
+    const outputDir = await createTempDir()
+    const runId = 'duplicate-identity-run'
+    const spec = 'tests/specs/duplicate-identity.ts'
+    await Promise.all([
+      fs.writeFile(path.join(outputDir, 'first.webm'), 'first'),
+      fs.writeFile(path.join(outputDir, 'second.webm'), 'second'),
+    ])
+    const outcomes = ['first-outcome', 'second-outcome'].map((uid) => ({
+      ...createOutcome({
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'same title',
+        fullName: 'suite same title',
+      }),
+      uid,
+    }))
+    const manifest = createManifest(runId, [
+      createEntry({
+        id: 'first-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'same title',
+        fullName: 'suite same title',
+        artifactPath: 'first.webm',
+      }),
+      createEntry({
+        id: 'second-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'same title',
+        fullName: 'suite same title',
+        artifactPath: 'second.webm',
+      }),
+    ])
+    const run = manifest.runs[0]
+    if (!run) {
+      throw new TypeError('Expected duplicate identity report fixture')
+    }
+
+    const model = await createReportModel({
+      outputDir,
+      runId,
+      fragments: [createFragment(runId, '0-0', [spec], outcomes)],
+      run,
+      initialDiagnostics: [],
+    })
+
+    expect(
+      model.items.map((item) => ({ id: item.id, path: item.media[0]?.path })),
+    ).toEqual([
+      { id: '0-0-first-outcome-1', path: 'first.webm' },
+      { id: '0-0-second-outcome-1', path: 'second.webm' },
+    ])
+    expect(model.diagnostics).toEqual([])
+  })
+
   it('associates Cucumber step outcomes through their scenario identity', async () => {
     const outputDir = await createTempDir()
     const runId = 'cucumber-run'
@@ -650,6 +743,72 @@ describe('static report generation', () => {
     })
     expect(generated).toMatchObject({ itemCount: 2, diagnosticCount: 0 })
     expect(await fs.readFile(generated?.path ?? '', 'utf8')).toContain(scenario)
+  })
+
+  it('prefers a Cucumber step container over another matching scenario title', async () => {
+    const outputDir = await createTempDir()
+    const runId = 'cucumber-title-collision-run'
+    const spec = 'tests/features/title-collision.feature'
+    await Promise.all([
+      fs.writeFile(path.join(outputDir, 'checkout.webm'), 'checkout'),
+      fs.writeFile(path.join(outputDir, 'login.webm'), 'login'),
+    ])
+    const manifest = createManifest(runId, [
+      createEntry({
+        id: 'checkout-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'Checkout flow',
+        fullName: 'Checkout flow',
+        artifactPath: 'checkout.webm',
+      }),
+      createEntry({
+        id: 'login-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'Log in',
+        fullName: 'Log in',
+        artifactPath: 'login.webm',
+      }),
+    ])
+    const run = manifest.runs[0]
+    if (!run) {
+      throw new TypeError('Expected Cucumber collision report fixture')
+    }
+
+    const model = await createReportModel({
+      outputDir,
+      runId,
+      fragments: [
+        createFragment(
+          runId,
+          '0-0',
+          [spec],
+          [
+            createOutcome({
+              runId,
+              cid: '0-0',
+              spec,
+              name: 'Log in',
+              fullName: '0: Log in',
+              containerName: 'Checkout flow',
+            }),
+          ],
+        ),
+      ],
+      run,
+      initialDiagnostics: [],
+    })
+
+    expect(model.items[0]?.media[0]?.path).toBe('checkout.webm')
+    expect(model.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'unmatched-manifest-entry',
+        message: expect.stringContaining('login-entry'),
+      }),
+    ])
   })
 
   it('reports missing, corrupt, and incomplete input without aborting report creation', async () => {

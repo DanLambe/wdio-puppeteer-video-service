@@ -304,6 +304,19 @@ describe('RecordingController', () => {
     ).toBe(true)
   })
 
+  it('preserves capture startup errors under the error policy', async () => {
+    const harness = createHarness({ failurePolicy: 'error' })
+    harness.session.setBrowser({} as Browser)
+    const failure = new Error('capture unavailable')
+    harness.startCapture.mockRejectedValue(failure)
+
+    await expect(harness.controller.startForMetadata(METADATA, 2)).rejects.toBe(
+      failure,
+    )
+
+    expect(harness.releaseSlot).toHaveBeenCalledOnce()
+  })
+
   it('does not delegate window commands when segmentation is disabled', async () => {
     const harness = createHarness({
       recording: { windowChanges: 'ignore' },

@@ -535,7 +535,7 @@ const expectSafeRelativePath = (
     typeof value !== 'string' ||
     value.length === 0 ||
     value.startsWith('/') ||
-    /^[a-z]:\//iu.test(value) ||
+    /^[a-z]:/iu.test(value) ||
     value.split('/').includes('..') ||
     value.includes('\\')
   ) {

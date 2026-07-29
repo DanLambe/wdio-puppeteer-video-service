@@ -100,7 +100,11 @@ const createOutcomeReportItem = (options: {
   readonly matchedEntries: Set<string>
   readonly outcome: ReporterTestOutcome
 }): ReportItem => {
-  const entry = findManifestEntry(options.entries, options.outcome)
+  const entry = findManifestEntry(
+    options.entries,
+    options.outcome,
+    options.matchedEntries,
+  )
   if (entry) {
     options.matchedEntries.add(entry.id)
   } else if (options.hasManifest) {
@@ -122,6 +126,7 @@ const createUnmatchedEntryDiagnostic = (
 const findManifestEntry = (
   entries: ManifestEntryV1[],
   outcome: ReporterTestOutcome,
+  matchedEntries: ReadonlySet<string>,
 ): ManifestEntryV1 | undefined => {
   const candidates = entries.filter((entry) => {
     return (
@@ -133,9 +138,22 @@ const findManifestEntry = (
     )
   })
   const exact = candidates.find((entry) => {
-    return entry.scope === 'test' && testIdentityMatches(entry, outcome)
+    return (
+      entry.scope === 'test' &&
+      !matchedEntries.has(entry.id) &&
+      testIdentityMatches(entry, outcome)
+    )
   })
-  return exact ?? candidates.find((entry) => entry.scope === 'spec')
+  const containerName = outcome.test.containerName
+  const scenario = containerName
+    ? candidates.find((entry) => {
+        return (
+          entry.scope === 'test' &&
+          containerIdentityMatches(entry, containerName)
+        )
+      })
+    : undefined
+  return scenario ?? exact ?? candidates.find((entry) => entry.scope === 'spec')
 }
 
 const testIdentityMatches = (
@@ -155,11 +173,22 @@ const testIdentityMatches = (
   const outcomeNames = new Set([
     outcomeFullName,
     normalizeIdentity(outcome.test.name),
-    ...(outcome.test.containerName
-      ? [normalizeIdentity(outcome.test.containerName)]
-      : []),
   ])
   return entryNames.some((entryName) => outcomeNames.has(entryName))
+}
+
+const containerIdentityMatches = (
+  entry: ManifestEntryV1,
+  containerName: string,
+): boolean => {
+  if (!entry.test) {
+    return false
+  }
+  const normalizedContainer = normalizeIdentity(containerName)
+  return [entry.test.fullName, entry.test.name]
+    .filter((name): name is string => !!name)
+    .map(normalizeIdentity)
+    .includes(normalizedContainer)
 }
 
 const createReportItem = (

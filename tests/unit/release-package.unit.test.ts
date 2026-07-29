@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
@@ -116,5 +117,14 @@ describe('release package validation', () => {
     expect(() => resolveReleaseOutputPath(repositoryRoot, '..')).toThrow(
       'inside the repository',
     )
+  })
+
+  it('binds publish validation to the expected workflow and master branch', async () => {
+    const workflow = await fs.readFile('.github/workflows/publish.yaml', 'utf8')
+
+    expect(workflow).toContain('actions/workflows/release-validation.yaml')
+    expect(workflow).toContain('.workflow_id')
+    expect(workflow).toContain('.head_branch')
+    expect(workflow).toContain('master')
   })
 })

@@ -28,6 +28,9 @@ versioning and release notes.
 - Modularized manifest context transport, crash-tolerant journals, aggregation,
   persistence, report modeling, and deterministic HTML rendering without
   changing Manifest v1.
+- Hardened retry retention and reporting, cleanup-first recording failures,
+  capture preservation on filesystem errors, manifest path and journal safety,
+  cross-process lease recovery, and release-validation identity checks.
 - Added deterministic Mocha, Jasmine, and Cucumber media validation with local
   same-origin and cross-origin fixtures.
 - Prepared an ESM-only Node.js 24 package with root, manifest, and reporter

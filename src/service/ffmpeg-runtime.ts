@@ -277,7 +277,7 @@ export class FfmpegRuntime {
     if (mode === 'direct') {
       this.log(
         'warn',
-        '[WdioPuppeteerVideoService] MP4 strategy is `direct`, but detected ffmpeg may not support Puppeteer direct MP4 mode. Consider using `mp4Mode: transcode` or `mp4Mode: auto`.',
+        "[WdioPuppeteerVideoService] MP4 strategy is `direct`, but detected ffmpeg may not support Puppeteer direct MP4 mode. Consider using `processing.mp4Mode: 'transcode'` or `processing.mp4Mode: 'auto'`.",
       )
       return
     }
@@ -289,7 +289,7 @@ export class FfmpegRuntime {
     this.warnedAboutMp4AutoFallback = true
     this.log(
       'warn',
-      '[WdioPuppeteerVideoService] Direct MP4 compatibility probe failed. Falling back to MP4 transcode mode (`mp4Mode: auto`).',
+      "[WdioPuppeteerVideoService] Direct MP4 compatibility probe failed. Falling back to MP4 transcode mode (`processing.mp4Mode: 'auto'`).",
     )
   }
 
@@ -299,15 +299,15 @@ export class FfmpegRuntime {
     }
     this.warnedAboutMissingFfmpeg = true
     const configuredPath = this.options.processing.ffmpeg.path
-      ? `Configured ffmpegPath: ${this.options.processing.ffmpeg.path}.`
-      : 'No ffmpegPath was provided.'
+      ? `Configured processing.ffmpeg.path: ${this.options.processing.ffmpeg.path}.`
+      : 'No processing.ffmpeg.path was provided.'
     const candidateList =
       this.candidates.length > 0
         ? ` Checked candidates: ${this.candidates.join(', ')}.`
         : ''
     this.log(
       'warn',
-      `[WdioPuppeteerVideoService] FFmpeg is required but unavailable. ${configuredPath}${candidateList} Install FFmpeg and make it available on PATH, set \`ffmpegPath\`, or install \`ffmpeg-static\` in your project. ${reason}`,
+      `[WdioPuppeteerVideoService] FFmpeg is required but unavailable. ${configuredPath}${candidateList} Install FFmpeg and make it available on PATH, set \`processing.ffmpeg.path\`, or install \`ffmpeg-static\` in your project. ${reason}`,
     )
   }
 }

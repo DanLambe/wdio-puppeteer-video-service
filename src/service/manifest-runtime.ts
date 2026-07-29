@@ -147,13 +147,13 @@ export class ManifestWorkerRecorder {
       input.test?.fullTitle?.trim() ||
       input.test?.fullName?.trim() ||
       'unknown test'
-    const identityKey = `${input.scope}\0${spec}\0${testName}`
+    const fullName =
+      input.test?.fullTitle?.trim() || input.test?.fullName?.trim()
+    const identityKey = `${input.scope}\0${spec}\0${fullName ?? testName}`
     const inferredAttempt = (this.attempts.get(identityKey) ?? 0) + 1
     this.attempts.set(identityKey, inferredAttempt)
     const attempt = Math.max(1, input.attempt ?? inferredAttempt)
     const startedAt = new Date().toISOString()
-    const fullName =
-      input.test?.fullTitle?.trim() || input.test?.fullName?.trim()
     const test =
       input.scope === 'test'
         ? {

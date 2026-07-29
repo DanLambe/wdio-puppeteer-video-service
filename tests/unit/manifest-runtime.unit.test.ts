@@ -629,6 +629,50 @@ describe('manifest runtime', () => {
     expect(firstRun(manifest).entries).toEqual([])
   })
 
+  it('does not replace journal enumeration failures with an empty run', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const journalDirectory = journalDir(outputDir, context.runId)
+    await fs.rm(journalDirectory, { recursive: true, force: true })
+    await fs.writeFile(journalDirectory, 'not-a-directory', 'utf8')
+
+    await expect(aggregateManifestRun(context, 0)).rejects.toMatchObject({
+      code: expect.stringMatching(/^(EACCES|ENOTDIR|EPERM)$/u),
+    })
+    await expect(
+      fs.stat(path.join(outputDir, 'manifest.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('tracks same-title tests in different suites as independent attempts', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    for (const fullTitle of [
+      'first suite same title',
+      'second suite same title',
+    ]) {
+      await recorder.beginEntity({
+        test: {
+          title: 'same title',
+          fullTitle,
+          file: 'specs/same-title.ts',
+        },
+        scope: 'test',
+        specPaths: [],
+      })
+      await recorder.completeCurrent({
+        decision: 'skipped',
+        result: 'skipped',
+        processingOutcome: 'skipped',
+      })
+    }
+
+    const manifest = await aggregateManifestRun(context, 0)
+    expect(firstRun(manifest).entries.map((entry) => entry.attempt)).toEqual([
+      1, 1,
+    ])
+  })
+
   it('waits for a live manifest lock to be released', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)

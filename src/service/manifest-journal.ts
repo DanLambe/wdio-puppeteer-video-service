@@ -105,7 +105,12 @@ export const parseManifestJournals = async (
   const journalDirectory = getManifestJournalDirectory(context)
   const journalNames = await fs
     .readdir(journalDirectory)
-    .catch(() => [] as string[])
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') {
+        return [] as string[]
+      }
+      throw error
+    })
   const entries = new Map<string, ManifestEntryV1>()
   const diagnostics: ManifestDiagnostic[] = []
   const tools: Partial<ManifestToolVersions> = {}

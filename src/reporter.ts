@@ -49,7 +49,6 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
   private _fragment: PendingReporterFragment | undefined
   private _outputDir: string
   private _runnerRetry = 0
-  private _runnerUsesRetries = false
   private readonly _capturedOutcomes = new Set<string>()
   private _flushComplete = true
 
@@ -75,9 +74,6 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
     )
     this._outputDir = context?.outputDir ?? this._outputDir
     this._runnerRetry = workerContext?.specFileRetryAttempt ?? 0
-    this._runnerUsesRetries =
-      this._runnerRetry > 0 ||
-      normalizeRetryCount(runnerStats.config.specFileRetries) > 0
     this._capturedOutcomes.clear()
     this._fragment = {
       schemaVersion: REPORTER_FRAGMENT_SCHEMA_VERSION,
@@ -170,7 +166,7 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
         ...(containerName ? { containerName } : {}),
       },
       attempt,
-      retried: retryEvent || attempt > 1 || this._runnerUsesRetries,
+      retried: retryEvent || attempt > 1,
       status,
       durationMs: Math.max(0, Math.floor(testStats.duration)),
       ...(testStats.pendingReason

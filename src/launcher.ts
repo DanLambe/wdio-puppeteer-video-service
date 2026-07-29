@@ -76,13 +76,8 @@ export default class WdioPuppeteerVideoLauncher
     }
 
     const specRetryKey = `${cid}\0${buildSpecRetryKey(specs, capabilities)}`
-    const recordOnRetries = this._options.recording.attempts === 'retries'
-    const specFileRetryAttempt = recordOnRetries
-      ? (this._specRetryAttempts.get(specRetryKey) ?? 0)
-      : 0
-    if (recordOnRetries) {
-      this._specRetryAttempts.set(specRetryKey, specFileRetryAttempt + 1)
-    }
+    const specFileRetryAttempt = this._specRetryAttempts.get(specRetryKey) ?? 0
+    this._specRetryAttempts.set(specRetryKey, specFileRetryAttempt + 1)
     assignManifestWorkerContext(args, cid, { specFileRetryAttempt })
     this._log(
       'debug',

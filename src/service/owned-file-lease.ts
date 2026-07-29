@@ -56,6 +56,9 @@ interface FileIdentity {
 }
 
 const ignoreFileError = (): undefined => undefined
+const isMissingFileError = (error: unknown): boolean => {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
 const RETRY_LEASE_CANDIDATE = Symbol('retry-lease-candidate')
 
 export class OwnedFileLease<TPayload = unknown> {
@@ -330,13 +333,18 @@ export const cleanupStaleOwnedFileLease = async (
   const clock = dependencies.clock ?? systemClock
   const fileSystem = dependencies.fileSystem ?? nodeFileSystem
   const processBoundary = dependencies.process ?? nodeProcess
-  const [contents, stats] = await Promise.all([
-    fileSystem.readText(options.filePath).catch(ignoreFileError),
-    fileSystem.stat(options.filePath).catch(ignoreFileError),
+  const [contentsResult, statsResult] = await Promise.allSettled([
+    fileSystem.readText(options.filePath),
+    fileSystem.stat(options.filePath),
   ])
-  if (contents === undefined || !stats) {
-    return true
+  if (statsResult.status === 'rejected') {
+    return isMissingFileError(statsResult.reason)
   }
+  if (contentsResult.status === 'rejected') {
+    return false
+  }
+  const contents = contentsResult.value
+  const stats = statsResult.value
 
   const metadata = parseOwnedFileLeaseMetadata(contents)
   if (metadata && processBoundary.isAlive(metadata.pid)) {
@@ -360,8 +368,14 @@ export const cleanupStaleOwnedFileLease = async (
 
   try {
     await fileSystem.unlink(options.filePath)
-  } catch {
-    return !(await fileSystem.stat(options.filePath).catch(ignoreFileError))
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return true
+    }
+    return fileSystem
+      .stat(options.filePath)
+      .then(() => false)
+      .catch(isMissingFileError)
   }
   await options.onReclaimed?.(metadata)
   return true

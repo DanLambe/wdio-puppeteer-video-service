@@ -369,10 +369,10 @@ describe('owned file lease', () => {
     const missingFileSystem: FileSystemBoundary = {
       ...nodeFileSystem,
       readText: async () => {
-        throw new Error('missing')
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       },
       stat: async () => {
-        throw new Error('missing')
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       },
     }
     await expect(
@@ -390,12 +390,16 @@ describe('owned file lease', () => {
       stat: async () => {
         statCalls += 1
         if (statCalls === 3) {
-          throw new Error('removed by another process')
+          throw Object.assign(new Error('removed by another process'), {
+            code: 'ENOENT',
+          })
         }
         return { dev: 1, ino: 1, mtimeMs: 1, size: contents.length }
       },
       unlink: async () => {
-        throw new Error('removed by another process')
+        throw Object.assign(new Error('removed by another process'), {
+          code: 'ENOENT',
+        })
       },
     }
     await expect(
@@ -407,6 +411,48 @@ describe('owned file lease', () => {
         },
       ),
     ).resolves.toBe(true)
+  })
+
+  it('does not claim an unreadable existing lease was reclaimed', async () => {
+    const unlink = vi.fn(async () => {})
+    const fileSystem: FileSystemBoundary = {
+      ...nodeFileSystem,
+      readText: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      },
+      stat: async () => ({ dev: 1, ino: 1, mtimeMs: 1, size: 10 }),
+      unlink,
+    }
+
+    await expect(
+      cleanupStaleOwnedFileLease(
+        { filePath: 'unreadable.lock', invalidStaleMs: 100 },
+        { fileSystem },
+      ),
+    ).resolves.toBe(false)
+    expect(unlink).not.toHaveBeenCalled()
+  })
+
+  it('does not claim a lease is missing when all metadata access is denied', async () => {
+    const permissionError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    })
+    const fileSystem: FileSystemBoundary = {
+      ...nodeFileSystem,
+      readText: async () => {
+        throw permissionError
+      },
+      stat: async () => {
+        throw permissionError
+      },
+    }
+
+    await expect(
+      cleanupStaleOwnedFileLease(
+        { filePath: 'inaccessible.lock', invalidStaleMs: 100 },
+        { fileSystem },
+      ),
+    ).resolves.toBe(false)
   })
 
   it('applies the invalid-file grace period at its exact boundary', async () => {

@@ -182,7 +182,7 @@ describe('FfmpegRuntime', () => {
     expect(harness.log).toHaveBeenCalledWith(
       'warn',
       expect.stringContaining(
-        'Configured ffmpegPath: /missing/ffmpeg. Checked candidates: /missing/ffmpeg, /also/missing, ffmpeg.',
+        'Configured processing.ffmpeg.path: /missing/ffmpeg. Checked candidates: /missing/ffmpeg, /also/missing, ffmpeg.',
       ),
     )
     expect(
@@ -200,7 +200,7 @@ describe('FfmpegRuntime', () => {
     expect(unavailable.log).toHaveBeenCalledWith(
       'warn',
       expect.stringContaining(
-        'No ffmpegPath was provided. Install FFmpeg and make it available',
+        'No processing.ffmpeg.path was provided. Install FFmpeg and make it available',
       ),
     )
 

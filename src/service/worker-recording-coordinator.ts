@@ -229,30 +229,49 @@ export class WorkerRecordingCoordinator
       return
     }
     if (decision.action === 'continue-spec') {
+      this.activeRecordingRetryCount = Math.max(
+        this.activeRecordingRetryCount,
+        decision.retryContext.effectiveRetryCount,
+      )
       return
     }
 
-    const started = await this.actions.startRecording(
-      decision.metadata,
-      decision.retryContext.effectiveRetryCount,
-    )
+    let startFailure: { readonly error: unknown } | undefined
+    let started = false
+    try {
+      started = await this.actions.startRecording(
+        decision.metadata,
+        decision.retryContext.effectiveRetryCount,
+      )
+    } catch (error) {
+      startFailure = { error }
+    }
     if (started) {
       this.activeRecordingRetryCount = decision.retryContext.effectiveRetryCount
       return
     }
 
+    const reason = startFailure
+      ? describeError(startFailure.error)
+      : (this.actions.getAvailability().reason ?? 'recording-start-failed')
     try {
       await this.manifest?.completeCurrent({
         decision: 'failed',
         result: 'unknown',
-        reason:
-          this.actions.getAvailability().reason ?? 'recording-start-failed',
+        reason,
         processingOutcome: 'failed',
         processingOperation: 'capture',
       })
     } finally {
       await this.actions.resetRecording()
       this.activeRecordingRetryCount = 0
+    }
+
+    if (startFailure) {
+      throw startFailure.error
+    }
+    if (this.options.failurePolicy === 'error') {
+      throw new Error(`[WdioPuppeteerVideoService] ${reason}`)
     }
   }
 

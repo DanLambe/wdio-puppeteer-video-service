@@ -327,6 +327,9 @@ export class RecordingController {
         '[WdioPuppeteerVideoService] Failed to start recording:',
         error,
       )
+      if (this.options.failurePolicy === 'error') {
+        throw error
+      }
       return false
     } finally {
       if (acquiredRecordingSlot && !this.captureSession.recorder) {

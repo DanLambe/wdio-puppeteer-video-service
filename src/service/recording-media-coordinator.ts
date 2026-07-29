@@ -12,6 +12,7 @@ import type { FfmpegRuntime } from './ffmpeg-runtime.js'
 import type { ServiceLogger } from './logging.js'
 import type { ManifestWorkerRecorder } from './manifest-runtime.js'
 import type { MediaPipeline } from './media-pipeline.js'
+import { describeError } from './normalization.js'
 import * as artifactPaths from './paths.js'
 import * as postProcess from './post-process.js'
 
@@ -195,10 +196,23 @@ export class RecordingMediaCoordinator {
   }
 
   async finalizeSegment(segment: ActiveSegment): Promise<void> {
-    const recordedSize = await this.fileSystem
-      .stat(segment.recordingPath)
-      .then((stats) => stats.size ?? 0)
-      .catch(() => 0)
+    let recordedSize: number
+    try {
+      const stats = await this.fileSystem.stat(segment.recordingPath)
+      recordedSize = stats.size ?? 0
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.mediaPipeline.reportFailure(
+          `Recording file is missing: ${segment.recordingPath}`,
+        )
+        return
+      }
+      this.captureSession.addRecordedPath(segment.recordingPath)
+      this.mediaPipeline.reportFailure(
+        `Failed to inspect recording file, preserving the original capture: ${segment.recordingPath}. ${describeError(error)}`,
+      )
+      return
+    }
 
     if (recordedSize === 0) {
       this.log(

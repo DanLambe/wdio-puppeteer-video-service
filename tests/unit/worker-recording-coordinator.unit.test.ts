@@ -74,6 +74,7 @@ const createHarness = (
     availability?: { available: boolean; reason?: string }
     allureError?: Error
     finalizeError?: Error
+    startError?: Error
     startResult?: boolean
   } = {},
 ) => {
@@ -110,6 +111,9 @@ const createHarness = (
     startRecording: async (metadata, retryCount) => {
       events.push(`media:start:${retryCount.toString()}`)
       starts.push({ metadata, retryCount })
+      if (harnessOptions.startError) {
+        throw harnessOptions.startError
+      }
       const started = harnessOptions.startResult ?? true
       active = started
       return started
@@ -276,6 +280,30 @@ describe('worker recording coordinator', () => {
     expect(harness.manifest.completed).toHaveLength(1)
   })
 
+  it('retains an active spec recording after a retry begins', async () => {
+    const harness = createHarness({
+      recording: { attempts: 'all', retain: 'retries', scope: 'spec' },
+    })
+
+    await harness.coordinator.beginEntity(createEntity('retried spec'))
+    await harness.coordinator.endEntity({
+      manifestResult: 'failed',
+      passed: false,
+    })
+    await harness.coordinator.beginEntity(
+      createEntity('retried spec', { _currentRetry: 1 }),
+    )
+    await harness.coordinator.endEntity({
+      manifestResult: 'passed',
+      passed: true,
+    })
+    await harness.coordinator.finalizeSpecRecording()
+
+    expect(
+      harness.events.filter((event) => event.startsWith('media:finalize')),
+    ).toEqual(['media:finalize:false:true'])
+  })
+
   it('leaves an active spec manifest open when a later entity is filtered', async () => {
     const harness = createHarness({
       recording: {
@@ -401,6 +429,36 @@ describe('worker recording coordinator', () => {
       reason: 'recording-start-failed',
     })
     expect(harness.events).toContain('media:reset')
+  })
+
+  it('applies error policy only after a failed start is journaled and reset', async () => {
+    const harness = createHarness(
+      { failurePolicy: 'error' },
+      { startResult: false },
+    )
+
+    await expect(
+      harness.coordinator.beginEntity(createEntity()),
+    ).rejects.toThrow('recording-start-failed')
+    expect(harness.manifest.completed[0]).toMatchObject({
+      decision: 'failed',
+      processingOperation: 'capture',
+    })
+    expect(harness.events.at(-1)).toBe('media:reset')
+  })
+
+  it('preserves a thrown start error until journaling and reset complete', async () => {
+    const startError = new Error('capture setup failed')
+    const harness = createHarness({}, { startError })
+
+    await expect(harness.coordinator.beginEntity(createEntity())).rejects.toBe(
+      startError,
+    )
+    expect(harness.manifest.completed[0]).toMatchObject({
+      decision: 'failed',
+      reason: 'capture setup failed',
+    })
+    expect(harness.events.at(-1)).toBe('media:reset')
   })
 
   it('resets attempt state between workers and exposes framework/scope', async () => {

@@ -46,15 +46,16 @@ jobs:
             exit 1
           fi
 
+          expected_workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-validation.yaml" --jq '.id')"
           for run_id in "$VALIDATION_RUN_1" "$VALIDATION_RUN_2"; do
-            run_data="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '[.name, .event, .head_sha, .conclusion] | @tsv')"
-            IFS=$'\t' read -r workflow_name event head_sha conclusion <<< "$run_data"
-            if [[ "$workflow_name" != 'Release Candidate Validation' || "$event" != 'workflow_dispatch' ]]; then
+            run_data="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '[.workflow_id, .event, .head_sha, .head_branch, .conclusion] | @tsv')"
+            IFS=$'\t' read -r workflow_id event head_sha head_branch conclusion <<< "$run_data"
+            if [[ "$workflow_id" != "$expected_workflow_id" || "$event" != 'workflow_dispatch' ]]; then
               echo "Run $run_id is not a dispatched Release Candidate Validation run." >&2
               exit 1
             fi
-            if [[ "$head_sha" != "$GITHUB_SHA" || "$conclusion" != 'success' ]]; then
-              echo "Run $run_id must pass against commit $GITHUB_SHA." >&2
+            if [[ "$head_sha" != "$GITHUB_SHA" || "$head_branch" != 'master' || "$conclusion" != 'success' ]]; then
+              echo "Run $run_id must pass against commit $GITHUB_SHA on master." >&2
               exit 1
             fi
           done

@@ -333,6 +333,7 @@ describe('RecordingMediaCoordinator', () => {
       'third.webm',
     ])
     const firstGate = createDeferred<void>()
+    const twoWorkersStarted = createDeferred<void>()
     const started: string[] = []
     let active = 0
     let maximumActive = 0
@@ -344,7 +345,11 @@ describe('RecordingMediaCoordinator', () => {
       started.push(path.basename(inputPath))
       active += 1
       maximumActive = Math.max(maximumActive, active)
+      if (started.length === 2) {
+        twoWorkersStarted.resolve()
+      }
       try {
+        await twoWorkersStarted.promise
         if (inputPath === inputPaths[0]) {
           await firstGate.promise
           throw new Error('first deferred failure')
@@ -365,8 +370,13 @@ describe('RecordingMediaCoordinator', () => {
 
     const flushing = harness.coordinator.flush()
     await vi.waitFor(() => {
-      expect(started).toEqual(['first.webm', 'second.webm', 'third.webm'])
+      expect(started).toHaveLength(3)
     })
+    expect([...started].sort()).toEqual([
+      'first.webm',
+      'second.webm',
+      'third.webm',
+    ])
     firstGate.resolve()
 
     await expect(flushing).rejects.toThrow('first deferred failure')
@@ -715,7 +725,7 @@ describe('RecordingMediaCoordinator', () => {
     expect(harness.coordinator.pendingTasks).toEqual([unrelatedTask])
   })
 
-  it('removes empty captures and retains non-transcoded output directly', async () => {
+  it('removes empty captures, reports missing captures, and retains output directly', async () => {
     const tempDir = await createTempDir()
     const emptyPath = path.join(tempDir, 'empty.webm')
     const capturedPath = path.join(tempDir, 'captured.webm')
@@ -746,6 +756,47 @@ describe('RecordingMediaCoordinator', () => {
     expect(
       harness.logs.some(({ message }) => message.includes('file is empty')),
     ).toBe(true)
+    expect(harness.reportFailure).toHaveBeenCalledWith(
+      expect.stringContaining('Recording file is missing'),
+    )
+  })
+
+  it('applies the error failure policy when a recording file is missing', async () => {
+    const tempDir = await createTempDir()
+    const missingPath = path.join(tempDir, 'missing.webm')
+    const harness = createHarness({ failurePolicy: 'error' })
+    harness.reportFailure.mockImplementation((message) => {
+      throw new Error(`[WdioPuppeteerVideoService] ${message}`)
+    })
+
+    await expect(
+      harness.coordinator.finalizeSegment(
+        createSegment(missingPath, missingPath, false),
+      ),
+    ).rejects.toThrow('Recording file is missing')
+  })
+
+  it('preserves a capture when its file metadata cannot be inspected', async () => {
+    const tempDir = await createTempDir()
+    const recordingPath = path.join(tempDir, 'preserved.webm')
+    await fs.writeFile(recordingPath, 'valid-media', 'utf8')
+    const statError = Object.assign(new Error('temporary I/O failure'), {
+      code: 'EIO',
+    })
+    vi.spyOn(nodeFileSystem, 'stat').mockRejectedValueOnce(statError)
+    const harness = createHarness()
+
+    await harness.coordinator.finalizeSegment(
+      createSegment(recordingPath, recordingPath, false),
+    )
+
+    await expect(fs.readFile(recordingPath, 'utf8')).resolves.toBe(
+      'valid-media',
+    )
+    expect(harness.captureSession.recordedPaths).toEqual([recordingPath])
+    expect(harness.reportFailure).toHaveBeenCalledWith(
+      expect.stringContaining('temporary I/O failure'),
+    )
   })
 
   it('safely skips merge planning without a compatible current segment set', async () => {
