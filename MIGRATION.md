@@ -24,6 +24,7 @@ are raised when the service is constructed, before a browser session starts.
 | `includeSpecPatterns`, `excludeSpecPatterns` | `recording.filters.includeSpecs`, `excludeSpecs` |
 | `includeTagPatterns`, `excludeTagPatterns` | `recording.filters.includeTags`, `excludeTags` |
 | `performanceProfile` | `profile` |
+| `logLevel` | `logLevel` |
 | `maxFileNameLength` | `artifacts.naming.maxLength` |
 | `fileNameOverflowStrategy` | `artifacts.naming.overflow` |
 | `fileNameStyle` | `artifacts.naming.style` |
@@ -32,6 +33,22 @@ are raised when the service is constructed, before a browser session starts.
 | `mp4Mode` | `processing.mp4Mode` |
 | `transcode` | `processing.transcode` |
 | `mergeSegments` | `processing.merge` |
+
+Value conversions are intentional and deprecated aliases are not accepted:
+
+| 0.8 value | 1.0 value |
+| --- | --- |
+| `saveAllVideos: true` | `recording.retain: 'all'` |
+| `saveAllVideos: false` | `recording.retain: 'failures'` |
+| `recordOnRetries: true` | `recording.attempts: 'retries'` and usually `recording.retain: 'retries'` |
+| `specLevelRecording: true` | `recording.scope: 'spec'` |
+| `skipViewPortKickoff: true` | `capture.framePriming: false` |
+| `segmentOnWindowSwitch: false` | `recording.windowChanges: 'ignore'` |
+| `recordingStartMode: 'fastFail'` | `concurrency.startMode: 'fast-fail'` |
+| `postProcessMode: 'immediate'` | `processing.timing: 'after-test'` |
+| `postProcessMode: 'deferred'` | `processing.timing: 'after-worker'` |
+| `fileNameStyle: 'testFull'` | `artifacts.naming.style: 'test-full'` |
+| `fileNameStyle: 'sessionFull'` | `artifacts.naming.style: 'session-full'` |
 
 Equivalent retry-only configuration:
 
@@ -52,6 +69,9 @@ Equivalent retry-only configuration:
   browser startup.
 - Recording defaults to test scope, all attempts, failure retention, and window
   segmentation.
+- `failurePolicy` is new in 1.0 and consistently applies `'warn'` or `'error'`
+  behavior only after recording, processing, manifest, report, or integration
+  cleanup completes.
 - `capture.viewport` defaults to `'current'`; an explicit size is temporary and
   restored after capture initialization.
 - `processing.timing: 'after-worker'` defers FFmpeg work and is incompatible

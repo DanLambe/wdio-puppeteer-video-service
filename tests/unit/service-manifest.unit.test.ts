@@ -2,10 +2,9 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { isVideoManifest, type VideoManifestV1 } from '../../src/manifest.js'
-import type { CaptureSession } from '../../src/service/capture-session.js'
 import { assignLauncherWorkerContext } from '../../src/service/launcher-context.js'
 import {
   aggregateManifestRun,
@@ -14,6 +13,10 @@ import {
   createManifestRunContext,
   type ManifestRunContext,
 } from '../../src/service/manifest-runtime.js'
+import {
+  createWorkerRecordingCoordinator,
+  type WorkerRecordingCoordinatorPort,
+} from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 
 const tempDirs: string[] = []
@@ -222,36 +225,64 @@ describe('service manifest hooks', () => {
     expect(manifest.runs[0]?.entries[0]?.test).toBeUndefined()
   })
 
-  it('clears session state after an error-policy journal flush failure', async () => {
+  it('flushes the manifest journal when teardown cleanup fails', async () => {
     const outputDir = await createTempDir()
+    const spec = path.join(process.cwd(), 'tests', 'specs', 'manifest-flush.ts')
     const context = await createManifestRunContext(outputDir)
     const config: Record<string, unknown> = { framework: 'mocha' }
     assignWorkerConfiguration(config, '3-2', context)
-    const service = new WdioPuppeteerVideoService({
-      outputDir,
-      failurePolicy: 'error',
-    })
-    await service.beforeSession(config, { browserName: 'chrome' }, [], '3-2')
-    const internals = service as unknown as {
-      _captureSession: CaptureSession
-      _isChromium: boolean
-      _manifestRecorder: {
-        flush: () => Promise<void>
-      }
-      _teardownRecording: (source: string) => Promise<void>
-    }
-    internals._captureSession.setBrowser(createBrowser('chrome'))
-    internals._isChromium = true
-    internals._captureSession.setConnection({} as never, 'classic+cdp')
-    internals._teardownRecording = vi.fn().mockResolvedValue(undefined)
-    vi.spyOn(internals._manifestRecorder, 'flush').mockRejectedValue(
-      new Error('flush unavailable'),
+    let failTeardown = true
+    const service = new WdioPuppeteerVideoService(
+      {
+        outputDir,
+        failurePolicy: 'error',
+        recording: { filters: { excludeSpecs: ['*manifest-flush.ts'] } },
+      },
+      undefined,
+      undefined,
+      {
+        createRecordingCoordinator(options) {
+          const coordinator = createWorkerRecordingCoordinator(options)
+          return {
+            get framework() {
+              return coordinator.framework
+            },
+            get isSpecScope() {
+              return coordinator.isSpecScope
+            },
+            beginEntity: (entity) => coordinator.beginEntity(entity),
+            beginWorker: (specPaths) => coordinator.beginWorker(specPaths),
+            configureSession: (session) =>
+              coordinator.configureSession(session),
+            endEntity: (outcome) => coordinator.endEntity(outcome),
+            finalizeSpecRecording: () => coordinator.finalizeSpecRecording(),
+            resetWorkerState() {
+              coordinator.resetWorkerState()
+              if (failTeardown) {
+                failTeardown = false
+                throw new Error('teardown unavailable')
+              }
+            },
+          } satisfies WorkerRecordingCoordinatorPort
+        },
+      },
     )
+    const specs = [spec]
+    await service.beforeSession(config, { browserName: 'chrome' }, specs, '3-2')
+    await service.before(
+      { browserName: 'chrome' },
+      specs,
+      createBrowser('chrome'),
+    )
+    await service.beforeTest(createTest('flush after teardown error', spec), {})
 
-    await expect(service.afterSession()).rejects.toThrow('flush unavailable')
-    expect(internals._captureSession.browser).toBeUndefined()
-    expect(internals._captureSession.puppeteerBrowser).toBeUndefined()
-    expect(internals._captureSession.protocol).toBe('unsupported')
-    expect(internals._isChromium).toBe(false)
+    await expect(service.afterSession()).rejects.toThrow('teardown unavailable')
+    await expect(service.afterSession()).resolves.toBeUndefined()
+
+    const manifest = await aggregateManifestRun(context, 0)
+    expect(manifest.runs[0]?.entries[0]).toMatchObject({
+      capture: { decision: 'skipped', reason: 'filtered' },
+      test: { name: 'flush after teardown error' },
+    })
   })
 })

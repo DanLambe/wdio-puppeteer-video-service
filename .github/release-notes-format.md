@@ -1,19 +1,20 @@
 # Release Notes Format
 
-Use commit messages in this structure to produce clean release notes:
+Consumer-facing release notes come from the matching version section in
+`CHANGELOG.md`, which Changesets maintains. For example:
 
 ```text
-Version X.X.X
+## X.X.X
 - feature or change here
 - improvement here
-- bumped deps
 ```
 
 The publish workflow uses `scripts/generate-release-notes.ts` to:
 
-- Prefer `- ...` lines from commit messages
-- Fall back to commit subject lines when bullets are not present
-- Emit a final release body in this format:
+- Prefer the exact `CHANGELOG.md` section for the package version
+- Fall back to curated commit bullets and then commit subjects only when the
+  changelog has no matching section
+- Emit a final release body headed by `Version X.X.X`
 
 ```text
 Version X.X.X
@@ -21,7 +22,9 @@ Version X.X.X
 - item 2
 ```
 
-If you squash-merge into `master`, put the `Version X.X.X` header and bullets in the squash commit message body to get the cleanest release notes.
+Keep internal refactor details out of the changelog unless they affect package
+consumers. Conventional commit subjects remain useful as a fallback, but are
+not the primary release-note source.
 
 Preview locally with:
 

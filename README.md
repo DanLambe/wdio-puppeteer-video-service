@@ -10,7 +10,8 @@ A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CD
 > **1.0 release candidate**
 > `1.0.0-rc.1` is the polished release-candidate surface. Install the `next`
 > tag while it completes two independent Ubuntu/Windows validation runs. The
-> same package becomes `latest` only after those release gates remain clean.
+> stable `1.0.0` version is published under `latest` only after those release
+> gates remain clean.
 
 Features:
 
@@ -21,6 +22,26 @@ Features:
 - Uses local, deterministic Mocha, Jasmine, and Cucumber fixtures in CI.
 - Produces a crash-tolerant Manifest v1 and an offline static HTML report.
 - Optionally attaches retained recordings to the active Allure test.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  launcher["WDIO launcher process"] --> context["Versioned run and retry context"]
+  context --> workers["WDIO worker services"]
+  workers --> coordinator["Recording entity coordinator"]
+  coordinator --> capture["Puppeteer 25 capture controller"]
+  capture --> media["FFmpeg media pipeline"]
+  workers --> journals["Crash-tolerant worker journals"]
+  media --> journals
+  journals --> manifest["Manifest v1 aggregation"]
+  manifest --> report["Offline static HTML report"]
+```
+
+The launcher owns cross-worker initialization and final aggregation. Each
+worker normalizes WDIO hooks into recording entities, owns one capture session,
+and publishes media through bounded process and global leases. WDIO may control
+Chrome through BiDi while Puppeteer attaches through CDP for screencasting.
 
 ## Installation
 
@@ -432,7 +453,8 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 - `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, and Edge smoke.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
-- `npm run test:coverage`: runs the deterministic unit/integration suite with 90% statements, lines, and functions plus 85% branch gates.
+- `npm run test:coverage`: runs the deterministic unit/integration suite with
+  95% statements, lines, and functions plus a 90% branch gate.
 - `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.
 - `npm run release:check`: combines lint, typecheck, coverage, package, and validated CycloneDX SBOM gates.
 

@@ -1,13 +1,51 @@
+import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { runGit } from './git-utils.js'
 
 export const generateReleaseNotes = (
   version: string,
   range: string = 'HEAD',
+  changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
 ): string => {
+  const changelogSection = extractChangelogSection(changelog, version)
+  if (changelogSection) {
+    return `Version ${version}\n${changelogSection}`
+  }
   const commitMessages = readCommits(range)
   const bullets = extractBullets(commitMessages)
   return [`Version ${version}`, ...bullets].join('\n')
+}
+
+export const extractChangelogSection = (
+  changelog: string,
+  version: string,
+): string | undefined => {
+  const lines = changelog.split(/\r?\n/)
+  const startIndex = lines.findIndex(
+    (line) => normalizeChangelogHeading(line) === version,
+  )
+  if (startIndex < 0) {
+    return undefined
+  }
+  const sectionLines = lines.slice(startIndex + 1)
+  const nextHeadingIndex = sectionLines.findIndex((line) =>
+    line.startsWith('## '),
+  )
+  const section = sectionLines
+    .slice(0, nextHeadingIndex < 0 ? undefined : nextHeadingIndex)
+    .join('\n')
+    .trim()
+  return section || undefined
+}
+
+const normalizeChangelogHeading = (line: string): string | undefined => {
+  if (!line.startsWith('## ')) {
+    return undefined
+  }
+  return line
+    .slice(3)
+    .trim()
+    .replace(/^\[|\]$/g, '')
 }
 
 export const readCommits = (commitRange: string): string[] => {
@@ -50,7 +88,7 @@ const isMergeHeader = (header: string): boolean => {
 
 const parseMessage = (
   message: string,
-): { header?: string; lines: string[]; hasLines: boolean } => {
+): { header: string | undefined; lines: string[]; hasLines: boolean } => {
   const lines = parseMessageLines(message)
   return {
     header: lines[0],

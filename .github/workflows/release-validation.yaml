@@ -90,6 +90,7 @@ jobs:
         protocol:
           - bidi
           - classic
+          - controls
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -189,6 +190,29 @@ jobs:
 
       - name: Run Framework Tests
         run: corepack npm run ${{ matrix.command }}
+
+  advanced:
+    name: Advanced recording and artifact behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Rebuild Browser Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Run Advanced Recording Tests
+        run: corepack npm run test:e2e:advanced
 
   edge:
     name: Edge smoke (Windows)
