@@ -128,6 +128,24 @@ describe('release package validation', () => {
     expect(workflow).toContain('master')
   })
 
+  it('builds the release SBOM through npm with an explicit artifact path', async () => {
+    const [workflow, packageJsonText] = await Promise.all([
+      fs.readFile('.github/workflows/publish.yaml', 'utf8'),
+      fs.readFile('package.json', 'utf8'),
+    ])
+    const packageJson = JSON.parse(packageJsonText) as {
+      readonly scripts?: Readonly<Record<string, string>>
+    }
+
+    expect(packageJson.scripts?.sbom).toBe('tsx scripts/generate-sbom.ts')
+    expect(workflow).toContain(
+      'corepack npm run sbom -- release-artifacts/sbom.cdx.json',
+    )
+    expect(workflow).not.toContain(
+      './node_modules/.bin/tsx scripts/generate-sbom.ts',
+    )
+  })
+
   it('explicitly denies unused GeckoDriver install scripts', async () => {
     const packageJson = JSON.parse(
       await fs.readFile('package.json', 'utf8'),
