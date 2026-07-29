@@ -146,6 +146,21 @@ describe('release package validation', () => {
     )
   })
 
+  it('publishes the packed artifact through an explicit local path', async () => {
+    const [workflow, npmConfig] = await Promise.all([
+      fs.readFile('.github/workflows/publish.yaml', 'utf8'),
+      fs.readFile('.npmrc', 'utf8'),
+    ])
+
+    expect(workflow).toContain(
+      'corepack npm publish ./release-artifacts/*.tgz --allow-file=all --access public --provenance --tag "$dist_tag"',
+    )
+    expect(workflow).not.toContain(
+      'corepack npm publish release-artifacts/*.tgz',
+    )
+    expect(npmConfig).toContain('allow-file=root')
+  })
+
   it('explicitly denies unused GeckoDriver install scripts', async () => {
     const packageJson = JSON.parse(
       await fs.readFile('package.json', 'utf8'),
