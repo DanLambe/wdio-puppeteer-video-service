@@ -9,9 +9,8 @@ A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CD
 
 > **1.0 release candidate**
 > `1.0.0-rc.1` is the polished release-candidate surface. Install the `next`
-> tag while it completes two independent Ubuntu/Windows validation runs. The
-> stable `1.0.0` version is published under `latest` only after those release
-> gates remain clean.
+> tag to opt in while it is evaluated before stable promotion. The `latest`
+> tag remains on the stable `0.8.0` line until `1.0.0` is explicitly released.
 
 Features:
 
@@ -45,15 +44,15 @@ Chrome through BiDi while Puppeteer attaches through CDP for screencasting.
 
 ## Installation
 
-```bash
-npm install wdio-puppeteer-video-service
-```
-
-To evaluate the release candidate before `1.0.0` is promoted:
+This guide documents the `1.0.0` release-candidate API. Install it explicitly
+from the opt-in `next` channel:
 
 ```bash
-npm install wdio-puppeteer-video-service@next
+npm install --save-dev wdio-puppeteer-video-service@next
 ```
+
+An unqualified install continues to resolve to the stable `0.8.0` release,
+whose configuration API differs from this guide.
 
 Install `@wdio/allure-reporter` separately when using the optional Allure
 integration:
