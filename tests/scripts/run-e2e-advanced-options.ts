@@ -122,6 +122,18 @@ const runMode = async (
     })
   }
 
+  if (mode === 'deferred-merge') {
+    await assertStaticVideoReport({
+      resultsDir,
+      expectedTitles: [
+        'should produce a deferred merged artifact for a multi-window flow',
+        'should process an independent deferred merge within the worker limit',
+      ],
+      expectRetryOutcomes: false,
+      runLabel: 'advanced-deferred-merge',
+    })
+  }
+
   if (mode === 'retry' || mode === 'spec-file-retry' || mode === 'retention') {
     await assertAllureVideoAttachments({
       resultsDir,

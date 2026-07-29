@@ -36,6 +36,10 @@ the operation is demonstrably healthy but slow.
 ## Recording capacity is exhausted
 
 Inspect `concurrency` recording and post-processing limits independently.
+`maxPostProcessesPerProcess` must be a positive integer and defaults to `1`;
+increase it only when the worker has enough CPU, memory, and I/O capacity for
+concurrent FFmpeg work. `maxPostProcessesGlobal: 0` disables only the
+cross-worker limit. Each operation still acquires its own per-process slot.
 Cross-worker lock files carry heartbeats. A lease with a live owner PID is kept
 even when its heartbeat is old; dead owners are reclaimed immediately, while
 malformed locks must exceed the invalid-file grace period. Keep

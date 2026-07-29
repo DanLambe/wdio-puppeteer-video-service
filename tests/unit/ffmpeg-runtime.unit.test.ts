@@ -30,6 +30,14 @@ const createScheduler = (): SchedulerHarness => ({
   release: vi.fn(async () => {}),
 })
 
+const createDeferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 const createHarness = (
   serviceOptions: WdioPuppeteerVideoServiceOptions = {},
   environment: Readonly<Record<string, string | undefined>> = {},
@@ -56,12 +64,15 @@ const createHarness = (
   const runFfmpeg = vi.fn<FfmpegRunner>(async () => true)
   const log = vi.fn<ServiceLogger>()
   const onVersion = vi.fn(async () => {})
+  const createPostProcessSlotScheduler = vi.fn(
+    () => scheduler as unknown as PostProcessSlotScheduler,
+  )
   const runtime = new FfmpegRuntime({
+    createPostProcessSlotScheduler,
     getCandidates,
     log,
     onVersion,
     options: resolveServiceConfiguration(serviceOptions).options,
-    postProcessSlotScheduler: scheduler as unknown as PostProcessSlotScheduler,
     probeDirectMp4,
     process: processBoundary,
     processRegistry,
@@ -71,6 +82,7 @@ const createHarness = (
   })
 
   return {
+    createPostProcessSlotScheduler,
     getCandidates,
     log,
     onVersion,
@@ -357,18 +369,66 @@ describe('FfmpegRuntime', () => {
     expect(harness.scheduler.release).toHaveBeenCalledTimes(2)
   })
 
-  it('terminates registered processes and releases only held capacity', async () => {
+  it('creates an independently owned scheduler for every concurrent operation', async () => {
+    const harness = createHarness()
+    const firstScheduler = createScheduler()
+    const secondScheduler = createScheduler()
+    harness.createPostProcessSlotScheduler
+      .mockReturnValueOnce(
+        firstScheduler as unknown as PostProcessSlotScheduler,
+      )
+      .mockReturnValueOnce(
+        secondScheduler as unknown as PostProcessSlotScheduler,
+      )
+    const firstGate = createDeferred<void>()
+    const secondGate = createDeferred<void>()
+
+    const first = harness.runtime.withPostProcessSlot('first', async () => {
+      await firstGate.promise
+      return 'first'
+    })
+    const second = harness.runtime.withPostProcessSlot('second', async () => {
+      await secondGate.promise
+      return 'second'
+    })
+    await vi.waitFor(() => {
+      expect(firstScheduler.acquire).toHaveBeenCalledOnce()
+      expect(secondScheduler.acquire).toHaveBeenCalledOnce()
+    })
+    firstGate.resolve()
+    secondGate.resolve()
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'first',
+      'second',
+    ])
+    expect(firstScheduler.release).toHaveBeenCalledOnce()
+    expect(secondScheduler.release).toHaveBeenCalledOnce()
+  })
+
+  it('terminates registered processes and releases every held operation slot', async () => {
     const harness = createHarness()
     const terminate = vi.fn()
     harness.processRegistry.register({ terminate })
 
+    const taskGate = createDeferred<void>()
+    const runningTask = harness.runtime.withPostProcessSlot(
+      'held operation',
+      async () => {
+        await taskGate.promise
+      },
+    )
+    await vi.waitFor(() => {
+      expect(harness.scheduler.acquire).toHaveBeenCalledOnce()
+    })
+
     await harness.runtime.terminateAll()
     expect(terminate).toHaveBeenCalledOnce()
 
-    await harness.runtime.releaseHeldPostProcessSlot()
-    expect(harness.scheduler.release).not.toHaveBeenCalled()
-    harness.scheduler.ownsGlobalPostProcessSlot = true
-    await harness.runtime.releaseHeldPostProcessSlot()
+    await harness.runtime.releaseHeldPostProcessSlots()
+    expect(harness.scheduler.release).toHaveBeenCalledOnce()
+    taskGate.resolve()
+    await runningTask
     expect(harness.scheduler.release).toHaveBeenCalledOnce()
   })
 

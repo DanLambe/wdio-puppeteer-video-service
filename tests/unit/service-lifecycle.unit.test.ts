@@ -14,7 +14,7 @@ describe('WdioPuppeteerVideoService teardown lifecycle', () => {
     }) as unknown as {
       _ffmpegRuntime: Pick<
         FfmpegRuntime,
-        'releaseHeldPostProcessSlot' | 'resumeAfterTeardown' | 'terminateAll'
+        'releaseHeldPostProcessSlots' | 'resumeAfterTeardown' | 'terminateAll'
       >
       _flushDeferredPostProcessTasks: () => Promise<void>
       after: () => Promise<void>
@@ -29,7 +29,7 @@ describe('WdioPuppeteerVideoService teardown lifecycle', () => {
     const resumeAfterTeardown = vi.fn(() => {
       callOrder.push('resume')
     })
-    const releaseHeldPostProcessSlot = vi.fn(async () => {
+    const releaseHeldPostProcessSlots = vi.fn(async () => {
       callOrder.push('release')
     })
     const flushDeferredPostProcessTasks = vi.fn(async () => {
@@ -37,8 +37,8 @@ describe('WdioPuppeteerVideoService teardown lifecycle', () => {
     })
     service._ffmpegRuntime.terminateAll = terminateAll
     service._ffmpegRuntime.resumeAfterTeardown = resumeAfterTeardown
-    service._ffmpegRuntime.releaseHeldPostProcessSlot =
-      releaseHeldPostProcessSlot
+    service._ffmpegRuntime.releaseHeldPostProcessSlots =
+      releaseHeldPostProcessSlots
     service._flushDeferredPostProcessTasks = flushDeferredPostProcessTasks
 
     const firstTeardown = service.after()

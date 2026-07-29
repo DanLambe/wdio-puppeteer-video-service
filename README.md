@@ -94,7 +94,7 @@ export const config = {
           maxRecordingsGlobal: 0,
           startMode: 'blocking',
           startTimeoutMs: 2500,
-          maxPostProcessesPerProcess: 0,
+          maxPostProcessesPerProcess: 1,
           maxPostProcessesGlobal: 0,
           postProcessStartMode: 'blocking',
           postProcessStartTimeoutMs: 2500,
@@ -187,19 +187,24 @@ Top-level options:
 - `maxRecordingsGlobal` (default `0`, disabled).
 - `startMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
 - `startTimeoutMs` (default `2500`) and optional `lockDir`.
-- `maxPostProcessesPerProcess` (default `0`, unlimited).
+- `maxPostProcessesPerProcess` (default `1`): positive integer limiting
+  concurrent post-processing operations in each worker. With
+  `processing.timing: 'after-worker'`, it is also the deferred job worker
+  count.
 - `maxPostProcessesGlobal` (default `0`, disabled; the `ci` profile defaults to `1`).
 - `postProcessStartMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
 - `postProcessStartTimeoutMs` (default `2500`).
 
 Recording and post-processing use separate in-process and cross-worker slot
-pools. Global slots carry heartbeats, but a lease owned by a live process is
-never reclaimed solely because its heartbeat expired. Dead owners are reclaimed
-immediately; malformed lock files are reclaimed only after an invalid-file grace
-period. Capture paths are exclusively reserved, while merge and transcode
-outputs are decoded from unique temporary files and atomically published only
-after validation. A failed or timed-out operation keeps its source recordings
-and removes partial output.
+pools. Each FFmpeg operation acquires its own post-processing lease, including
+operations started concurrently by the deferred queue. A merge followed by a
+transcode remains one ordered job chain. Global slots carry heartbeats, but a
+lease owned by a live process is never reclaimed solely because its heartbeat
+expired. Dead owners are reclaimed immediately; malformed lock files are
+reclaimed only after an invalid-file grace period. Capture paths are exclusively
+reserved, while merge and transcode outputs are decoded from unique temporary
+files and atomically published only after validation. A failed or timed-out
+operation keeps its source recordings and removes partial output.
 
 `artifacts.naming`:
 

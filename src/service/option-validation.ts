@@ -298,7 +298,7 @@ const validateConcurrency = (value: unknown): void => {
   assertOptionalInteger(
     concurrency.maxPostProcessesPerProcess,
     'concurrency.maxPostProcessesPerProcess',
-    0,
+    1,
   )
   assertOptionalInteger(
     concurrency.maxPostProcessesGlobal,

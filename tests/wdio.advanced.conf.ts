@@ -70,6 +70,26 @@ const mode = toMode(process.env.WDIO_ADVANCED_MODE)
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
+const resolvePositiveInteger = (
+  name: string,
+  value: string | undefined,
+  fallback: number,
+): number => {
+  if (value === undefined) {
+    return fallback
+  }
+
+  const resolved = Number(value)
+  if (!Number.isInteger(resolved) || resolved < 1) {
+    throw new TypeError(`${name} must be a positive integer`)
+  }
+  return resolved
+}
+const deferredPostProcessWorkers = resolvePositiveInteger(
+  'WDIO_POST_PROCESS_WORKERS',
+  process.env.WDIO_POST_PROCESS_WORKERS,
+  2,
+)
 const resultsDir = path.resolve(
   process.env.WDIO_RESULTS_DIR ||
     path.join('tests/results', `advanced-${mode}`),
@@ -127,6 +147,7 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   'session-full-style': ['session full style placeholder'],
   'deferred-merge': [
     'should produce a deferred merged artifact for a multi-window flow',
+    'should process an independent deferred merge within the worker limit',
   ],
   'include-spec': ['should execute when spec filter mode is configured'],
   'exclude-spec': [],
@@ -230,6 +251,9 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
     artifacts: { naming: { style: 'session-full' } },
   }),
   'deferred-merge': createServiceOptions({
+    concurrency: {
+      maxPostProcessesPerProcess: deferredPostProcessWorkers,
+    },
     processing: {
       timing: 'after-worker',
       merge: { enabled: true, deleteSegments: true },
@@ -375,9 +399,9 @@ const assertSessionFullStyleMode = (artifactNames: string[]): void => {
 }
 
 const assertDeferredMergeMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  if (artifactNames.length !== 2) {
     throw new Error(
-      `[wdio:e2e:advanced] deferred-merge mode expected exactly 1 merged artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+      `[wdio:e2e:advanced] deferred-merge mode expected exactly 2 merged artifacts but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
   const hasPartSegment = artifactNames.some((fileName) =>

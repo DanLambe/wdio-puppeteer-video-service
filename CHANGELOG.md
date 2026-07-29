@@ -20,6 +20,9 @@ versioning and release notes.
 - Added exclusive artifact reservation, atomic merge/transcode publication,
   source-media preservation, ownership-safe lock recovery, and bounded UTF-8
   FFmpeg diagnostics.
+- Added bounded deferred post-processing with a positive per-worker limit,
+  enqueue-order failure reporting after the full queue settles, and independent
+  global leases for concurrent FFmpeg operations.
 - Added Manifest v1, the offline static HTML reporter, and optional Allure video
   attachments, with consistent cleanup-first failure-policy handling.
 - Added deterministic Mocha, Jasmine, and Cucumber media validation with local

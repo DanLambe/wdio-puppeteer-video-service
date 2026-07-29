@@ -30,7 +30,7 @@ export interface FfmpegRuntimeDependencies {
   readonly options: FfmpegRuntimeOptions
   readonly process: ProcessBoundary
   readonly processRegistry: FfmpegProcessRegistry
-  readonly postProcessSlotScheduler: PostProcessSlotScheduler
+  readonly createPostProcessSlotScheduler: () => PostProcessSlotScheduler
   readonly runFfmpeg: FfmpegRunner
   readonly log: ServiceLogger
   readonly onVersion?: (version: string) => Promise<void> | void
@@ -44,7 +44,9 @@ export class FfmpegRuntime {
   private readonly options: FfmpegRuntimeOptions
   private readonly process: ProcessBoundary
   private readonly processRegistry: FfmpegProcessRegistry
-  private readonly postProcessSlotScheduler: PostProcessSlotScheduler
+  private readonly activePostProcessSlotSchedulers =
+    new Set<PostProcessSlotScheduler>()
+  private readonly createPostProcessSlotScheduler: () => PostProcessSlotScheduler
   private readonly runFfmpegProcess: FfmpegRunner
   private readonly log: ServiceLogger
   private readonly onVersion:
@@ -68,7 +70,8 @@ export class FfmpegRuntime {
     this.options = dependencies.options
     this.process = dependencies.process
     this.processRegistry = dependencies.processRegistry
-    this.postProcessSlotScheduler = dependencies.postProcessSlotScheduler
+    this.createPostProcessSlotScheduler =
+      dependencies.createPostProcessSlotScheduler
     this.runFfmpegProcess = dependencies.runFfmpeg
     this.log = dependencies.log
     this.onVersion = dependencies.onVersion
@@ -160,7 +163,8 @@ export class FfmpegRuntime {
     if (!this.acceptingWork) {
       return undefined
     }
-    const acquired = await this.postProcessSlotScheduler.acquire()
+    const slotScheduler = this.createPostProcessSlotScheduler()
+    const acquired = await slotScheduler.acquire()
     if (!acquired) {
       const timeout = this.options.concurrency.postProcessStartTimeoutMs
       this.log(
@@ -169,15 +173,15 @@ export class FfmpegRuntime {
       )
       return undefined
     }
-    if (!this.acceptingWork) {
-      await this.postProcessSlotScheduler.release()
-      return undefined
-    }
+    this.activePostProcessSlotSchedulers.add(slotScheduler)
 
     try {
+      if (!this.acceptingWork) {
+        return undefined
+      }
       return await task()
     } finally {
-      await this.postProcessSlotScheduler.release()
+      await this.releasePostProcessSlot(slotScheduler)
     }
   }
 
@@ -190,14 +194,21 @@ export class FfmpegRuntime {
     this.acceptingWork = true
   }
 
-  async releaseHeldPostProcessSlot(): Promise<void> {
-    if (
-      !this.postProcessSlotScheduler.ownsPostProcessSlot &&
-      !this.postProcessSlotScheduler.ownsGlobalPostProcessSlot
-    ) {
+  async releaseHeldPostProcessSlots(): Promise<void> {
+    await Promise.all(
+      [...this.activePostProcessSlotSchedulers].map(async (slotScheduler) => {
+        await this.releasePostProcessSlot(slotScheduler)
+      }),
+    )
+  }
+
+  private async releasePostProcessSlot(
+    slotScheduler: PostProcessSlotScheduler,
+  ): Promise<void> {
+    if (!this.activePostProcessSlotSchedulers.delete(slotScheduler)) {
       return
     }
-    await this.postProcessSlotScheduler.release()
+    await slotScheduler.release()
   }
 
   private async initialize(): Promise<boolean> {

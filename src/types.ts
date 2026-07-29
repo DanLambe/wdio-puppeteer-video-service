@@ -108,7 +108,7 @@ export interface ConcurrencyOptions {
   startMode?: RecordingStartMode
   /** @default 2500 */
   startTimeoutMs?: number
-  /** Use 0 for no explicit in-process limit. @default 0 */
+  /** Number of deferred jobs that may run concurrently in this worker. @default 1 */
   maxPostProcessesPerProcess?: number
   /** Use 0 to disable the cross-worker limit. The `ci` profile defaults to 1. @default 0 */
   maxPostProcessesGlobal?: number

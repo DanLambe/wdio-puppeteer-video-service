@@ -43,7 +43,7 @@ describe('service option resolution', () => {
         maxRecordingsGlobal: 0,
         startMode: 'blocking',
         startTimeoutMs: 2500,
-        maxPostProcessesPerProcess: 0,
+        maxPostProcessesPerProcess: 1,
         maxPostProcessesGlobal: 0,
         postProcessStartMode: 'blocking',
         postProcessStartTimeoutMs: 2500,
@@ -72,6 +72,7 @@ describe('service option resolution', () => {
       resolveServiceConfiguration({ profile: 'parallel' }).options,
     ).toMatchObject({
       capture: { fps: 24 },
+      concurrency: { maxPostProcessesPerProcess: 1 },
       processing: {
         merge: { deleteSegments: true, enabled: false },
         format: 'webm',
@@ -121,6 +122,7 @@ describe('service option resolution', () => {
         },
       },
       concurrency: {
+        maxPostProcessesPerProcess: 1,
         startMode: 'fast-fail',
         maxPostProcessesGlobal: 1,
       },
@@ -132,7 +134,10 @@ describe('service option resolution', () => {
     const explicit = resolveServiceConfiguration({
       profile: 'ci',
       capture: { fps: 60, framePriming: true },
-      concurrency: { startMode: 'blocking' },
+      concurrency: {
+        maxPostProcessesPerProcess: 3,
+        startMode: 'blocking',
+      },
       logLevel: 'trace',
       processing: {
         merge: { enabled: true },
@@ -146,7 +151,10 @@ describe('service option resolution', () => {
         merge: { deleteSegments: true, enabled: true },
         timing: 'after-test',
       },
-      concurrency: { startMode: 'blocking' },
+      concurrency: {
+        maxPostProcessesPerProcess: 3,
+        startMode: 'blocking',
+      },
       recording: { windowChanges: 'segment' },
     })
     expect(explicit.logLevel).toBe('trace')
@@ -361,7 +369,7 @@ describe('service option resolution', () => {
       'concurrency.maxRecordingsGlobal',
     ],
     [
-      { concurrency: { maxPostProcessesPerProcess: -1 } },
+      { concurrency: { maxPostProcessesPerProcess: 0 } },
       'concurrency.maxPostProcessesPerProcess',
     ],
     [

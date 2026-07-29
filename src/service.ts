@@ -3,6 +3,7 @@ import type { Frameworks, Services } from '@wdio/types'
 import type { Browser } from 'webdriverio'
 import { reserveArtifactPath } from './service/artifact-integrity.js'
 import type { ClockBoundary, FileSystemBoundary } from './service/boundaries.js'
+import { drainBoundedTaskQueue } from './service/bounded-task-queue.js'
 import { CaptureSession } from './service/capture-session.js'
 import {
   createWorkerCompositionRoot,
@@ -164,13 +165,14 @@ export default class WdioPuppeteerVideoService
       },
     )
     const ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
-    const postProcessSlotScheduler = composition.createPostProcessSlotScheduler(
-      this._options,
-      (level, message, details) => {
-        this._log(level, message, details)
-      },
-    )
     this._ffmpegRuntime = new FfmpegRuntime({
+      createPostProcessSlotScheduler: () =>
+        composition.createPostProcessSlotScheduler(
+          this._options,
+          (level, message, details) => {
+            this._log(level, message, details)
+          },
+        ),
       log: (level, message, details) => {
         this._log(level, message, details)
       },
@@ -178,7 +180,6 @@ export default class WdioPuppeteerVideoService
         await this._manifestRecorder?.noteFfmpegVersion(version)
       },
       options: this._options,
-      postProcessSlotScheduler,
       process: composition.process,
       processRegistry: ffmpegProcessRegistry,
       runFfmpeg: composition.runFfmpeg,
@@ -459,7 +460,7 @@ export default class WdioPuppeteerVideoService
       try {
         await this._ffmpegRuntime.terminateAll()
       } finally {
-        await this._ffmpegRuntime.releaseHeldPostProcessSlot()
+        await this._ffmpegRuntime.releaseHeldPostProcessSlots()
       }
     }
   }
@@ -993,30 +994,26 @@ export default class WdioPuppeteerVideoService
       `[WdioPuppeteerVideoService] Processing ${this._deferredPostProcessTasks.length} deferred post-processing task(s).`,
     )
 
-    let firstFailure: { error: unknown } | undefined
-    while (this._deferredPostProcessTasks.length > 0) {
-      const nextTask = this._deferredPostProcessTasks.shift()
-      if (!nextTask) {
-        break
-      }
-
-      try {
-        if (nextTask.kind === 'merge') {
-          await this._executeDeferredMergeTask(nextTask)
-          continue
+    const failures = await drainBoundedTaskQueue(
+      this._deferredPostProcessTasks,
+      this._options.concurrency.maxPostProcessesPerProcess,
+      async (task) => {
+        if (task.kind === 'merge') {
+          await this._executeDeferredMergeTask(task)
+          return
         }
-
-        await this._executeDeferredTranscodeTask(nextTask)
-      } catch (error) {
-        firstFailure ??= { error }
-        this._log(
-          'error',
-          `[WdioPuppeteerVideoService] Deferred ${nextTask.kind} task failed:`,
-          error,
-        )
-      }
+        await this._executeDeferredTranscodeTask(task)
+      },
+    )
+    for (const failure of failures) {
+      this._log(
+        'error',
+        `[WdioPuppeteerVideoService] Deferred ${failure.task.kind} task failed:`,
+        failure.error,
+      )
     }
 
+    const firstFailure = failures[0]
     if (firstFailure) {
       throw firstFailure.error
     }

@@ -119,7 +119,7 @@ export const resolveServiceConfiguration = (
         concurrency.startMode ?? (profile === 'ci' ? 'fast-fail' : 'blocking'),
       startTimeoutMs:
         concurrency.startTimeoutMs ?? DEFAULT_RECORDING_START_TIMEOUT_MS,
-      maxPostProcessesPerProcess: concurrency.maxPostProcessesPerProcess ?? 0,
+      maxPostProcessesPerProcess: concurrency.maxPostProcessesPerProcess ?? 1,
       maxPostProcessesGlobal:
         concurrency.maxPostProcessesGlobal ?? (profile === 'ci' ? 1 : 0),
       postProcessStartMode: concurrency.postProcessStartMode ?? 'blocking',

@@ -56,6 +56,10 @@ Equivalent retry-only configuration:
   restored after capture initialization.
 - `processing.timing: 'after-worker'` defers FFmpeg work and is incompatible
   with Allure attachment integration.
+- `concurrency.maxPostProcessesPerProcess` now defaults to `1` and must be a
+  positive integer. For after-worker processing, it is the number of deferred
+  jobs that can run concurrently in one worker; every FFmpeg operation still
+  observes `maxPostProcessesGlobal`.
 - Allure requires test scope because the media must be attached while the
   corresponding reporter test remains active.
 - The package is ESM-only and requires Node.js 24. Use NodeNext module

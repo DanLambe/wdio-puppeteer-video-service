@@ -108,6 +108,21 @@ const withTempDir = async (
   }
 }
 
+const createDeferred = <T>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+const createTranscodeTask = (name: string) => ({
+  kind: 'transcode' as const,
+  inputPath: `${name}.webm`,
+  outputPath: `${name}.mp4`,
+  deleteOriginal: true,
+})
+
 const createRetryLauncherService = (
   outputDir: string,
 ): RetryLauncherService => {
@@ -729,9 +744,10 @@ describe('WdioPuppeteerVideoService unit', () => {
     expect(service._deferredPostProcessTasks).toHaveLength(0)
   })
 
-  it('drains deferred work after a task fails and rethrows the first failure', async () => {
-    const service = new WdioPuppeteerVideoService({
-      postProcessMode: 'deferred',
+  it('uses maxPostProcessesPerProcess as the deferred worker count', async () => {
+    const service = new WdioPuppeteerVideoServiceRuntime({
+      concurrency: { maxPostProcessesPerProcess: 2 },
+      processing: { timing: 'after-worker' },
     }) as unknown as {
       _deferredPostProcessTasks: Array<{
         kind: 'transcode'
@@ -746,35 +762,165 @@ describe('WdioPuppeteerVideoService unit', () => {
       _flushDeferredPostProcessTasks: () => Promise<void>
       _log: (level: string, message: string) => void
     }
+    const gates = new Map([
+      ['first.webm', createDeferred<void>()],
+      ['second.webm', createDeferred<void>()],
+      ['third.webm', createDeferred<void>()],
+    ])
+    const started: string[] = []
+    let active = 0
+    let maximumActive = 0
+    service._log = () => {}
+    service._executeDeferredTranscodeTask = async (task) => {
+      started.push(task.inputPath)
+      active += 1
+      maximumActive = Math.max(maximumActive, active)
+      await gates.get(task.inputPath)?.promise
+      active -= 1
+    }
+    service._deferredPostProcessTasks.push(
+      createTranscodeTask('first'),
+      createTranscodeTask('second'),
+      createTranscodeTask('third'),
+    )
+
+    const flushing = service._flushDeferredPostProcessTasks()
+    await vi.waitFor(() => {
+      expect(started).toEqual(['first.webm', 'second.webm'])
+    })
+    gates.get('second.webm')?.resolve()
+    await vi.waitFor(() => {
+      expect(started).toEqual(['first.webm', 'second.webm', 'third.webm'])
+    })
+    gates.get('first.webm')?.resolve()
+    gates.get('third.webm')?.resolve()
+
+    await flushing
+    expect(maximumActive).toBe(2)
+    expect(service._deferredPostProcessTasks).toHaveLength(0)
+  })
+
+  it('drains deferred work after a task fails and rethrows the first failure', async () => {
+    const service = new WdioPuppeteerVideoServiceRuntime({
+      concurrency: { maxPostProcessesPerProcess: 2 },
+      processing: { timing: 'after-worker' },
+    }) as unknown as {
+      _deferredPostProcessTasks: Array<{
+        kind: 'transcode'
+        inputPath: string
+        outputPath: string
+        deleteOriginal: boolean
+      }>
+      _executeDeferredTranscodeTask: (task: {
+        kind: 'transcode'
+        inputPath: string
+      }) => Promise<void>
+      _flushDeferredPostProcessTasks: () => Promise<void>
+      _log: (level: string, message: string) => void
+    }
+    const firstGate = createDeferred<void>()
     const callOrder: string[] = []
     service._log = () => {}
     service._executeDeferredTranscodeTask = async (task) => {
       callOrder.push(task.inputPath)
       if (task.inputPath === 'first.webm') {
+        await firstGate.promise
         throw new Error('first deferred failure')
       }
-      throw new Error('second deferred failure')
+      if (task.inputPath === 'second.webm') {
+        throw new Error('second deferred failure')
+      }
     }
     service._deferredPostProcessTasks.push(
-      {
-        kind: 'transcode',
-        inputPath: 'first.webm',
-        outputPath: 'first.mp4',
-        deleteOriginal: true,
-      },
-      {
-        kind: 'transcode',
-        inputPath: 'second.webm',
-        outputPath: 'second.mp4',
-        deleteOriginal: true,
-      },
+      createTranscodeTask('first'),
+      createTranscodeTask('second'),
+      createTranscodeTask('third'),
     )
 
-    await expect(service._flushDeferredPostProcessTasks()).rejects.toThrow(
-      'first deferred failure',
-    )
-    expect(callOrder).toEqual(['first.webm', 'second.webm'])
+    const flushing = service._flushDeferredPostProcessTasks()
+    await vi.waitFor(() => {
+      expect(callOrder).toEqual(['first.webm', 'second.webm', 'third.webm'])
+    })
+    firstGate.resolve()
+    await expect(flushing).rejects.toThrow('first deferred failure')
     expect(service._deferredPostProcessTasks).toHaveLength(0)
+  })
+
+  it('updates every manifest entry after mixed deferred outcomes', async () => {
+    await withTempDir(async (tempDir) => {
+      const failedInput = path.join(tempDir, 'failed.webm')
+      const successfulInput = path.join(tempDir, 'successful.webm')
+      await fs.writeFile(failedInput, 'preserve-failed-source')
+      await fs.writeFile(successfulInput, 'successful-source')
+      const service = new WdioPuppeteerVideoServiceRuntime({
+        concurrency: { maxPostProcessesPerProcess: 2 },
+        failurePolicy: 'error',
+        logLevel: 'silent',
+        processing: { timing: 'after-worker' },
+      }) as unknown as {
+        _deferredPostProcessTasks: Array<{
+          kind: 'transcode'
+          inputPath: string
+          outputPath: string
+          deleteOriginal: boolean
+          manifestEntryId: string
+        }>
+        _flushDeferredPostProcessTasks: () => Promise<void>
+        _log: (level: string, message: string) => void
+        _manifestRecorder: {
+          completeDeferred: ReturnType<typeof vi.fn>
+        }
+        _mediaPipeline: Pick<MediaPipeline, 'transcode'>
+      }
+      const completeDeferred = vi.fn(async () => {})
+      service._manifestRecorder = { completeDeferred }
+      service._log = () => {}
+      service._mediaPipeline.transcode = vi.fn(async ({ inputPath }) => {
+        return inputPath === failedInput
+          ? undefined
+          : path.join(tempDir, 'successful.mp4')
+      })
+      service._deferredPostProcessTasks.push(
+        {
+          kind: 'transcode',
+          inputPath: failedInput,
+          outputPath: path.join(tempDir, 'failed.mp4'),
+          deleteOriginal: true,
+          manifestEntryId: 'failed-entry',
+        },
+        {
+          kind: 'transcode',
+          inputPath: successfulInput,
+          outputPath: path.join(tempDir, 'successful.mp4'),
+          deleteOriginal: true,
+          manifestEntryId: 'successful-entry',
+        },
+      )
+
+      await expect(service._flushDeferredPostProcessTasks()).rejects.toThrow(
+        `Deferred transcode failed, keeping original recording: ${failedInput}`,
+      )
+
+      expect(completeDeferred).toHaveBeenCalledTimes(2)
+      expect(completeDeferred).toHaveBeenCalledWith(
+        'failed-entry',
+        expect.objectContaining({
+          paths: [failedInput],
+          processingOutcome: 'failed',
+        }),
+      )
+      expect(completeDeferred).toHaveBeenCalledWith(
+        'successful-entry',
+        expect.objectContaining({
+          paths: [path.join(tempDir, 'successful.mp4')],
+          processingOutcome: 'completed',
+        }),
+      )
+      await expect(fs.readFile(failedInput, 'utf8')).resolves.toBe(
+        'preserve-failed-source',
+      )
+      expect(service._deferredPostProcessTasks).toHaveLength(0)
+    })
   })
 
   it('reports missing deferred inputs and dispatches existing inputs to the media pipeline', async () => {
