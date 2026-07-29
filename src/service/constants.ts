@@ -1,18 +1,12 @@
 import type { WriteStream } from 'node:fs'
-import type {
-  WdioPuppeteerVideoServiceLogLevel,
-  WdioPuppeteerVideoServiceOptions,
-  WdioPuppeteerVideoServiceTranscodeOptions,
-} from '../types.js'
+import type { LogLevel, OutputFormat } from '../types.js'
 
-export type OutputFormat = NonNullable<
-  WdioPuppeteerVideoServiceOptions['outputFormat']
->
+export interface ResolvedTranscodeOptions {
+  readonly deleteOriginal: boolean
+  readonly ffmpegArgs?: readonly string[]
+}
 
-export type ResolvedTranscodeOptions = Required<
-  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'deleteOriginal'>
-> &
-  Pick<WdioPuppeteerVideoServiceTranscodeOptions, 'ffmpegArgs'>
+export type { OutputFormat }
 
 export interface ActiveSegment {
   recordingPath: string
@@ -35,6 +29,7 @@ export interface DeferredTranscodeTask {
   outputPath: string
   deleteOriginal: boolean
   ffmpegArgs?: string[]
+  manifestEntryId?: string
 }
 
 export interface DeferredMergeTask {
@@ -47,6 +42,7 @@ export interface DeferredMergeTask {
     deleteOriginal: boolean
     ffmpegArgs?: string[]
   }
+  manifestEntryId?: string
 }
 
 export type DeferredPostProcessTask = DeferredTranscodeTask | DeferredMergeTask
@@ -57,11 +53,6 @@ export interface MergeExecutionOptions {
   deleteSegments: boolean
   writeFailureContext: string
   ffmpegOperation: string
-}
-
-export interface PersistedSpecRetryState {
-  specRetryKey: string
-  specFileRetryAttempt: number
 }
 
 export interface ResolvedRetryContext {
@@ -86,9 +77,11 @@ export const WINDOW_SEGMENT_COMMANDS: Set<string> = new Set<string>([
 export const ACTIVE_PAGE_TIMEOUT_MS = 2_000
 export const ACTIVE_PAGE_POLL_MS = 50
 export const SEGMENT_SWITCH_DELAY_MS = 50
+export const RECORDER_STOP_TIMEOUT_MS = 5_000
 export const WRITE_STREAM_TIMEOUT_MS = 30_000
 export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 export const FFMPEG_TERMINATION_GRACE_MS = 1_000
+export const FFMPEG_TERMINATION_HELPER_TIMEOUT_MS = 500
 export const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
 export const DEFAULT_MAX_FILENAME_LENGTH = 255
 export const WINDOWS_MAX_PATH_LENGTH = 259
@@ -99,11 +92,12 @@ export const IN_PROCESS_RECORDING_SLOT_POLL_MS = 25
 export const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 export const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
 export const GLOBAL_RECORDING_SLOT_HEARTBEAT_MS = 1_000
-export const GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS = 30_000
 export const DEFAULT_RECORDING_START_TIMEOUT_MS = 2_500
+export const DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS = 10_000
 export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
-export const SPEC_RETRY_STATE_DIR_NAME = '.wdio-video-retry-state'
+export const GLOBAL_POST_PROCESS_SLOT_DIR_NAME =
+  '.wdio-video-post-process-global-slots'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 
@@ -116,10 +110,7 @@ export const CI_TRANSCODE_FFMPEG_ARGS = [
   '1',
 ] as const
 
-export const LOG_LEVEL_PRIORITY: Record<
-  WdioPuppeteerVideoServiceLogLevel,
-  number
-> = {
+export const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   silent: 0,
   error: 1,
   warn: 2,

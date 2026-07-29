@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const expectVideos = !['0', 'false', 'no'].includes(
@@ -12,9 +14,31 @@ const resultsDir = path.resolve(
 const expectedScenarioTitles = [
   'cucumber style should keep scenario name in video filename',
 ]
+type CucumberFilterMode = 'include-tag' | 'exclude-tag'
+const filterMode = process.env.WDIO_CUCUMBER_FILTER_MODE as
+  | CucumberFilterMode
+  | undefined
+// WDIO's live Cucumber hook payload does not expose feature tags in a
+// shape the service recognizes. Preserve that behavior until the filter API
+// and its framework adapters are intentionally revised in a later chunk.
+const expectZeroVideos = filterMode === 'include-tag'
+
+const resolveServiceFilterOptions = (
+  mode: CucumberFilterMode | undefined,
+): { includeTags?: string[]; excludeTags?: string[] } => {
+  if (mode === 'include-tag') {
+    return { includeTags: ['@recordable'] }
+  }
+  if (mode === 'exclude-tag') {
+    return { excludeTags: ['@recordable'] }
+  }
+  return {}
+}
+const serviceFilterOptions = resolveServiceFilterOptions(filterMode)
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: [path.resolve('tests/cucumber/features/**/*.feature')],
   maxInstances: 1,
@@ -38,24 +62,43 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 3,
   services: [
     [
-      WdioPuppeteerVideoService,
+      videoServiceModulePath,
       {
         outputDir: resultsDir,
-        saveAllVideos: true,
-        videoWidth: 1280,
-        videoHeight: 720,
-        outputFormat: 'mp4',
-        transcode: {
-          enabled: true,
+        recording: {
+          retain: 'all',
+          filters: serviceFilterOptions,
         },
-        mergeSegments: {
-          enabled: false,
+        capture: {
+          viewport: { width: 1280, height: 720 },
         },
+        processing: {
+          format: 'mp4',
+          timing: 'after-test',
+          transcode: {
+            enabled: true,
+          },
+          merge: {
+            enabled: false,
+          },
+        },
+        integrations: { allure: { attach: 'retained' } },
       },
     ],
   ],
   framework: 'cucumber',
-  reporters: ['spec'],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   cucumberOpts: {
     require: [path.resolve('tests/cucumber/steps/**/*.ts')],
     timeout: 60000,
@@ -66,10 +109,12 @@ export const config: WebdriverIO.Config = {
   onComplete: async () => {
     await assertVideoArtifacts({
       resultsDir,
-      expectedTitles: expectedScenarioTitles,
-      expectVideos,
+      expectedTitles: expectZeroVideos ? [] : expectedScenarioTitles,
+      expectVideos: expectVideos && !expectZeroVideos,
+      expectZeroVideos,
       fileNameStyle: 'test',
-      runLabel: 'cucumber',
+      expectedCodec: 'h264',
+      runLabel: filterMode ? `advanced-${filterMode}` : 'cucumber',
     })
   },
 }

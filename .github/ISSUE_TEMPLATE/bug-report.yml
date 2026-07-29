@@ -14,7 +14,7 @@ body:
     attributes:
       label: Package version
       description: Version of `wdio-puppeteer-video-service` you are using
-      placeholder: 0.1.1
+      placeholder: 1.0.0-rc.1
     validations:
       required: true
 
@@ -23,7 +23,28 @@ body:
     attributes:
       label: WebdriverIO version
       description: Exact WebdriverIO version in your project
-      placeholder: 9.24.0
+      placeholder: 9.29.1
+    validations:
+      required: true
+
+  - type: input
+    id: puppeteer_version
+    attributes:
+      label: Puppeteer Core version
+      description: Exact `puppeteer-core` version in your project
+      placeholder: 25.3.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Session protocol
+      description: Protocol classification shown in the manifest or service diagnostics
+      options:
+        - bidi+cdp
+        - classic+cdp
+        - unsupported / unknown
     validations:
       required: true
 
@@ -58,14 +79,16 @@ body:
     id: service_options
     attributes:
       label: Service options / usage
-      description: Paste how you configure this service in `wdio.conf.*`
+      description: Paste how you configure this service in `wdio.conf.*`; remove credentials, tokens, private URLs, and identifying session data
       placeholder: |
         services: [
-          [WdioPuppeteerVideoService, {
+          ['puppeteer-video', {
             outputDir: "videos",
-            outputFormat: "mp4",
-            mp4Mode: "auto",
-            mergeSegments: { enabled: true }
+            processing: {
+              format: "mp4",
+              mp4Mode: "auto",
+              merge: { enabled: true }
+            }
           }]
         ]
       render: ts
@@ -76,7 +99,7 @@ body:
     id: environment
     attributes:
       label: Environment details
-      description: OS, Node version, CI/local, container/VM, browser version, ffmpeg version/path
+      description: OS, Node version, CI/local, container/VM, browser version, ffmpeg version/path; redact private hostnames and raw session IDs
       placeholder: |
         - OS: ubuntu-latest
         - Node: 24.x
@@ -119,7 +142,7 @@ body:
     id: logs
     attributes:
       label: Relevant logs / stack trace
-      description: Include WDIO logs and service logs around the failure
+      description: Include WDIO logs and service logs around the failure after removing credentials, private URLs, and raw session IDs
       render: shell
     validations:
       required: true
@@ -128,4 +151,4 @@ body:
     id: additional_context
     attributes:
       label: Additional context
-      description: Any extra details, screenshots, or links to a repro repo
+      description: Any extra details, sanitized screenshots, or links to a public repro; do not attach private recordings or sensitive test data

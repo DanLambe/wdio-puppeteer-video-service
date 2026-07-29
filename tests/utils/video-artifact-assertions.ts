@@ -1,5 +1,6 @@
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
+import { probeMediaFile } from './media-probe.js'
 
 type VideoFileNameStyle = 'test' | 'testFull' | 'session' | 'sessionFull'
 
@@ -10,6 +11,9 @@ interface VideoArtifactAssertionOptions {
   expectZeroVideos?: boolean
   mergeSegmentsEnabled?: boolean
   fileNameStyle?: VideoFileNameStyle
+  expectedCodec?: string
+  expectedWidth?: number
+  expectedHeight?: number
   runLabel: string
 }
 
@@ -94,6 +98,79 @@ const warnSmallFiles = async (
   }
 }
 
+const assertMediaIntegrity = async (
+  mediaFiles: string[],
+  resultsDir: string,
+  expectedCodec: string | undefined,
+  expectedWidth: number | undefined,
+  expectedHeight: number | undefined,
+): Promise<void> => {
+  const ffmpegPath = process.env.FFMPEG_PATH?.trim()
+  if (!ffmpegPath) {
+    throw new Error(
+      'FFMPEG_PATH is required when video artifact assertions are enabled',
+    )
+  }
+
+  for (const file of mediaFiles) {
+    const filePath = path.join(resultsDir, file)
+    const probe = await probeMediaFile(ffmpegPath, filePath)
+    assertProbeMatches(file, probe, {
+      expectedCodec,
+      expectedHeight,
+      expectedWidth,
+    })
+  }
+}
+
+const assertProbeMatches = (
+  file: string,
+  probe: Awaited<ReturnType<typeof probeMediaFile>>,
+  expected: {
+    expectedCodec: string | undefined
+    expectedHeight: number | undefined
+    expectedWidth: number | undefined
+  },
+): void => {
+  const expectedContainer = file.endsWith('.mp4') ? 'mp4' : 'webm'
+  if (probe.container !== expectedContainer) {
+    throw new Error(
+      `Expected ${file} to contain ${expectedContainer} media, but FFmpeg detected ${probe.container}`,
+    )
+  }
+  if (expected.expectedCodec && probe.codec !== expected.expectedCodec) {
+    throw new Error(
+      `Expected ${file} to use ${expected.expectedCodec}, but FFmpeg detected ${probe.codec}`,
+    )
+  }
+  if (
+    expected.expectedWidth !== undefined &&
+    probe.width !== expected.expectedWidth
+  ) {
+    throw new Error(
+      `Expected ${file} width ${expected.expectedWidth.toString()}, but FFmpeg detected ${probe.width.toString()}`,
+    )
+  }
+  if (
+    expected.expectedHeight !== undefined &&
+    probe.height !== expected.expectedHeight
+  ) {
+    throw new Error(
+      `Expected ${file} height ${expected.expectedHeight.toString()}, but FFmpeg detected ${probe.height.toString()}`,
+    )
+  }
+  if (
+    probe.width <= 0 ||
+    probe.height <= 0 ||
+    probe.durationSeconds <= 0 ||
+    probe.frameCount <= 0
+  ) {
+    throw new Error(
+      `Expected ${file} to contain decodable video, but dimensions=${probe.width.toString()}x${probe.height.toString()}, duration=${probe.durationSeconds.toString()}s, and frames=${probe.frameCount.toString()}`,
+    )
+  }
+}
+
 export const assertVideoArtifacts = async ({
   resultsDir,
   expectedTitles,
@@ -101,6 +178,9 @@ export const assertVideoArtifacts = async ({
   expectZeroVideos = false,
   mergeSegmentsEnabled = false,
   fileNameStyle = 'test',
+  expectedCodec,
+  expectedWidth,
+  expectedHeight,
   runLabel,
 }: VideoArtifactAssertionOptions): Promise<void> => {
   const files = await readdir(resultsDir).catch(() => [])
@@ -132,6 +212,13 @@ export const assertVideoArtifacts = async ({
   }
 
   await warnSmallFiles(mediaFiles, resultsDir, runLabel)
+  await assertMediaIntegrity(
+    mediaFiles,
+    resultsDir,
+    expectedCodec,
+    expectedWidth,
+    expectedHeight,
+  )
 
   const missingTitles: string[] = []
   for (const title of expectedTitles) {
@@ -169,6 +256,59 @@ export const listVideoArtifacts = async (
   return files
     .filter((file) => file.endsWith('.mp4') || file.endsWith('.webm'))
     .sort((a, b) => a.localeCompare(b))
+}
+
+export const assertStaticVideoReport = async (options: {
+  resultsDir: string
+  expectedTitles: string[]
+  expectRetryOutcomes?: boolean
+  runLabel: string
+}): Promise<void> => {
+  const reportPath = path.join(options.resultsDir, 'video-report.html')
+  const report = await readFile(reportPath, 'utf8')
+  const requiredMarkup = [
+    'Content-Security-Policy',
+    "default-src 'none'",
+    'status-filter',
+    'spec-filter',
+    'browser-filter',
+    'retry-filter',
+    '<video controls preload="metadata">',
+  ]
+  for (const markup of requiredMarkup) {
+    if (!report.includes(markup)) {
+      throw new Error(`Static report is missing required markup: ${markup}`)
+    }
+  }
+  for (const title of options.expectedTitles) {
+    if (!report.includes(title)) {
+      throw new Error(`Static report is missing test outcome: ${title}`)
+    }
+  }
+  if (/https?:\/\//u.test(report) || report.includes("'unsafe-inline'")) {
+    throw new Error(
+      'Static report must not depend on external or unsafe assets',
+    )
+  }
+  if (!report.includes('src="./')) {
+    throw new Error('Static report does not contain relative media links')
+  }
+  if (report.includes('aria-label="Report diagnostics"')) {
+    throw new Error('Static report contains unexpected join diagnostics')
+  }
+  if (
+    options.expectRetryOutcomes &&
+    (!report.includes('data-retried="true"') ||
+      !report.includes('data-status="failed"') ||
+      !report.includes('data-status="passed"'))
+  ) {
+    throw new Error(
+      'Static report does not contain the expected failed and passed retry outcomes',
+    )
+  }
+  console.log(
+    `[wdio:e2e:${options.runLabel}] Verified offline static report at ${reportPath}.`,
+  )
 }
 
 export { toFileToken }

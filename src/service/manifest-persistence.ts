@@ -1,0 +1,127 @@
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import {
+  MANIFEST_SCHEMA_VERSION,
+  type ManifestRunV1,
+  type VideoManifestV1,
+  validateVideoManifest,
+} from '../manifest.js'
+import { systemClock } from './boundaries.js'
+import type { ManifestRunContext } from './manifest-context.js'
+import {
+  getManifestRunDirectory,
+  MANIFEST_WORK_DIRECTORY,
+} from './manifest-journal.js'
+import { tryAcquireOwnedFileLease } from './owned-file-lease.js'
+
+const MANIFEST_FILE_NAME = 'manifest.json'
+const MANIFEST_LOCK_FILE_NAME = '.wdio-video-manifest.lock'
+const MANIFEST_LOCK_TIMEOUT_MS = 30_000
+const MANIFEST_LOCK_STALE_MS = 120_000
+const MANIFEST_LOCK_POLL_MS = 25
+const MANIFEST_LOCK_HEARTBEAT_MS = 1_000
+const ignoreFileError = (): undefined => undefined
+
+export const persistManifestRun = async (
+  context: ManifestRunContext,
+  run: ManifestRunV1,
+  generatedAt: string,
+): Promise<VideoManifestV1> => {
+  const release = await acquireManifestLock(context.outputDir)
+  let temporaryPath: string | undefined
+  try {
+    const manifestPath = path.join(context.outputDir, MANIFEST_FILE_NAME)
+    const existing = await readExistingManifest(manifestPath)
+    const manifest: VideoManifestV1 = {
+      schemaVersion: MANIFEST_SCHEMA_VERSION,
+      generatedAt,
+      runs: [
+        ...existing.runs.filter((existingRun) => existingRun.id !== run.id),
+        run,
+      ],
+    }
+    temporaryPath = path.join(
+      context.outputDir,
+      `.manifest-${process.pid.toString()}-${randomUUID()}.tmp`,
+    )
+    await fs.mkdir(context.outputDir, { recursive: true })
+    await fs.writeFile(
+      temporaryPath,
+      `${JSON.stringify(manifest, undefined, 2)}\n`,
+      'utf8',
+    )
+    await fs.rename(temporaryPath, manifestPath)
+    temporaryPath = undefined
+    await cleanupManifestRun(context)
+    return manifest
+  } finally {
+    if (temporaryPath) {
+      await fs.unlink(temporaryPath).catch(ignoreFileError)
+    }
+    await release()
+  }
+}
+
+const cleanupManifestRun = async (
+  context: ManifestRunContext,
+): Promise<void> => {
+  await fs.rm(getManifestRunDirectory(context), {
+    recursive: true,
+    force: true,
+  })
+  await fs
+    .rmdir(path.join(context.outputDir, MANIFEST_WORK_DIRECTORY))
+    .catch(ignoreFileError)
+}
+
+const readExistingManifest = async (
+  manifestPath: string,
+): Promise<VideoManifestV1> => {
+  const value = await fs
+    .readFile(manifestPath, 'utf8')
+    .then((content) => JSON.parse(content) as unknown)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') {
+        return undefined
+      }
+      throw error
+    })
+  if (value === undefined) {
+    return {
+      schemaVersion: MANIFEST_SCHEMA_VERSION,
+      generatedAt: new Date(0).toISOString(),
+      runs: [],
+    }
+  }
+  const validation = validateVideoManifest(value)
+  if (!validation.valid) {
+    throw new Error(
+      `Existing manifest.json is invalid: ${validation.errors.join('; ')}`,
+    )
+  }
+  return value as VideoManifestV1
+}
+
+const acquireManifestLock = async (
+  outputDir: string,
+): Promise<() => Promise<void>> => {
+  await fs.mkdir(outputDir, { recursive: true })
+  const lockPath = path.join(outputDir, MANIFEST_LOCK_FILE_NAME)
+  const deadline = systemClock.now() + MANIFEST_LOCK_TIMEOUT_MS
+  while (systemClock.now() < deadline) {
+    const lease = await tryAcquireOwnedFileLease({
+      filePath: lockPath,
+      heartbeatIntervalMs: MANIFEST_LOCK_HEARTBEAT_MS,
+      invalidStaleMs: MANIFEST_LOCK_STALE_MS,
+      payload: { resource: 'manifest-aggregation' },
+    })
+    if (lease) {
+      return async () => {
+        await lease.release()
+      }
+    }
+    await systemClock.delay(MANIFEST_LOCK_POLL_MS)
+  }
+  throw new Error(`Timed out waiting for manifest lock: ${lockPath}`)
+}

@@ -1,0 +1,282 @@
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import type { ProcessBoundary } from './boundaries.js'
+import { nodeProcess } from './boundaries.js'
+import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from './constants.js'
+import {
+  type OwnedFileLease,
+  type ParsedOwnedFileLeaseMetadata,
+  tryAcquireOwnedFileLease,
+} from './owned-file-lease.js'
+
+const RESERVATION_SUFFIX = '.wdio-reserve'
+const ARTIFACT_RESERVATION_HEARTBEAT_MS = 1_000
+const ignoreFileError = (): undefined => undefined
+
+interface ArtifactLeasePayload {
+  outputPath: string
+  temporaryPath?: string
+}
+
+interface ArtifactReservation {
+  lease: OwnedFileLease<ArtifactLeasePayload>
+  outputPath: string
+  temporaryPath: string
+}
+
+export interface AtomicArtifactOptions {
+  desiredPath: string
+  produce: (temporaryPath: string) => Promise<boolean>
+  process?: ProcessBoundary
+  validate: (temporaryPath: string) => Promise<boolean>
+  warn: (message: string) => void
+}
+
+export const reserveArtifactPath = async (
+  desiredPath: string,
+): Promise<string> => {
+  await fs.mkdir(path.dirname(desiredPath), { recursive: true })
+  for (let collisionIndex = 1; ; collisionIndex += 1) {
+    const candidatePath = getCollisionPath(desiredPath, collisionIndex)
+    if (await pathExists(candidatePath)) {
+      continue
+    }
+
+    const lease = await acquireArtifactLease(
+      `${candidatePath}${RESERVATION_SUFFIX}`,
+      { outputPath: candidatePath },
+      nodeProcess,
+    )
+    if (!lease) {
+      continue
+    }
+    try {
+      const fileHandle = await fs.open(candidatePath, 'wx')
+      await fileHandle.close()
+      return candidatePath
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error
+      }
+    } finally {
+      await lease.release()
+    }
+  }
+}
+
+export const publishAtomicArtifact = async (
+  options: AtomicArtifactOptions,
+): Promise<string | undefined> => {
+  const processBoundary = options.process ?? nodeProcess
+  const reservation = await acquireArtifactReservation(
+    options.desiredPath,
+    processBoundary,
+  ).catch((error: unknown) => {
+    options.warn(
+      `[WdioPuppeteerVideoService] Failed to reserve artifact ${options.desiredPath}: ${String(error)}`,
+    )
+    return undefined
+  })
+  if (!reservation) {
+    return undefined
+  }
+
+  let published = false
+  try {
+    const produced = await options.produce(reservation.temporaryPath)
+    if (!produced) {
+      return undefined
+    }
+
+    const size = await fs
+      .stat(reservation.temporaryPath)
+      .then((stats) => stats.size)
+      .catch(() => 0)
+    if (size <= 0) {
+      options.warn(
+        `[WdioPuppeteerVideoService] Refusing to publish an empty artifact: ${reservation.temporaryPath}`,
+      )
+      return undefined
+    }
+
+    const valid = await options.validate(reservation.temporaryPath)
+    if (!valid) {
+      options.warn(
+        `[WdioPuppeteerVideoService] Refusing to publish a corrupt artifact: ${reservation.temporaryPath}`,
+      )
+      return undefined
+    }
+
+    if (!(await reservation.lease.isOwner())) {
+      options.warn(
+        `[WdioPuppeteerVideoService] Refusing to publish an artifact after reservation ownership changed: ${reservation.outputPath}`,
+      )
+      return undefined
+    }
+
+    await fs.link(reservation.temporaryPath, reservation.outputPath)
+    published = true
+    await fs.unlink(reservation.temporaryPath).catch((error: unknown) => {
+      options.warn(
+        `[WdioPuppeteerVideoService] Published artifact but could not remove its temporary link ${reservation.temporaryPath}: ${String(error)}`,
+      )
+    })
+    return reservation.outputPath
+  } catch (error) {
+    options.warn(
+      `[WdioPuppeteerVideoService] Failed to publish artifact ${reservation.outputPath}: ${String(error)}`,
+    )
+    return undefined
+  } finally {
+    if (!published) {
+      await fs.unlink(reservation.temporaryPath).catch(() => {
+        /* best-effort partial-output cleanup */
+      })
+    }
+    await reservation.lease.release()
+  }
+}
+
+const acquireArtifactReservation = async (
+  desiredPath: string,
+  processBoundary: ProcessBoundary,
+): Promise<ArtifactReservation> => {
+  await fs.mkdir(path.dirname(desiredPath), { recursive: true })
+  for (let collisionIndex = 1; ; collisionIndex += 1) {
+    const outputPath = getCollisionPath(desiredPath, collisionIndex)
+    if (await pathExists(outputPath)) {
+      continue
+    }
+
+    const reservationPath = `${outputPath}${RESERVATION_SUFFIX}`
+    const temporaryPath = createTemporaryArtifactPath(
+      outputPath,
+      processBoundary.pid,
+    )
+    const lease = await acquireArtifactLease(
+      reservationPath,
+      { outputPath, temporaryPath },
+      processBoundary,
+    )
+    if (!lease) {
+      continue
+    }
+    // The output can appear after the initial existence check but before this
+    // reservation is acquired. Recheck while the lease is held so the caller
+    // never replaces an artifact published by another worker.
+    if (await pathExists(outputPath)) {
+      await lease.release()
+      continue
+    }
+
+    return { lease, outputPath, temporaryPath }
+  }
+}
+
+const isTemporaryPathForOutput = (
+  temporaryPath: string,
+  outputPath: string,
+): boolean => {
+  const temporary = path.parse(temporaryPath)
+  const output = path.parse(outputPath)
+  return (
+    temporary.dir === output.dir &&
+    temporary.ext === output.ext &&
+    temporary.name.startsWith(`.${output.name}.wdio-`)
+  )
+}
+
+const createTemporaryArtifactPath = (
+  outputPath: string,
+  processId: number,
+): string => {
+  const parsed = path.parse(outputPath)
+  return path.join(
+    parsed.dir,
+    `.${parsed.name}.wdio-${processId.toString()}-${randomUUID()}${parsed.ext}`,
+  )
+}
+
+const acquireArtifactLease = async (
+  reservationPath: string,
+  payload: ArtifactLeasePayload,
+  processBoundary: ProcessBoundary,
+): Promise<OwnedFileLease<ArtifactLeasePayload> | undefined> => {
+  return tryAcquireOwnedFileLease(
+    {
+      filePath: reservationPath,
+      heartbeatIntervalMs: ARTIFACT_RESERVATION_HEARTBEAT_MS,
+      invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
+      onReclaimed: async (metadata) => {
+        await cleanupAbandonedArtifact(metadata, payload.outputPath)
+      },
+      payload,
+    },
+    { process: processBoundary },
+  )
+}
+
+const cleanupAbandonedArtifact = async (
+  metadata: ParsedOwnedFileLeaseMetadata | undefined,
+  expectedOutputPath: string,
+): Promise<void> => {
+  const payload = parseArtifactLeasePayload(metadata?.payload)
+  if (
+    !payload?.temporaryPath ||
+    payload.outputPath !== expectedOutputPath ||
+    !isTemporaryPathForOutput(payload.temporaryPath, payload.outputPath)
+  ) {
+    return
+  }
+  await fs.unlink(payload.temporaryPath).catch(ignoreFileError)
+}
+
+const parseArtifactLeasePayload = (
+  value: unknown,
+): ArtifactLeasePayload | undefined => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined
+  }
+  const payload = value as Record<string, unknown>
+  if (typeof payload.outputPath !== 'string') {
+    return undefined
+  }
+  if (
+    payload.temporaryPath !== undefined &&
+    typeof payload.temporaryPath !== 'string'
+  ) {
+    return undefined
+  }
+  return {
+    outputPath: payload.outputPath,
+    ...(payload.temporaryPath === undefined
+      ? {}
+      : { temporaryPath: payload.temporaryPath }),
+  }
+}
+
+const getCollisionPath = (
+  desiredPath: string,
+  collisionIndex: number,
+): string => {
+  if (collisionIndex === 1) {
+    return desiredPath
+  }
+
+  const parsed = path.parse(desiredPath)
+  const partMatch = /^(.*)(_part\d+)$/.exec(parsed.name)
+  const baseName = partMatch?.[1] ?? parsed.name
+  const partSuffix = partMatch?.[2] ?? ''
+  return path.join(
+    parsed.dir,
+    `${baseName}_run${collisionIndex.toString()}${partSuffix}${parsed.ext}`,
+  )
+}
+
+const pathExists = async (filePath: string): Promise<boolean> => {
+  return fs
+    .stat(filePath)
+    .then(() => true)
+    .catch(() => false)
+}

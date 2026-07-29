@@ -4,10 +4,12 @@ import {
   FFMPEG_CHECK_TIMEOUT_MS,
   MP4_DIRECT_PROBE_TIMEOUT_MS,
 } from './constants.js'
+import { Utf8TailBuffer } from './utf8-tail-buffer.js'
 
 const require = createRequire(import.meta.url)
 
 interface ProbeProcessLike {
+  stdout?: NodeJS.ReadableStream | null
   stderr?: NodeJS.ReadableStream | null
   on(event: 'close', listener: (code: number | null) => void): this
   on(event: 'error', listener: (error: Error) => void): this
@@ -104,6 +106,50 @@ export const resolveAvailableFfmpegPath = async (
   return undefined
 }
 
+export const readFfmpegVersion = async (
+  ffmpegPath: string,
+  spawnProcess: SpawnProbeProcess = (command, args) =>
+    spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }),
+): Promise<string | undefined> => {
+  return await new Promise<string | undefined>((resolve) => {
+    const proc = spawnProcess(ffmpegPath, ['-version'])
+    let stdout = ''
+    let settled = false
+    const settle = (version: string | undefined): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      resolve(version)
+    }
+    const timer = setTimeout(() => {
+      proc.kill()
+      settle(undefined)
+    }, FFMPEG_CHECK_TIMEOUT_MS)
+
+    proc.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+    proc.on('error', () => {
+      clearTimeout(timer)
+      settle(undefined)
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        settle(undefined)
+        return
+      }
+      const firstLine = stdout.split(/\r?\n/u)[0]?.trim()
+      const match = firstLine?.match(/^ffmpeg version\s+(\S+)/iu)
+      settle(match?.[1])
+    })
+  })
+}
+
 const spawnDirectMp4ProbeProcess: SpawnProbeProcess = (
   ffmpegPath,
   args,
@@ -145,7 +191,7 @@ export const probeDirectMp4Support = async (
 
   return await new Promise<boolean>((resolve) => {
     const proc = spawnProcess(ffmpegPath, args)
-    let stderr = ''
+    const stderr = new Utf8TailBuffer(8_192)
     let settled = false
     const settle = (value: boolean) => {
       if (settled) {
@@ -162,8 +208,7 @@ export const probeDirectMp4Support = async (
     }, MP4_DIRECT_PROBE_TIMEOUT_MS)
 
     proc.stderr?.on('data', (chunk) => {
-      const next = stderr + chunk.toString('utf8')
-      stderr = next.length > 8_192 ? next.slice(-8_192) : next
+      stderr.append(chunk)
     })
 
     proc.on('error', () => {
@@ -178,7 +223,7 @@ export const probeDirectMp4Support = async (
         return
       }
 
-      const details = stderr.trim()
+      const details = stderr.finish().trim()
       if (details.length > 0) {
         options?.onProbeFailure?.(details)
       }

@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const expectVideos = !['0', 'false', 'no'].includes(
@@ -15,6 +17,7 @@ const expectedTestTitles = [
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: ['./jasmine/specs/**/*.spec.ts'],
   maxInstances: 1,
@@ -38,24 +41,42 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 3,
   services: [
     [
-      WdioPuppeteerVideoService,
+      videoServiceModulePath,
       {
         outputDir: resultsDir,
-        saveAllVideos: true,
-        videoWidth: 1280,
-        videoHeight: 720,
-        outputFormat: 'mp4',
-        transcode: {
-          enabled: true,
+        recording: {
+          retain: 'all',
         },
-        mergeSegments: {
-          enabled: false,
+        capture: {
+          viewport: { width: 1280, height: 720 },
         },
+        processing: {
+          format: 'mp4',
+          timing: 'after-test',
+          transcode: {
+            enabled: true,
+          },
+          merge: {
+            enabled: false,
+          },
+        },
+        integrations: { allure: { attach: 'retained' } },
       },
     ],
   ],
   framework: 'jasmine',
-  reporters: ['spec'],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   jasmineOpts: {
     defaultTimeoutInterval: 60000,
   },
@@ -68,6 +89,7 @@ export const config: WebdriverIO.Config = {
       expectedTitles: expectedTestTitles,
       expectVideos,
       fileNameStyle: 'test',
+      expectedCodec: 'h264',
       runLabel: 'jasmine',
     })
   },

@@ -4,16 +4,32 @@ const pauseForRecording = async (ms = 1200) => {
 
 describe('Video Recording Service E2E Verification - Long Journey', () => {
   it('should handle viewport resizing', async () => {
-    await browser.url('https://the-internet.herokuapp.com/')
+    await browser.url('/')
     await browser.setWindowSize(500, 600)
     await pauseForRecording(900)
     await browser.setWindowSize(1200, 800)
     await pauseForRecording(900)
   })
 
+  it('should capture a deterministic animation', async () => {
+    await browser.url('/animation')
+    await browser.waitUntil(
+      async () => {
+        return (
+          (await $('body').getAttribute('data-animation-state')) === 'complete'
+        )
+      },
+      {
+        timeout: 5_000,
+        timeoutMsg: 'Expected fixture animation to complete',
+      },
+    )
+    await expect($('#animation-status')).toHaveText('Animation complete')
+  })
+
   it('should record a longer multi-step journey', async () => {
-    await browser.url('https://the-internet.herokuapp.com/')
-    await expect(browser).toHaveTitle('The Internet')
+    await browser.url('/')
+    await expect(browser).toHaveTitle('Video Fixture Lab')
     await pauseForRecording(1500)
 
     const dynamicLoadingLink = await $('=Dynamic Loading').getElement()
@@ -43,9 +59,7 @@ describe('Video Recording Service E2E Verification - Long Journey', () => {
 
     const checkboxesLink = await $('=Checkboxes').getElement()
     await checkboxesLink.click()
-    const secondCheckbox = await $(
-      '#checkboxes input:nth-of-type(2)',
-    ).getElement()
+    const secondCheckbox = await $('#checkbox-2').getElement()
     await secondCheckbox.click()
     await expect(secondCheckbox).not.toBeSelected()
     await pauseForRecording(1800)

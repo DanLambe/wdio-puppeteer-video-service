@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 
 const mergeSegmentsEnabled = ['1', 'true', 'yes'].includes(
@@ -25,8 +27,12 @@ const maxInstances =
 const expectedTestTitles = [
   'should record a simple navigation',
   'should handle iframe switching',
+  'should handle a cross-origin iframe',
   'should handle multiple tabs and closing tabs',
+  'should tolerate a browser target closing itself',
+  'should handle alert, confirm, and prompt dialogs',
   'should handle viewport resizing',
+  'should capture a deterministic animation',
   'should record a longer multi-step journey',
 ]
 
@@ -36,6 +42,7 @@ export const config: WebdriverIO.Config = {
   // Runner Configuration
   // ====================
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   //
   // ==================
@@ -73,25 +80,43 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 3,
   services: [
     [
-      WdioPuppeteerVideoService,
+      videoServiceModulePath,
       {
         outputDir: resultsDir,
-        saveAllVideos: true,
-        videoWidth: 1280,
-        videoHeight: 720,
-        outputFormat: 'mp4',
-        transcode: {
-          enabled: true,
+        recording: {
+          retain: 'all',
         },
-        mergeSegments: {
-          enabled: mergeSegmentsEnabled,
-          deleteSegments: true,
+        capture: {
+          viewport: { width: 1280, height: 720 },
         },
+        processing: {
+          format: 'mp4',
+          timing: 'after-test',
+          transcode: {
+            enabled: true,
+          },
+          merge: {
+            enabled: mergeSegmentsEnabled,
+            deleteSegments: true,
+          },
+        },
+        integrations: { allure: { attach: 'retained' } },
       },
     ],
   ],
   framework: 'mocha',
-  reporters: ['spec'],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,
@@ -106,6 +131,7 @@ export const config: WebdriverIO.Config = {
       expectVideos,
       mergeSegmentsEnabled,
       fileNameStyle: 'test',
+      expectedCodec: 'h264',
       runLabel: runMode,
     })
   },

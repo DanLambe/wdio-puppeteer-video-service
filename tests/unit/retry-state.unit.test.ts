@@ -2,11 +2,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildSpecRetryKey,
-  extractPidFromSlotFile,
-  getSpecRetryStateDirPath,
-  getSpecRetryStatePathForCid,
   isProcessAlive,
-  parseGlobalRecordingSlotMetadata,
   resolveGlobalRecordingLockDir,
 } from '../../src/service/retry-state.js'
 
@@ -171,21 +167,6 @@ describe('retry-state helper utilities', () => {
     vi.restoreAllMocks()
   })
 
-  it('builds retry-state paths using custom and default output directories', () => {
-    expect(getSpecRetryStateDirPath('artifacts')).toBe(
-      path.join('artifacts', '.wdio-video-retry-state'),
-    )
-    expect(getSpecRetryStateDirPath(undefined)).toBe(
-      path.join('videos', '.wdio-video-retry-state'),
-    )
-    expect(getSpecRetryStatePathForCid('artifacts', ' 0:1/2 ')).toBe(
-      path.join('artifacts', '.wdio-video-retry-state', '0_1_2.json'),
-    )
-    expect(getSpecRetryStatePathForCid(undefined, '   ')).toBe(
-      path.join('videos', '.wdio-video-retry-state', 'unknown.json'),
-    )
-  })
-
   it('resolves the global recording lock directory with trimmed override support', () => {
     expect(resolveGlobalRecordingLockDir('artifacts', '  ./locks  ')).toBe(
       './locks',
@@ -193,45 +174,6 @@ describe('retry-state helper utilities', () => {
     expect(resolveGlobalRecordingLockDir('artifacts', undefined)).toBe(
       path.join('artifacts', '.wdio-video-global-slots'),
     )
-  })
-
-  it('extracts only valid positive integer pids from slot metadata', () => {
-    expect(extractPidFromSlotFile('')).toBeUndefined()
-    expect(extractPidFromSlotFile('not-json')).toBeUndefined()
-    expect(
-      extractPidFromSlotFile(JSON.stringify({ pid: '123' })),
-    ).toBeUndefined()
-    expect(extractPidFromSlotFile(JSON.stringify({ pid: 0 }))).toBeUndefined()
-    expect(
-      extractPidFromSlotFile(JSON.stringify({ pid: 12.5 })),
-    ).toBeUndefined()
-    expect(extractPidFromSlotFile(JSON.stringify({ pid: 123 }))).toBe(123)
-  })
-
-  it('parses global slot metadata fields when they are valid integers', () => {
-    expect(
-      parseGlobalRecordingSlotMetadata(
-        JSON.stringify({
-          pid: 123,
-          startedAt: 1_000,
-          lastUpdatedAt: 2_000,
-        }),
-      ),
-    ).toEqual({
-      pid: 123,
-      startedAt: 1_000,
-      lastUpdatedAt: 2_000,
-    })
-
-    expect(
-      parseGlobalRecordingSlotMetadata(
-        JSON.stringify({
-          pid: '123',
-          startedAt: 1.5,
-          lastUpdatedAt: 0,
-        }),
-      ),
-    ).toEqual({})
   })
 
   it('treats ESRCH as dead and other process.kill errors as alive', () => {

@@ -2,28 +2,12 @@ import path from 'node:path'
 import {
   DEFAULT_OUTPUT_DIR,
   GLOBAL_RECORDING_SLOT_DIR_NAME,
-  SPEC_RETRY_STATE_DIR_NAME,
 } from './constants.js'
 
 /**
- * Helpers for on-disk retry-state and cross-process recording-slot metadata.
+ * Helpers for retry identity and cross-process recording-slot metadata.
  * These utilities are intentionally stateless and side-effect free.
  */
-
-export const getSpecRetryStateDirPath = (
-  outputDir: string | undefined,
-): string => {
-  return path.join(outputDir || DEFAULT_OUTPUT_DIR, SPEC_RETRY_STATE_DIR_NAME)
-}
-
-export const getSpecRetryStatePathForCid = (
-  outputDir: string | undefined,
-  cid: string,
-): string => {
-  const safeCidToken =
-    cid.trim().replaceAll(/[^a-zA-Z0-9._-]/g, '_') || 'unknown'
-  return path.join(getSpecRetryStateDirPath(outputDir), `${safeCidToken}.json`)
-}
 
 export const buildSpecRetryKey = (
   specs: string[],
@@ -51,42 +35,6 @@ export const resolveGlobalRecordingLockDir = (
     outputDir || DEFAULT_OUTPUT_DIR,
     GLOBAL_RECORDING_SLOT_DIR_NAME,
   )
-}
-
-export const extractPidFromSlotFile = (
-  fileContents: string,
-): number | undefined => {
-  return parseGlobalRecordingSlotMetadata(fileContents)?.pid
-}
-
-export interface GlobalRecordingSlotMetadata {
-  pid?: number
-  startedAt?: number
-  lastUpdatedAt?: number
-}
-
-export const parseGlobalRecordingSlotMetadata = (
-  fileContents: string,
-): GlobalRecordingSlotMetadata | undefined => {
-  if (!fileContents.trim()) {
-    return undefined
-  }
-
-  try {
-    const parsed = JSON.parse(fileContents) as Record<string, unknown>
-    const pid = toPositiveInteger(parsed.pid)
-    const startedAt = toPositiveInteger(parsed.startedAt)
-    const lastUpdatedAt = toPositiveInteger(parsed.lastUpdatedAt)
-
-    return {
-      ...(pid === undefined ? {} : { pid }),
-      ...(startedAt === undefined ? {} : { startedAt }),
-      ...(lastUpdatedAt === undefined ? {} : { lastUpdatedAt }),
-    }
-  } catch {
-    // malformed slot metadata; ignore cleanup to avoid deleting active slots
-    return undefined
-  }
 }
 
 export const isProcessAlive = (pid: number): boolean => {
@@ -282,12 +230,4 @@ const toRecord = (value: unknown): Record<string, unknown> | undefined => {
   }
 
   return value as Record<string, unknown>
-}
-
-const toPositiveInteger = (value: unknown): number | undefined => {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-    return undefined
-  }
-
-  return value
 }

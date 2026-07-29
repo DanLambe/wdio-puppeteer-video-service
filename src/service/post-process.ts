@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { publishAtomicArtifact } from './artifact-integrity.js'
 import type {
   DeferredMergeTask,
   DeferredTranscodeTask,
@@ -21,7 +22,7 @@ export const createDeferredTranscodeTask = (
     deleteOriginal: transcodeOptions.deleteOriginal,
     ...(transcodeOptions.ffmpegArgs === undefined
       ? {}
-      : { ffmpegArgs: transcodeOptions.ffmpegArgs }),
+      : { ffmpegArgs: [...transcodeOptions.ffmpegArgs] }),
   }
 }
 
@@ -53,7 +54,7 @@ export const createDeferredMergeTask = (options: {
           deleteOriginal: transcodeOptions.deleteOriginal,
           ...(transcodeOptions.ffmpegArgs === undefined
             ? {}
-            : { ffmpegArgs: transcodeOptions.ffmpegArgs }),
+            : { ffmpegArgs: [...transcodeOptions.ffmpegArgs] }),
         }
       : undefined
 
@@ -74,7 +75,7 @@ export const buildH264TranscodeArgs = (
   ffmpegArgs: string[] | undefined,
 ): string[] => {
   return [
-    '-y',
+    '-n',
     '-i',
     inputPath,
     '-an',
@@ -94,7 +95,7 @@ export const buildConcatMergeArgs = (
   mergedPath: string,
 ): string[] => {
   return [
-    '-y',
+    '-n',
     '-f',
     'concat',
     '-safe',
@@ -107,6 +108,21 @@ export const buildConcatMergeArgs = (
   ]
 }
 
+export const buildMediaValidationArgs = (inputPath: string): string[] => {
+  return [
+    '-v',
+    'error',
+    '-xerror',
+    '-i',
+    inputPath,
+    '-map',
+    '0:v:0',
+    '-f',
+    'null',
+    '-',
+  ]
+}
+
 export const mergeSegmentPathsToOutput = async (options: {
   deleteSegments: boolean
   ffmpegOperation: string
@@ -116,7 +132,7 @@ export const mergeSegmentPathsToOutput = async (options: {
   segmentPaths: string[]
   warn: (message: string) => void
   writeFailureContext: string
-}): Promise<boolean> => {
+}): Promise<string | undefined> => {
   const {
     deleteSegments,
     ffmpegOperation,
@@ -128,55 +144,42 @@ export const mergeSegmentPathsToOutput = async (options: {
     writeFailureContext,
   } = options
   if (segmentPaths.length === 0) {
-    return false
+    return undefined
   }
 
-  await fs.unlink(mergedPath).catch(() => {
-    /* may not exist yet */
+  const publishedPath = await publishAtomicArtifact({
+    desiredPath: mergedPath,
+    produce: async (temporaryPath) => {
+      if (segmentPaths.length === 1) {
+        const singleSegmentPath = segmentPaths[0]
+        if (!singleSegmentPath) {
+          return false
+        }
+        return copySingleSegment(singleSegmentPath, temporaryPath)
+      }
+
+      return produceMergedArtifact({
+        concatListPath: path.join(
+          outputDir,
+          `${path.parse(mergedPath).name}_concat_${randomUUID()}.txt`,
+        ),
+        ffmpegOperation,
+        runFfmpeg,
+        segmentPaths,
+        temporaryPath,
+        warn,
+        writeFailureContext,
+      })
+    },
+    validate: (temporaryPath) =>
+      runFfmpeg(
+        buildMediaValidationArgs(temporaryPath),
+        `${ffmpegOperation} validation`,
+      ),
+    warn,
   })
-
-  if (segmentPaths.length === 1) {
-    const singleSegmentPath = segmentPaths[0]
-    if (!singleSegmentPath) {
-      return false
-    }
-
-    return copyOrMoveSingleSegment(
-      singleSegmentPath,
-      mergedPath,
-      deleteSegments,
-    )
-  }
-
-  const concatListPath = path.join(
-    outputDir,
-    `${path.parse(mergedPath).name}_concat_${randomUUID()}.txt`,
-  )
-  const wroteConcatList = await fs
-    .writeFile(concatListPath, buildConcatList(segmentPaths), 'utf8')
-    .then(() => true)
-    .catch((error: unknown) => {
-      warn(
-        `[WdioPuppeteerVideoService] Failed to write ${writeFailureContext} input list: ${String(error)}`,
-      )
-      return false
-    })
-  if (!wroteConcatList) {
-    return false
-  }
-
-  const merged = await runFfmpeg(
-    buildConcatMergeArgs(concatListPath, mergedPath),
-    ffmpegOperation,
-  )
-  await fs.unlink(concatListPath).catch(() => {
-    /* best-effort cleanup */
-  })
-  if (!merged) {
-    await fs.unlink(mergedPath).catch(() => {
-      /* best-effort partial-output cleanup */
-    })
-    return false
+  if (!publishedPath) {
+    return undefined
   }
 
   if (deleteSegments) {
@@ -189,27 +192,55 @@ export const mergeSegmentPathsToOutput = async (options: {
     )
   }
 
-  return true
+  return publishedPath
 }
 
-const copyOrMoveSingleSegment = async (
+const copySingleSegment = async (
   singleSegmentPath: string,
-  mergedPath: string,
-  deleteSegments: boolean,
+  temporaryPath: string,
 ): Promise<boolean> => {
   try {
-    if (deleteSegments) {
-      await fs.rename(singleSegmentPath, mergedPath).catch(async () => {
-        await fs.copyFile(singleSegmentPath, mergedPath)
-        await fs.unlink(singleSegmentPath).catch(() => {
-          /* best-effort cleanup */
-        })
-      })
-    } else {
-      await fs.copyFile(singleSegmentPath, mergedPath)
-    }
+    await fs.copyFile(singleSegmentPath, temporaryPath)
     return true
   } catch {
     return false
+  }
+}
+
+const produceMergedArtifact = async (options: {
+  concatListPath: string
+  ffmpegOperation: string
+  runFfmpeg: (args: string[], operation: string) => Promise<boolean>
+  segmentPaths: string[]
+  temporaryPath: string
+  warn: (message: string) => void
+  writeFailureContext: string
+}): Promise<boolean> => {
+  const wroteConcatList = await fs
+    .writeFile(
+      options.concatListPath,
+      buildConcatList(options.segmentPaths),
+      'utf8',
+    )
+    .then(() => true)
+    .catch((error: unknown) => {
+      options.warn(
+        `[WdioPuppeteerVideoService] Failed to write ${options.writeFailureContext} input list: ${String(error)}`,
+      )
+      return false
+    })
+  if (!wroteConcatList) {
+    return false
+  }
+
+  try {
+    return await options.runFfmpeg(
+      buildConcatMergeArgs(options.concatListPath, options.temporaryPath),
+      options.ffmpegOperation,
+    )
+  } finally {
+    await fs.unlink(options.concatListPath).catch(() => {
+      /* best-effort cleanup */
+    })
   }
 }

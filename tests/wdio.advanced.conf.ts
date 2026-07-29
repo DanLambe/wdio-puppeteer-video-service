@@ -1,6 +1,10 @@
+import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
-import WdioPuppeteerVideoService from '../src/index.js'
+import WdioPuppeteerVideoReporter from '../src/reporter.js'
+import type { WdioPuppeteerVideoServiceOptions } from '../src/types.js'
+import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
+import { videoServiceModulePath } from './utils/service-module.js'
 import {
   assertVideoArtifacts,
   listVideoArtifacts,
@@ -17,6 +21,9 @@ type AdvancedMode =
   | 'deferred-merge'
   | 'include-spec'
   | 'exclude-spec'
+  | 'retention'
+  | 'global-concurrency'
+  | 'ffmpeg-failure'
 
 const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
@@ -47,6 +54,15 @@ const toMode = (value: string | undefined): AdvancedMode => {
   if (normalized === 'exclude-spec') {
     return 'exclude-spec'
   }
+  if (normalized === 'retention') {
+    return 'retention'
+  }
+  if (normalized === 'global-concurrency') {
+    return 'global-concurrency'
+  }
+  if (normalized === 'ffmpeg-failure') {
+    return 'ffmpeg-failure'
+  }
   return 'retry'
 }
 
@@ -54,10 +70,31 @@ const mode = toMode(process.env.WDIO_ADVANCED_MODE)
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
+const resolvePositiveInteger = (
+  name: string,
+  value: string | undefined,
+  fallback: number,
+): number => {
+  if (value === undefined) {
+    return fallback
+  }
+
+  const resolved = Number(value)
+  if (!Number.isInteger(resolved) || resolved < 1) {
+    throw new TypeError(`${name} must be a positive integer`)
+  }
+  return resolved
+}
+const deferredPostProcessWorkers = resolvePositiveInteger(
+  'WDIO_POST_PROCESS_WORKERS',
+  process.env.WDIO_POST_PROCESS_WORKERS,
+  2,
+)
 const resultsDir = path.resolve(
   process.env.WDIO_RESULTS_DIR ||
     path.join('tests/results', `advanced-${mode}`),
 )
+const globalRecordingLockDir = path.join(resultsDir, '.global-recording-locks')
 
 const modeSpecs: Record<AdvancedMode, string[]> = {
   retry: [path.resolve('tests/advanced/specs/retry-recording.spec.ts')],
@@ -84,6 +121,14 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
   'exclude-spec': [
     path.resolve('tests/advanced/specs/filter-spec-recording.spec.ts'),
   ],
+  retention: [path.resolve('tests/advanced/specs/retention.spec.ts')],
+  'global-concurrency': [
+    path.resolve('tests/advanced/specs/global-concurrency-a.spec.ts'),
+    path.resolve('tests/advanced/specs/global-concurrency-b.spec.ts'),
+  ],
+  'ffmpeg-failure': [
+    path.resolve('tests/advanced/specs/ffmpeg-failure.spec.ts'),
+  ],
 }
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
@@ -102,124 +147,188 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   'session-full-style': ['session full style placeholder'],
   'deferred-merge': [
     'should produce a deferred merged artifact for a multi-window flow',
+    'should process an independent deferred merge within the worker limit',
   ],
   'include-spec': ['should execute when spec filter mode is configured'],
   'exclude-spec': [],
+  retention: ['should retain an intentionally failed recording'],
+  'global-concurrency': [
+    'should record global concurrency worker A',
+    'should record global concurrency worker B',
+  ],
+  'ffmpeg-failure': [
+    'should preserve original media when FFmpeg transcoding fails',
+  ],
 }
 
 const fileStyleTitleToken =
   'unique_title_token_should_not_appear_for_session_style_modes'
 
-type ServiceOptions = Record<string, unknown>
+type ServiceOptions = WdioPuppeteerVideoServiceOptions
 
 const defaultServiceOptions: ServiceOptions = {
   outputDir: resultsDir,
-  saveAllVideos: true,
-  maxConcurrentRecordings: 1,
-  outputFormat: 'mp4',
-  transcode: {
-    enabled: true,
+  recording: {
+    retain: 'all',
   },
-  mergeSegments: {
-    enabled: false,
+  concurrency: {
+    maxRecordingsPerProcess: 1,
+  },
+  processing: {
+    format: 'mp4',
+    timing: 'after-test',
+    transcode: {
+      enabled: true,
+    },
+    merge: {
+      enabled: false,
+    },
   },
 }
 
 const createServiceOptions = (overrides: ServiceOptions): ServiceOptions => {
-  const transcodeOverrides = overrides.transcode as ServiceOptions | undefined
-  const mergeSegmentOverrides = overrides.mergeSegments as
-    | ServiceOptions
-    | undefined
-
   return {
     ...defaultServiceOptions,
     ...overrides,
-    transcode: {
-      ...(defaultServiceOptions.transcode as ServiceOptions),
-      ...transcodeOverrides,
+    recording: {
+      ...defaultServiceOptions.recording,
+      ...overrides.recording,
+      filters: {
+        ...defaultServiceOptions.recording?.filters,
+        ...overrides.recording?.filters,
+      },
     },
-    mergeSegments: {
-      ...(defaultServiceOptions.mergeSegments as ServiceOptions),
-      ...mergeSegmentOverrides,
+    concurrency: {
+      ...defaultServiceOptions.concurrency,
+      ...overrides.concurrency,
+    },
+    processing: {
+      ...defaultServiceOptions.processing,
+      ...overrides.processing,
+      transcode: {
+        ...defaultServiceOptions.processing?.transcode,
+        ...overrides.processing?.transcode,
+      },
+      merge: {
+        ...defaultServiceOptions.processing?.merge,
+        ...overrides.processing?.merge,
+      },
+    },
+    artifacts: {
+      ...defaultServiceOptions.artifacts,
+      ...overrides.artifacts,
+      naming: {
+        ...defaultServiceOptions.artifacts?.naming,
+        ...overrides.artifacts?.naming,
+      },
     },
   }
 }
 
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
-    saveAllVideos: false,
-    recordOnRetries: true,
+    recording: { attempts: 'retries', retain: 'retries' },
+    integrations: { allure: { attach: 'retained' } },
   }),
   'spec-file-retry': createServiceOptions({
-    saveAllVideos: false,
-    recordOnRetries: true,
+    recording: { attempts: 'retries', retain: 'retries' },
+    integrations: { allure: { attach: 'retained' } },
   }),
   'spec-level': createServiceOptions({
-    specLevelRecording: true,
-    skipViewPortKickoff: true,
+    recording: { scope: 'spec' },
+    capture: { framePriming: false },
   }),
   'no-segment': createServiceOptions({
-    segmentOnWindowSwitch: false,
+    recording: { windowChanges: 'ignore' },
   }),
   'test-full-style': createServiceOptions({
-    fileNameStyle: 'testFull',
+    artifacts: { naming: { style: 'test-full' } },
   }),
   'session-style': createServiceOptions({
-    fileNameStyle: 'session',
+    artifacts: { naming: { style: 'session' } },
   }),
   'session-full-style': createServiceOptions({
-    fileNameStyle: 'sessionFull',
+    artifacts: { naming: { style: 'session-full' } },
   }),
   'deferred-merge': createServiceOptions({
-    postProcessMode: 'deferred',
-    mergeSegments: {
-      enabled: true,
-      deleteSegments: true,
+    concurrency: {
+      maxPostProcessesPerProcess: deferredPostProcessWorkers,
+    },
+    processing: {
+      timing: 'after-worker',
+      merge: { enabled: true, deleteSegments: true },
     },
   }),
   'include-spec': createServiceOptions({
-    includeSpecPatterns: ['*filter-spec-recording*'],
+    recording: {
+      filters: { includeSpecs: ['*filter-spec-recording*'] },
+    },
   }),
   'exclude-spec': createServiceOptions({
-    excludeSpecPatterns: ['*filter-spec-recording*'],
+    recording: {
+      filters: { excludeSpecs: ['*filter-spec-recording*'] },
+    },
+  }),
+  retention: createServiceOptions({
+    recording: { retain: 'failures' },
+    integrations: { allure: {} },
+  }),
+  'global-concurrency': createServiceOptions({
+    concurrency: {
+      maxRecordingsGlobal: 1,
+      maxPostProcessesPerProcess: 1,
+      maxPostProcessesGlobal: 1,
+      lockDir: globalRecordingLockDir,
+    },
+  }),
+  'ffmpeg-failure': createServiceOptions({
+    processing: {
+      transcode: {
+        enabled: true,
+        ffmpegArgs: ['-this-option-does-not-exist'],
+      },
+    },
   }),
 }
 
 const assertRetryMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] retry mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].includes('_retry1')) {
+  if (!artifactName.includes('_retry1')) {
     throw new Error(
-      `[wdio:e2e:advanced] retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] retry mode expected retry token in artifact name, got ${artifactName}`,
     )
   }
 }
 
 const assertSpecFileRetryMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] spec-file-retry mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].includes('_retry1')) {
+  if (!artifactName.includes('_retry1')) {
     throw new Error(
-      `[wdio:e2e:advanced] spec-file-retry mode expected retry token in artifact name, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] spec-file-retry mode expected retry token in artifact name, got ${artifactName}`,
     )
   }
 }
 
 const assertSpecLevelMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const [artifactName] = artifactNames
+  if (artifactNames.length !== 1 || artifactName === undefined) {
     throw new Error(
       `[wdio:e2e:advanced] spec-level mode expected exactly 1 artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
-  if (!artifactNames[0].startsWith('spec_level_recording_spec_')) {
+  if (!artifactName.startsWith('spec_level_recording_spec_')) {
     throw new Error(
-      `[wdio:e2e:advanced] spec-level artifact should use spec token prefix, got ${artifactNames[0]}`,
+      `[wdio:e2e:advanced] spec-level artifact should use spec token prefix, got ${artifactName}`,
     )
   }
 }
@@ -290,9 +399,9 @@ const assertSessionFullStyleMode = (artifactNames: string[]): void => {
 }
 
 const assertDeferredMergeMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  if (artifactNames.length !== 2) {
     throw new Error(
-      `[wdio:e2e:advanced] deferred-merge mode expected exactly 1 merged artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+      `[wdio:e2e:advanced] deferred-merge mode expected exactly 2 merged artifacts but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
   const hasPartSegment = artifactNames.some((fileName) =>
@@ -321,7 +430,59 @@ const assertExcludeSpecMode = (artifactNames: string[]): void => {
   }
 }
 
-const modeAssertions: Record<AdvancedMode, (names: string[]) => void> = {
+const assertRetentionMode = (artifactNames: string[]): void => {
+  if (artifactNames.length !== 1) {
+    throw new Error(
+      `[wdio:e2e:advanced] retention mode expected only the failed-test artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+    )
+  }
+}
+
+const assertGlobalConcurrencyMode = async (
+  artifactNames: string[],
+): Promise<void> => {
+  if (artifactNames.length !== 2) {
+    throw new Error(
+      `[wdio:e2e:advanced] global-concurrency mode expected 2 artifacts but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+    )
+  }
+
+  const lockEntries = await readdir(globalRecordingLockDir).catch(() => [])
+  const leakedLocks = lockEntries.filter((entry) => entry.endsWith('.lock'))
+  if (leakedLocks.length > 0) {
+    throw new Error(
+      `[wdio:e2e:advanced] global-concurrency mode leaked recording locks: ${leakedLocks.join(', ')}`,
+    )
+  }
+  const postProcessLockEntries = await readdir(
+    path.join(globalRecordingLockDir, 'post-process'),
+  ).catch(() => [])
+  const leakedPostProcessLocks = postProcessLockEntries.filter((entry) =>
+    entry.endsWith('.lock'),
+  )
+  if (leakedPostProcessLocks.length > 0) {
+    throw new Error(
+      `[wdio:e2e:advanced] global-concurrency mode leaked post-processing locks: ${leakedPostProcessLocks.join(', ')}`,
+    )
+  }
+}
+
+const assertFfmpegFailureMode = (artifactNames: string[]): void => {
+  if (
+    artifactNames.length !== 1 ||
+    !artifactNames[0]?.endsWith('.webm') ||
+    artifactNames.some((fileName) => fileName.endsWith('.mp4'))
+  ) {
+    throw new Error(
+      `[wdio:e2e:advanced] ffmpeg-failure mode expected one preserved WebM and no MP4, got ${artifactNames.join(', ')}`,
+    )
+  }
+}
+
+const modeAssertions: Record<
+  AdvancedMode,
+  (names: string[]) => void | Promise<void>
+> = {
   retry: assertRetryMode,
   'spec-file-retry': assertSpecFileRetryMode,
   'spec-level': assertSpecLevelMode,
@@ -332,20 +493,24 @@ const modeAssertions: Record<AdvancedMode, (names: string[]) => void> = {
   'deferred-merge': assertDeferredMergeMode,
   'include-spec': assertIncludeSpecMode,
   'exclude-spec': assertExcludeSpecMode,
+  retention: assertRetentionMode,
+  'global-concurrency': assertGlobalConcurrencyMode,
+  'ffmpeg-failure': assertFfmpegFailureMode,
 }
 
 const assertAdvancedModeExpectations = async (
   activeMode: AdvancedMode,
   artifactNames: string[],
 ): Promise<void> => {
-  modeAssertions[activeMode](artifactNames)
+  await modeAssertions[activeMode](artifactNames)
 }
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
+  baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: modeSpecs[mode],
-  maxInstances: 1,
+  maxInstances: mode === 'global-concurrency' ? 2 : 1,
   capabilities: [
     {
       browserName: 'chrome',
@@ -367,12 +532,24 @@ export const config: WebdriverIO.Config = {
   specFileRetries: mode === 'spec-file-retry' ? 1 : 0,
   specFileRetriesDelay: 0,
   specFileRetriesDeferred: false,
-  services: [[WdioPuppeteerVideoService, serviceOptionsByMode[mode]]],
+  services: [[videoServiceModulePath, serviceOptionsByMode[mode]]],
   framework: 'mocha',
-  reporters: ['spec'],
+  reporters: [
+    'spec',
+    [WdioPuppeteerVideoReporter, { outputDir: resultsDir }],
+    [
+      'allure',
+      {
+        outputDir: path.join(resultsDir, 'allure-results'),
+        disableWebdriverStepsReporting: true,
+        disableWebdriverScreenshotsReporting: true,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: 'bdd',
     timeout: 60000,
+    retries: mode === 'retry' ? 1 : 0,
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)
@@ -398,6 +575,7 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos: modeExpectsNoVideos,
       mergeSegmentsEnabled: mergedArtifactsExpected,
       fileNameStyle,
+      expectedCodec: mode === 'ffmpeg-failure' ? 'vp9' : 'h264',
       runLabel: `advanced-${mode}`,
     })
 

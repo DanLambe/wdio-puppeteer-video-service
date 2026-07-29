@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import type {
-  WdioPuppeteerVideoServiceFileNameOverflowStrategy,
-  WdioPuppeteerVideoServiceFileNameStyle,
+  ArtifactNameOverflowStrategy,
+  ArtifactNameStyle,
 } from './types.js'
 
 interface TestLikeRecord {
@@ -42,8 +42,8 @@ export interface SlugMetadata {
 
 interface BuildTestSlugOptions {
   maxSlugLength: number
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle
-  fileNameOverflowStrategy: WdioPuppeteerVideoServiceFileNameOverflowStrategy
+  fileNameStyle: ArtifactNameStyle
+  fileNameOverflowStrategy: ArtifactNameOverflowStrategy
   sessionIdToken: string
   sessionIdFullToken: string
 }
@@ -65,7 +65,7 @@ export const buildTestSlugFromMetadata = (
 ): string => {
   if (
     options.fileNameStyle === 'session' ||
-    options.fileNameStyle === 'sessionFull'
+    options.fileNameStyle === 'session-full'
   ) {
     return buildSessionOnlySlug(
       options.fileNameStyle,
@@ -119,7 +119,7 @@ export const buildTestSlugFromMetadata = (
 export const collectSlugMetadata = (
   test: Frameworks.Test,
   context: unknown,
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle = 'test',
+  fileNameStyle: ArtifactNameStyle = 'test',
 ): SlugMetadata => {
   const testRecord = test as unknown as TestLikeRecord
   const contextRecords = collectContextRecords(context)
@@ -239,12 +239,12 @@ export const buildFullSessionIdToken = (
 }
 
 const buildSessionOnlySlug = (
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle,
+  fileNameStyle: ArtifactNameStyle,
   retryToken: string,
   options: BuildTestSlugOptions,
 ): string => {
   const preferredSessionToken =
-    fileNameStyle === 'sessionFull'
+    fileNameStyle === 'session-full'
       ? options.sessionIdFullToken || options.sessionIdToken || 'session'
       : options.sessionIdToken || options.sessionIdFullToken || 'session'
   const sessionToken =
@@ -332,9 +332,9 @@ const buildFileCandidates = (
 const buildNameCandidates = (
   testRecord: TestLikeRecord,
   contextRecords: ContextRecords,
-  fileNameStyle: WdioPuppeteerVideoServiceFileNameStyle,
+  fileNameStyle: ArtifactNameStyle,
 ): Array<string | undefined> => {
-  const preferFullTestName = fileNameStyle === 'testFull'
+  const preferFullTestName = fileNameStyle === 'test-full'
 
   return [
     ...buildRecordNameCandidates(testRecord, preferFullTestName),

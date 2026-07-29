@@ -37,6 +37,20 @@ describe('E2E child process helper', () => {
     await expect(result).rejects.toThrow('failed: 2')
   })
 
+  it('accepts an explicitly expected non-zero exit', async () => {
+    const { child } = createChildProcess()
+    const result = waitForChildProcess(
+      child,
+      (code) => `failed: ${code}`,
+      100,
+      [1],
+    )
+
+    child.emit('close', 1)
+
+    await expect(result).resolves.toBeUndefined()
+  })
+
   it('kills and rejects a child that exceeds its timeout', async () => {
     vi.useFakeTimers()
     const { child, kill } = createChildProcess()
