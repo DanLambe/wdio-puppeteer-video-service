@@ -8,10 +8,7 @@ import {
   nodeFileSystem,
   type ProcessBoundary,
 } from '../../src/service/boundaries.js'
-import {
-  GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS,
-  GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
-} from '../../src/service/constants.js'
+import { OWNED_FILE_LEASE_SCHEMA_VERSION } from '../../src/service/owned-file-lease.js'
 import {
   createInProcessRecordingSlotState,
   PostProcessSlotScheduler,
@@ -235,10 +232,12 @@ describe('recording slot scheduler', () => {
         await fs.readFile(slotPath ?? '', 'utf8'),
       ) as Record<string, unknown>
       expect(metadata).toMatchObject({
-        ownerId: expect.any(String),
+        schemaVersion: OWNED_FILE_LEASE_SCHEMA_VERSION,
+        ownerToken: expect.any(String),
         pid: 12345,
-        startedAt: 100,
-        lastUpdatedAt: 100,
+        createdAt: 100,
+        updatedAt: 100,
+        payload: { resource: 'recording' },
       })
 
       await scheduler.release()
@@ -252,6 +251,13 @@ describe('recording slot scheduler', () => {
     const unlink = vi.fn(async () => {})
     const fileHandle = {
       close,
+      stat: async () => ({
+        birthtimeMs: 1,
+        dev: 1,
+        ino: 1,
+        mtimeMs: 1,
+        size: 0,
+      }),
       truncate: async () => {},
       write: async () => ({ bytesWritten: 0 }),
     } as unknown as FileHandle
@@ -262,6 +268,7 @@ describe('recording slot scheduler', () => {
         fileSystem: {
           ...nodeFileSystem,
           openExclusive: async () => fileHandle,
+          stat: async () => ({ dev: 1, ino: 1, mtimeMs: 1, size: 0 }),
           unlink,
         },
       },
@@ -288,18 +295,17 @@ describe('recording slot scheduler', () => {
         slotPath,
         JSON.stringify({ pid: 99, lastUpdatedAt: clock.now() }),
       )
-      await scheduler.cleanupStaleGlobalSlot(slotPath)
+      await expect(scheduler.openOwnedGlobalSlot(slotPath)).resolves.toBe(false)
       await expect(fs.stat(slotPath)).resolves.toBeDefined()
 
       await fs.writeFile(
         slotPath,
         JSON.stringify({
           pid: 99,
-          lastUpdatedAt:
-            clock.now() - GLOBAL_RECORDING_SLOT_ACTIVE_STALE_MS - 1,
+          lastUpdatedAt: 1,
         }),
       )
-      await scheduler.cleanupStaleGlobalSlot(slotPath)
+      await expect(scheduler.openOwnedGlobalSlot(slotPath)).resolves.toBe(false)
       await expect(fs.stat(slotPath)).resolves.toBeDefined()
     })
   })
@@ -340,35 +346,10 @@ describe('recording slot scheduler', () => {
         process: createProcess(() => false),
       })
 
-      await scheduler.cleanupStaleGlobalSlot(slotPath)
+      await expect(scheduler.openOwnedGlobalSlot(slotPath)).resolves.toBe(true)
+      await scheduler.release()
       await expect(fs.stat(slotPath)).rejects.toThrow()
     })
-  })
-
-  it('honors the invalid-slot grace window through the clock boundary', async () => {
-    const clock = createClock(10_000)
-    const scheduler = new RecordingSlotScheduler({}, noopLogger, { clock })
-
-    expect(
-      scheduler.shouldCleanupInvalidGlobalSlot(
-        clock.now() - GLOBAL_RECORDING_SLOT_INVALID_STALE_MS + 1,
-      ),
-    ).toBe(false)
-    expect(
-      scheduler.shouldCleanupInvalidGlobalSlot(
-        clock.now() - GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
-      ),
-    ).toBe(true)
-  })
-
-  it('resolves heartbeat, start, and filesystem timestamps in precedence order', () => {
-    const scheduler = new RecordingSlotScheduler({}, noopLogger)
-
-    expect(
-      scheduler.resolveLastUpdatedAt({ lastUpdatedAt: 30, startedAt: 20 }, 10),
-    ).toBe(30)
-    expect(scheduler.resolveLastUpdatedAt({ startedAt: 20 }, 10)).toBe(20)
-    expect(scheduler.resolveLastUpdatedAt(undefined, 10)).toBe(10)
   })
 
   it('allows repeated release calls when no slot is owned', async () => {

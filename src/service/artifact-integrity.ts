@@ -4,16 +4,24 @@ import path from 'node:path'
 import type { ProcessBoundary } from './boundaries.js'
 import { nodeProcess } from './boundaries.js'
 import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from './constants.js'
+import {
+  type OwnedFileLease,
+  type ParsedOwnedFileLeaseMetadata,
+  tryAcquireOwnedFileLease,
+} from './owned-file-lease.js'
 
 const RESERVATION_SUFFIX = '.wdio-reserve'
+const ARTIFACT_RESERVATION_HEARTBEAT_MS = 1_000
 const ignoreFileError = (): undefined => undefined
-const emptyTextOnFileError = (): string => ''
 
-interface ArtifactReservationMetadata {
-  createdAt: number
-  ownerId?: string
+interface ArtifactLeasePayload {
   outputPath: string
-  pid: number
+  temporaryPath?: string
+}
+
+interface ArtifactReservation {
+  lease: OwnedFileLease<ArtifactLeasePayload>
+  outputPath: string
   temporaryPath: string
 }
 
@@ -31,6 +39,18 @@ export const reserveArtifactPath = async (
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
   for (let collisionIndex = 1; ; collisionIndex += 1) {
     const candidatePath = getCollisionPath(desiredPath, collisionIndex)
+    if (await pathExists(candidatePath)) {
+      continue
+    }
+
+    const lease = await acquireArtifactLease(
+      `${candidatePath}${RESERVATION_SUFFIX}`,
+      { outputPath: candidatePath },
+      nodeProcess,
+    )
+    if (!lease) {
+      continue
+    }
     try {
       const fileHandle = await fs.open(candidatePath, 'wx')
       await fileHandle.close()
@@ -39,6 +59,8 @@ export const reserveArtifactPath = async (
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error
       }
+    } finally {
+      await lease.release()
     }
   }
 }
@@ -86,12 +108,7 @@ export const publishAtomicArtifact = async (
       return undefined
     }
 
-    if (
-      !(await isArtifactReservationOwner(
-        reservation.reservationPath,
-        reservation.ownerId,
-      ))
-    ) {
+    if (!(await reservation.lease.isOwner())) {
       options.warn(
         `[WdioPuppeteerVideoService] Refusing to publish an artifact after reservation ownership changed: ${reservation.outputPath}`,
       )
@@ -117,22 +134,14 @@ export const publishAtomicArtifact = async (
         /* best-effort partial-output cleanup */
       })
     }
-    await releaseArtifactReservation(
-      reservation.reservationPath,
-      reservation.ownerId,
-    )
+    await reservation.lease.release()
   }
 }
 
 const acquireArtifactReservation = async (
   desiredPath: string,
   processBoundary: ProcessBoundary,
-): Promise<{
-  outputPath: string
-  ownerId: string
-  reservationPath: string
-  temporaryPath: string
-}> => {
+): Promise<ArtifactReservation> => {
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
   for (let collisionIndex = 1; ; collisionIndex += 1) {
     const outputPath = getCollisionPath(desiredPath, collisionIndex)
@@ -145,119 +154,24 @@ const acquireArtifactReservation = async (
       outputPath,
       processBoundary.pid,
     )
-    const ownerId = randomUUID()
-    let fileHandle: Awaited<ReturnType<typeof fs.open>> | undefined
-    try {
-      fileHandle = await fs.open(reservationPath, 'wx')
-      const metadata: ArtifactReservationMetadata = {
-        createdAt: Date.now(),
-        ownerId,
-        outputPath,
-        pid: processBoundary.pid,
-        temporaryPath,
-      }
-      await fileHandle.writeFile(JSON.stringify(metadata), 'utf8')
-      await fileHandle.close()
-      fileHandle = undefined
-
-      // The output can appear after the initial existence check but before this
-      // reservation is acquired. Recheck while we own the reservation so a
-      // POSIX rename cannot replace an artifact published by another worker.
-      if (await pathExists(outputPath)) {
-        await releaseArtifactReservation(reservationPath, ownerId)
-        continue
-      }
-
-      return { outputPath, ownerId, reservationPath, temporaryPath }
-    } catch (error) {
-      await fileHandle?.close().catch(() => {
-        /* best-effort failed-reservation close */
-      })
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        await fs.unlink(reservationPath).catch(() => {
-          /* best-effort failed-reservation cleanup */
-        })
-        throw error
-      }
-
-      const removed = await cleanupStaleReservation(
-        reservationPath,
-        processBoundary,
-      )
-      if (removed) {
-        collisionIndex -= 1
-      }
+    const lease = await acquireArtifactLease(
+      reservationPath,
+      { outputPath, temporaryPath },
+      processBoundary,
+    )
+    if (!lease) {
+      continue
     }
-  }
-}
-
-const cleanupStaleReservation = async (
-  reservationPath: string,
-  processBoundary: ProcessBoundary,
-): Promise<boolean> => {
-  const [contents, stats] = await Promise.all([
-    fs.readFile(reservationPath, 'utf8').catch(emptyTextOnFileError),
-    fs.stat(reservationPath).catch(ignoreFileError),
-  ])
-  if (!stats) {
-    return true
-  }
-
-  const metadata = parseReservationMetadata(contents)
-  const reservedOutputPath = reservationPath.slice(
-    0,
-    -RESERVATION_SUFFIX.length,
-  )
-  const ownsReservation = metadata?.outputPath === reservedOutputPath
-  if (ownsReservation && metadata && processBoundary.isAlive(metadata.pid)) {
-    return false
-  }
-  if (
-    !metadata &&
-    Date.now() - stats.mtimeMs < GLOBAL_RECORDING_SLOT_INVALID_STALE_MS
-  ) {
-    return false
-  }
-
-  if (
-    ownsReservation &&
-    metadata &&
-    isTemporaryPathForOutput(metadata.temporaryPath, reservedOutputPath)
-  ) {
-    if (metadata.ownerId) {
-      const currentMetadata = await readReservationMetadata(reservationPath)
-      if (currentMetadata?.ownerId !== metadata.ownerId) {
-        return false
-      }
-      await fs.unlink(metadata.temporaryPath).catch(() => {
-        /* best-effort abandoned temporary-output cleanup */
-      })
-      return releaseArtifactReservation(reservationPath, metadata.ownerId)
+    // The output can appear after the initial existence check but before this
+    // reservation is acquired. Recheck while the lease is held so the caller
+    // never replaces an artifact published by another worker.
+    if (await pathExists(outputPath)) {
+      await lease.release()
+      continue
     }
-  }
 
-  const [currentContents, currentStats] = await Promise.all([
-    fs.readFile(reservationPath, 'utf8').catch(ignoreFileError),
-    fs.stat(reservationPath).catch(ignoreFileError),
-  ])
-  if (
-    currentContents !== contents ||
-    currentStats?.ino !== stats.ino ||
-    currentStats?.mtimeMs !== stats.mtimeMs
-  ) {
-    return false
+    return { lease, outputPath, temporaryPath }
   }
-  if (
-    ownsReservation &&
-    metadata &&
-    isTemporaryPathForOutput(metadata.temporaryPath, reservedOutputPath)
-  ) {
-    await fs.unlink(metadata.temporaryPath).catch(() => {
-      /* best-effort abandoned legacy temporary-output cleanup */
-    })
-  }
-  await fs.unlink(reservationPath).catch(ignoreFileError)
-  return !(await pathExists(reservationPath))
 }
 
 const isTemporaryPathForOutput = (
@@ -273,27 +187,6 @@ const isTemporaryPathForOutput = (
   )
 }
 
-const parseReservationMetadata = (
-  contents: string,
-): ArtifactReservationMetadata | undefined => {
-  try {
-    const value = JSON.parse(contents) as Partial<ArtifactReservationMetadata>
-    if (
-      typeof value.createdAt !== 'number' ||
-      (value.ownerId !== undefined &&
-        (typeof value.ownerId !== 'string' || !value.ownerId)) ||
-      typeof value.outputPath !== 'string' ||
-      typeof value.pid !== 'number' ||
-      typeof value.temporaryPath !== 'string'
-    ) {
-      return undefined
-    }
-    return value as ArtifactReservationMetadata
-  } catch {
-    return undefined
-  }
-}
-
 const createTemporaryArtifactPath = (
   outputPath: string,
   processId: number,
@@ -305,32 +198,62 @@ const createTemporaryArtifactPath = (
   )
 }
 
-const readReservationMetadata = async (
+const acquireArtifactLease = async (
   reservationPath: string,
-): Promise<ArtifactReservationMetadata | undefined> => {
-  const contents = await fs
-    .readFile(reservationPath, 'utf8')
-    .catch(ignoreFileError)
-  return contents === undefined ? undefined : parseReservationMetadata(contents)
+  payload: ArtifactLeasePayload,
+  processBoundary: ProcessBoundary,
+): Promise<OwnedFileLease<ArtifactLeasePayload> | undefined> => {
+  return tryAcquireOwnedFileLease(
+    {
+      filePath: reservationPath,
+      heartbeatIntervalMs: ARTIFACT_RESERVATION_HEARTBEAT_MS,
+      invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
+      onReclaimed: async (metadata) => {
+        await cleanupAbandonedArtifact(metadata, payload.outputPath)
+      },
+      payload,
+    },
+    { process: processBoundary },
+  )
 }
 
-const releaseArtifactReservation = async (
-  reservationPath: string,
-  ownerId: string,
-): Promise<boolean> => {
-  if (!(await isArtifactReservationOwner(reservationPath, ownerId))) {
-    return false
+const cleanupAbandonedArtifact = async (
+  metadata: ParsedOwnedFileLeaseMetadata | undefined,
+  expectedOutputPath: string,
+): Promise<void> => {
+  const payload = parseArtifactLeasePayload(metadata?.payload)
+  if (
+    !payload?.temporaryPath ||
+    payload.outputPath !== expectedOutputPath ||
+    !isTemporaryPathForOutput(payload.temporaryPath, payload.outputPath)
+  ) {
+    return
   }
-  await fs.unlink(reservationPath).catch(ignoreFileError)
-  return !(await pathExists(reservationPath))
+  await fs.unlink(payload.temporaryPath).catch(ignoreFileError)
 }
 
-const isArtifactReservationOwner = async (
-  reservationPath: string,
-  ownerId: string,
-): Promise<boolean> => {
-  const metadata = await readReservationMetadata(reservationPath)
-  return metadata?.ownerId === ownerId
+const parseArtifactLeasePayload = (
+  value: unknown,
+): ArtifactLeasePayload | undefined => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined
+  }
+  const payload = value as Record<string, unknown>
+  if (typeof payload.outputPath !== 'string') {
+    return undefined
+  }
+  if (
+    payload.temporaryPath !== undefined &&
+    typeof payload.temporaryPath !== 'string'
+  ) {
+    return undefined
+  }
+  return {
+    outputPath: payload.outputPath,
+    ...(payload.temporaryPath === undefined
+      ? {}
+      : { temporaryPath: payload.temporaryPath }),
+  }
 }
 
 const getCollisionPath = (

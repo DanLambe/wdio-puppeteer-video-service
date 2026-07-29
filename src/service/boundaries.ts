@@ -17,6 +17,7 @@ export interface ClockBoundary {
 
 export interface FileStatsBoundary {
   birthtimeMs?: number
+  dev?: number
   ino?: number
   mtimeMs: number
   size?: number

@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import type { Frameworks } from '@wdio/types'
 import {
@@ -22,7 +21,8 @@ import {
   type VideoManifestV1,
   validateVideoManifest,
 } from '../manifest.js'
-import { nodeProcess } from './boundaries.js'
+import { systemClock } from './boundaries.js'
+import { tryAcquireOwnedFileLease } from './owned-file-lease.js'
 
 const require = createRequire(import.meta.url)
 const MANIFEST_WORK_DIR = '.wdio-video-manifest'
@@ -31,13 +31,8 @@ const MANIFEST_LOCK_FILE = '.wdio-video-manifest.lock'
 const MANIFEST_LOCK_TIMEOUT_MS = 30_000
 const MANIFEST_LOCK_STALE_MS = 120_000
 const MANIFEST_LOCK_POLL_MS = 25
+const MANIFEST_LOCK_HEARTBEAT_MS = 1_000
 const ignoreFileError = (): undefined => undefined
-
-interface ManifestLockMetadata {
-  createdAt: number
-  ownerId?: string
-  pid: number
-}
 
 export const MANIFEST_RUN_CONFIG_KEY =
   'wdioPuppeteerVideoServiceManifestRun' as const
@@ -913,98 +908,22 @@ const acquireManifestLock = async (
 ): Promise<() => Promise<void>> => {
   await fs.mkdir(outputDir, { recursive: true })
   const lockPath = path.join(outputDir, MANIFEST_LOCK_FILE)
-  const deadline = Date.now() + MANIFEST_LOCK_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    try {
-      const handle = await fs.open(lockPath, 'wx')
-      const ownerId = randomUUID()
-      try {
-        await handle.writeFile(
-          JSON.stringify({
-            ownerId,
-            pid: nodeProcess.pid,
-            createdAt: Date.now(),
-          }),
-          'utf8',
-        )
-      } catch (error) {
-        await handle.close().catch(ignoreFileError)
-        await fs.unlink(lockPath).catch(ignoreFileError)
-        throw error
-      }
-      await handle.close()
+  const deadline = systemClock.now() + MANIFEST_LOCK_TIMEOUT_MS
+  while (systemClock.now() < deadline) {
+    const lease = await tryAcquireOwnedFileLease({
+      filePath: lockPath,
+      heartbeatIntervalMs: MANIFEST_LOCK_HEARTBEAT_MS,
+      invalidStaleMs: MANIFEST_LOCK_STALE_MS,
+      payload: { resource: 'manifest-aggregation' },
+    })
+    if (lease) {
       return async () => {
-        const metadata = await readManifestLockMetadata(lockPath)
-        if (metadata?.ownerId === ownerId) {
-          await fs.unlink(lockPath).catch(ignoreFileError)
-        }
+        await lease.release()
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw error
-      }
-      if (await cleanupStaleManifestLock(lockPath)) {
-        continue
-      }
-      await delay(MANIFEST_LOCK_POLL_MS)
     }
+    await systemClock.delay(MANIFEST_LOCK_POLL_MS)
   }
   throw new Error(`Timed out waiting for manifest lock: ${lockPath}`)
-}
-
-const readManifestLockMetadata = async (
-  lockPath: string,
-): Promise<ManifestLockMetadata | undefined> => {
-  try {
-    const value = JSON.parse(
-      await fs.readFile(lockPath, 'utf8'),
-    ) as Partial<ManifestLockMetadata>
-    if (
-      typeof value.createdAt !== 'number' ||
-      !Number.isFinite(value.createdAt) ||
-      (value.ownerId !== undefined &&
-        (typeof value.ownerId !== 'string' || !value.ownerId)) ||
-      typeof value.pid !== 'number' ||
-      !Number.isInteger(value.pid) ||
-      value.pid <= 0
-    ) {
-      return undefined
-    }
-    return value as ManifestLockMetadata
-  } catch {
-    return undefined
-  }
-}
-
-const cleanupStaleManifestLock = async (lockPath: string): Promise<boolean> => {
-  const [contents, stats] = await Promise.all([
-    fs.readFile(lockPath, 'utf8').catch(ignoreFileError),
-    fs.stat(lockPath).catch(ignoreFileError),
-  ])
-  if (contents === undefined || !stats) {
-    return true
-  }
-  const metadata = await readManifestLockMetadata(lockPath)
-  const stale = metadata
-    ? !nodeProcess.isAlive(metadata.pid)
-    : Date.now() - stats.mtimeMs > MANIFEST_LOCK_STALE_MS
-  if (!stale) {
-    return false
-  }
-
-  const [currentContents, currentStats] = await Promise.all([
-    fs.readFile(lockPath, 'utf8').catch(ignoreFileError),
-    fs.stat(lockPath).catch(ignoreFileError),
-  ])
-  if (
-    currentContents !== contents ||
-    currentStats?.ino !== stats.ino ||
-    currentStats?.mtimeMs !== stats.mtimeMs
-  ) {
-    return false
-  }
-  await fs.unlink(lockPath).catch(ignoreFileError)
-  return !(await fs.stat(lockPath).catch(ignoreFileError))
 }
 
 const readPackageVersion = (packageName: string): string => {

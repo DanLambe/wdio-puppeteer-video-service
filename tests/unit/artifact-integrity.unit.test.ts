@@ -536,14 +536,18 @@ describe('artifact integrity', () => {
   it('does not delete paths that forged reservation metadata does not own', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'final.webm')
-    const protectedPath = path.join(tempDir, 'protected.webm')
+    const protectedOutputPath = path.join(tempDir, 'protected.webm')
+    const protectedPath = path.join(
+      tempDir,
+      '.protected.wdio-99999-forged.webm',
+    )
     await fs.writeFile(protectedPath, 'keep-me', 'utf8')
     await fs.writeFile(
       `${desiredPath}.wdio-reserve`,
       JSON.stringify({
         createdAt: Date.now(),
         ownerId: 'forged-owner',
-        outputPath: desiredPath,
+        outputPath: protectedOutputPath,
         pid: 99999,
         temporaryPath: protectedPath,
       }),
