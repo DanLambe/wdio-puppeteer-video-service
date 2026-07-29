@@ -521,6 +521,49 @@ describe('static report generation', () => {
     assertOfflineFilterScript(html)
   })
 
+  it('renders byte-identical output for unchanged inputs and keeps corrupt media linkable', async () => {
+    const outputDir = await createTempDir()
+    const runId = 'deterministic-run'
+    const spec = 'tests/specs/deterministic.ts'
+    const mediaPath = 'corrupt-but-linkable.webm'
+    await fs.writeFile(path.join(outputDir, mediaPath), 'not-valid-media')
+    await writeReporterFragment(
+      outputDir,
+      createFragment(
+        runId,
+        '0-0',
+        [spec],
+        [createOutcome({ runId, cid: '0-0', spec, name: 'stable report' })],
+      ),
+    )
+    const manifest = createManifest(runId, [
+      createEntry({
+        id: 'deterministic-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: 'stable report',
+        artifactPath: mediaPath,
+      }),
+    ])
+
+    await generateVideoReportForRun({ outputDir, runId, manifest })
+    const first = await fs.readFile(
+      path.join(outputDir, 'video-report.html'),
+      'utf8',
+    )
+    await generateVideoReportForRun({ outputDir, runId, manifest })
+    const second = await fs.readFile(
+      path.join(outputDir, 'video-report.html'),
+      'utf8',
+    )
+
+    expect(second).toBe(first)
+    expect(second).toContain('2026-07-18T00:00:02.000Z')
+    expect(second).toContain('./corrupt-but-linkable.webm')
+    expect(second).not.toContain('missing-media-artifact')
+  })
+
   it('associates one spec-scoped capture with multiple test outcomes', async () => {
     const outputDir = await createTempDir()
     const runId = 'spec-run'
@@ -649,6 +692,15 @@ describe('static report generation', () => {
       runId,
     })
     expect(await fs.readFile(invalidManifest?.path ?? '', 'utf8')).toContain(
+      'invalid-manifest',
+    )
+
+    await fs.writeFile(path.join(outputDir, 'manifest.json'), '{', 'utf8')
+    const corruptManifest = await generateVideoReportForRun({
+      outputDir,
+      runId,
+    })
+    expect(await fs.readFile(corruptManifest?.path ?? '', 'utf8')).toContain(
       'invalid-manifest',
     )
 

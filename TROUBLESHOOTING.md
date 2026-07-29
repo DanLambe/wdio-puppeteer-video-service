@@ -57,7 +57,9 @@ malformed locks must exceed the invalid-file grace period. Keep
 
 The report uses relative links and does not copy media. Preserve its directory
 relationship to `manifest.json` and the recordings. Regenerate the report if
-artifacts were moved or removed.
+artifacts were moved or removed. Report generation checks that a media file
+exists but does not decode or repair it; a file that exists but will not play
+must be diagnosed from the preserved source media and FFmpeg logs.
 
 ## Windows path or filename errors
 

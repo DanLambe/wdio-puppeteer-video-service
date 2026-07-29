@@ -25,6 +25,9 @@ versioning and release notes.
   global leases for concurrent FFmpeg operations.
 - Added Manifest v1, the offline static HTML reporter, and optional Allure video
   attachments, with consistent cleanup-first failure-policy handling.
+- Modularized manifest context transport, crash-tolerant journals, aggregation,
+  persistence, report modeling, and deterministic HTML rendering without
+  changing Manifest v1.
 - Added deterministic Mocha, Jasmine, and Cucumber media validation with local
   same-origin and cross-origin fixtures.
 - Prepared an ESM-only Node.js 24 package with root, manifest, and reporter
