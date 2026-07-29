@@ -127,4 +127,19 @@ describe('release package validation', () => {
     expect(workflow).toContain('.head_branch')
     expect(workflow).toContain('master')
   })
+
+  it('explicitly denies unused GeckoDriver install scripts', async () => {
+    const packageJson = JSON.parse(
+      await fs.readFile('package.json', 'utf8'),
+    ) as {
+      readonly allowScripts?: Readonly<Record<string, boolean>>
+    }
+
+    expect(packageJson.allowScripts?.geckodriver).toBe(false)
+    expect(
+      Object.keys(packageJson.allowScripts ?? {}).some((name) => {
+        return name.startsWith('geckodriver@')
+      }),
+    ).toBe(false)
+  })
 })
