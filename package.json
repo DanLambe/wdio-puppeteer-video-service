@@ -93,7 +93,7 @@
     "changeset": "changeset",
     "changeset:status": "changeset status",
     "version-packages": "changeset version",
-    "sbom": "tsx scripts/generate-sbom.ts sbom.cdx.json",
+    "sbom": "tsx scripts/generate-sbom.ts",
     "release:notes": "tsx scripts/preview-release-notes.ts",
     "audit": "corepack npm audit",
     "audit:signatures": "corepack npm audit signatures",

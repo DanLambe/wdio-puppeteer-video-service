@@ -107,9 +107,6 @@ const isExecutedDirectly = (() => {
 })()
 
 if (isExecutedDirectly) {
-  const outputPath = process.argv[2]?.trim()
-  if (!outputPath) {
-    throw new Error('Usage: tsx scripts/generate-sbom.ts <output-path>')
-  }
+  const outputPath = process.argv[2]?.trim() || 'sbom.cdx.json'
   await generateSbom(outputPath)
 }
