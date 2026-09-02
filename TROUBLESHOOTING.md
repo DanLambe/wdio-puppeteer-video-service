@@ -48,6 +48,12 @@ output. Enable debug logging, inspect the FFmpeg command/error, and verify free
 disk space and codec support. Increase `processing.ffmpeg.timeoutMs` only when
 the operation is demonstrably healthy but slow.
 
+Final output publication uses a hard link so a concurrent worker can never
+overwrite an existing artifact. FAT/exFAT, some network shares, container bind
+mounts, or restricted filesystems may reject hard links. Move `outputDir` to a
+local hard-link-capable filesystem when diagnostics report an unsupported link
+operation. The service preserves the source recording in this case.
+
 ## Recording capacity is exhausted
 
 Inspect `concurrency` recording and post-processing limits independently.
@@ -75,6 +81,16 @@ relationship to `manifest.json` and the recordings. Regenerate the report if
 artifacts were moved or removed. Report generation checks that a media file
 exists but does not decode or repair it; a file that exists but will not play
 must be diagnosed from the preserved source media and FFmpeg logs.
+
+## Manifest or report generation is disabled
+
+The launcher preserves existing valid run records in `manifest.json`. A
+truncated, malformed, or unsupported future-schema manifest is not overwritten;
+manifest aggregation and report generation warn and stop under
+`failurePolicy: 'warn'`, or fail the run under `'error'`. Move the invalid file
+aside, inspect or recover it, and rerun to create a new manifest. Long-lived
+output directories accumulate run records until the manifest is archived or
+removed explicitly.
 
 ## Windows path or filename errors
 

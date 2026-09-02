@@ -30,8 +30,14 @@ separate personal access token.
    package-version release pull request.
 3. Review the version, changelog, migration notes, support policy, and packed
    file list before merging the release pull request.
-4. For a prerelease series, use Changesets prerelease mode and the `rc` tag;
-   prerelease packages are published under npm's `next` distribution tag.
+4. Before preparing another release candidate, enter Changesets prerelease mode
+   once with `npm exec changeset pre enter rc` and commit `.changeset/pre.json`.
+   Confirm `npm run changeset:status` resolves the next `1.0.0-rc.N` version
+   before merging the release pull request. Prerelease packages are published
+   under npm's `next` distribution tag.
+5. Before preparing stable `1.0.0`, run `npm exec changeset pre exit`, version
+   packages, review the removal of the prerelease suffix, and commit the
+   resulting release changes separately.
 
 `1.0.0-rc.1` is a one-time bootstrap exception: its version and changelog were
 prepared before Changesets was enabled, so its empty bootstrap changeset does
@@ -46,16 +52,18 @@ non-empty consumer-facing changeset and follows the release-PR flow above.
 2. Require both independent runs to pass on Ubuntu and Windows, including the
    minimum/latest peer checks, Chrome BiDi/classic capture, Edge smoke, all
    three WDIO frameworks, package validation, coverage, and SBOM generation.
-3. Dispatch `Publish To npm` from `master` and provide both successful run IDs.
-   The workflow rejects duplicate runs, failed runs, other workflows, and runs
-   for a different commit.
+3. Dispatch `Publish To npm` from `master`, select `prerelease` or `stable`, and
+   provide both successful run IDs. The workflow rejects a stable version on
+   the prerelease channel, a prerelease version on the stable channel, duplicate
+   runs, failed runs, other workflows, and runs for a different commit.
 4. Approve the protected `npm` environment when prompted. The workflow reruns
    the release gates, creates a fresh tarball from that same validated commit,
    publishes it with npm provenance, then creates the matching GitHub release
    with the tarball and CycloneDX SBOM attached.
 
-The workflow uses `next` for versions containing a prerelease suffix and
-`latest` for stable versions. Do not promote `1.0.0` until the release-candidate
+The workflow requires the selected release channel to match the package version,
+then uses `next` for prereleases and `latest` for stable versions. Do not select
+`stable` or exit Changesets prerelease mode until the release-candidate
 validation has completed cleanly twice and the generated artifacts have been
 reviewed.
 

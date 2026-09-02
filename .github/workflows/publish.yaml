@@ -3,6 +3,14 @@ name: Publish To npm
 on:
   workflow_dispatch:
     inputs:
+      release_channel:
+        description: npm release channel permitted for this version
+        required: true
+        default: prerelease
+        type: choice
+        options:
+          - prerelease
+          - stable
       validation_run_1:
         description: First successful Release Candidate Validation run ID
         required: true
@@ -26,6 +34,7 @@ jobs:
     outputs:
       package_name: ${{ steps.package_meta.outputs.name }}
       package_version: ${{ steps.package_meta.outputs.version }}
+      release_dist_tag: ${{ steps.release_channel.outputs.dist_tag }}
     steps:
       - name: Require master
         if: github.ref != 'refs/heads/master'
@@ -87,6 +96,17 @@ jobs:
           echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Validate Release Channel
+        id: release_channel
+        env:
+          PACKAGE_VERSION: ${{ steps.package_meta.outputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist_tag="$(./node_modules/.bin/tsx scripts/resolve-release-channel.ts "$PACKAGE_VERSION" "$RELEASE_CHANNEL")"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+
       - name: Require An Unpublished Version
         shell: bash
         run: |
@@ -140,11 +160,7 @@ jobs:
       - name: Publish With Provenance
         shell: bash
         run: |
-          version='${{ needs.verify-and-pack.outputs.package_version }}'
-          dist_tag='latest'
-          if [[ "$version" == *-* ]]; then
-            dist_tag='next'
-          fi
+          dist_tag='${{ needs.verify-and-pack.outputs.release_dist_tag }}'
           corepack npm publish ./release-artifacts/*.tgz --allow-file=all --access public --provenance --tag "$dist_tag"
 
   github-release:

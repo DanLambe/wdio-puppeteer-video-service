@@ -72,8 +72,10 @@ Equivalent retry-only configuration:
 - `failurePolicy` is new in 1.0 and consistently applies `'warn'` or `'error'`
   behavior only after recording, processing, manifest, report, or integration
   cleanup completes.
-- `capture.viewport` defaults to `'current'`; an explicit size is temporary and
-  restored after capture initialization.
+- `capture.viewport` defaults to `'current'`; an explicit size temporarily
+  establishes the recorder canvas and is restored after capture initialization.
+  The canvas remains pinned to that start-time size while the test page returns
+  to its original viewport mode.
 - `processing.timing: 'after-worker'` defers FFmpeg work and is incompatible
   with Allure attachment integration.
 - `concurrency.maxPostProcessesPerProcess` now defaults to `1` and must be a

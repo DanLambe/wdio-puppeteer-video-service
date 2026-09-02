@@ -184,11 +184,11 @@ Top-level options:
 
 `capture`:
 
-- `viewport` (default `'current'`): preserves the browser's current viewport. Use `{ width, height }` to temporarily size capture initialization; the original Puppeteer viewport mode is restored immediately after `page.screencast()` starts.
+- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while Puppeteer establishes the recorder canvas, then the original viewport mode is restored immediately after `page.screencast()` starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
 - `fps` (default `30`; `24` for the `parallel` and `ci` profiles).
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
 - `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer.
-- `crop`: optional `{ x, y, width, height }` rectangle. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces `400x200` media.
+- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or Puppeteer rejects the recording. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by Puppeteer and FFmpeg.
 - `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
 
@@ -223,8 +223,10 @@ lease owned by a live process is never reclaimed solely because its heartbeat
 expired. Dead owners are reclaimed immediately; malformed lock files are
 reclaimed only after an invalid-file grace period. Capture paths are exclusively
 reserved, while merge and transcode outputs are decoded from unique temporary
-files and atomically published only after validation. A failed or timed-out
-operation keeps its source recordings and removes partial output.
+files and published only after validation through an atomic hard-link operation
+that never replaces an existing artifact. The output filesystem must support
+hard links. A failed, timed-out, or unsupported publication keeps its source
+recordings and removes unpublished partial output.
 
 `artifacts.naming`:
 
@@ -345,7 +347,9 @@ JSONL journals and `onComplete` atomically aggregates them into
 decision, retry and result, normalized spec and media paths, hashed session
 identity, browser/protocol details, timings, dimensions, tool versions, and
 post-processing outcomes. Concurrent launchers contribute separate run records
-without mixing worker journals.
+without mixing worker journals. Existing valid run records are retained whenever
+the manifest is aggregated; the service does not prune old runs, so archive or
+remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
 The dependency-free types and validator are available from the manifest export:
 
@@ -416,7 +420,7 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
-- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, disables merging unless explicit, and pins service logging to `warn` unless explicit.
+- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
 
 ## WDIO Protocol Compatibility
 
@@ -467,5 +471,5 @@ is unavailable. A local browser-only run may explicitly opt out with
 - [0.8 to 1.0 migration](./MIGRATION.md)
 - [Support policy](./SUPPORT.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
-- [Maintainer release procedure](./RELEASING.md)
+- [Maintainer release procedure](https://github.com/DanLambe/wdio-puppeteer-video-service/blob/master/RELEASING.md)
 - [Changelog](./CHANGELOG.md)
