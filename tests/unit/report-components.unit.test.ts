@@ -89,7 +89,7 @@ const createRun = (
     service: '1.0.0-rc.1',
     node: 'v24.0.0',
     webdriverio: '9.29.1',
-    puppeteer: '25.3.0',
+    puppeteer: '24.11.2',
   },
   entries,
 })

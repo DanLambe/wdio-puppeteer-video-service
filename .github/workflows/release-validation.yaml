@@ -40,23 +40,25 @@ jobs:
         if: matrix.dependencies == 'minimum'
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9.29.1 puppeteer-core@25.3.0
+          webdriverio@9.29.1 puppeteer-core@24.11.2
           @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
           @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
           @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
           @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
-          @wdio/spec-reporter@9.29.1 @wdio/types@9.29.1
+          @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
+          @wdio/types@9.29.1
+          expect-webdriverio@5.7.0
 
       - name: Install Latest Supported Peers
         if: matrix.dependencies == 'latest'
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25
+          webdriverio@9 puppeteer-core@24
           @wdio/allure-reporter@9 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
           @wdio/jasmine-framework@9 @wdio/local-runner@9
           @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Verify Supported Peer Versions
         run: corepack npm ls webdriverio puppeteer-core
@@ -107,9 +109,9 @@ jobs:
       - name: Install Latest Supported Browser Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -137,11 +139,12 @@ jobs:
       - name: Install Minimum Supported Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9.29.1 puppeteer-core@25.3.0
+          webdriverio@9.29.1 puppeteer-core@24.11.2
           @wdio/cli@9.29.1 @wdio/globals@9.29.1
           @wdio/local-runner@9.29.1 @wdio/mocha-framework@9.29.1
-          @wdio/reporter@9.29.1 @wdio/spec-reporter@9.29.1
-          @wdio/types@9.29.1
+          @wdio/reporter@9.29.1 @wdio/runner@9.29.1
+          @wdio/spec-reporter@9.29.1 @wdio/types@9.29.1
+          expect-webdriverio@5.7.0
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -179,11 +182,11 @@ jobs:
       - name: Install Latest Supported Framework Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
           @wdio/jasmine-framework@9 @wdio/local-runner@9
           @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -234,9 +237,9 @@ jobs:
       - name: Install Latest Supported Edge Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Edge Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static edgedriver

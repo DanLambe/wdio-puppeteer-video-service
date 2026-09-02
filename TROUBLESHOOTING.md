@@ -1,5 +1,20 @@
 # Troubleshooting
 
+## npm reports a Puppeteer peer-dependency conflict
+
+Install a Puppeteer Core version supported by both this service and
+WebdriverIO v9:
+
+```bash
+npm install --save-dev puppeteer-core@^24.11.2
+```
+
+WebdriverIO `9.31.1` corrected its Puppeteer peer range to exclude version 25.
+Earlier WebdriverIO releases used an overly broad range that could allow an
+unsupported Puppeteer 25 installation. Do not bypass the conflict with
+`--force`, `--legacy-peer-deps`, or an override. Keep WebdriverIO on a supported
+9.x release and use Puppeteer Core `>=24.11.2 <25`.
+
 ## WDIO launcher context is missing or malformed
 
 Register the service by package name:

@@ -8,9 +8,9 @@
 A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
 > **1.0 release candidate**
-> `1.0.0-rc.1` is the polished release-candidate surface. Install the `next`
-> tag to opt in while it is evaluated before stable promotion. The `latest`
-> tag remains on the stable `0.8.0` line until `1.0.0` is explicitly released.
+> Install the `next` tag to opt in while the 1.0 release candidate is evaluated
+> before stable promotion. The `latest` tag remains on the stable `0.8.0` line
+> until `1.0.0` is explicitly released.
 
 Features:
 
@@ -29,7 +29,7 @@ flowchart LR
   launcher["WDIO launcher process"] --> context["Versioned run and retry context"]
   context --> workers["WDIO worker services"]
   workers --> coordinator["Recording entity coordinator"]
-  coordinator --> capture["Puppeteer 25 capture controller"]
+  coordinator --> capture["Puppeteer screencast controller"]
   capture --> media["FFmpeg media pipeline"]
   workers --> journals["Crash-tolerant worker journals"]
   media --> journals
@@ -48,7 +48,7 @@ This guide documents the `1.0.0` release-candidate API. Install it explicitly
 from the opt-in `next` channel:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@next
+npm install --save-dev wdio-puppeteer-video-service@next puppeteer-core@^24.11.2
 ```
 
 An unqualified install continues to resolve to the stable `0.8.0` release,
@@ -150,7 +150,7 @@ keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
 - Node.js 24+
 - WebdriverIO `>=9.29.1 <10` using `runner: 'local'`
-- Puppeteer Core `>=25.3.0 <26`
+- Puppeteer Core `>=24.11.2 <25`
 - A Chromium-based browser session (Chrome or Edge)
 - FFmpeg supplied by the environment
 
@@ -187,7 +187,7 @@ Top-level options:
 - `viewport` (default `'current'`): preserves the browser's current viewport. Use `{ width, height }` to temporarily size capture initialization; the original Puppeteer viewport mode is restored immediately after `page.screencast()` starts.
 - `fps` (default `30`; `24` for the `parallel` and `ci` profiles).
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
-- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer 25.
+- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer.
 - `crop`: optional `{ x, y, width, height }` rectangle. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces `400x200` media.
 - `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.

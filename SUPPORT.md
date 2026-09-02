@@ -4,7 +4,7 @@
 
 - Node.js 24
 - WebdriverIO `>=9.29.1 <10`
-- Puppeteer Core `>=25.3.0 <26`
+- Puppeteer Core `>=24.11.2 <25`
 - Chrome through WebDriver BiDi or classic WebDriver with a usable CDP endpoint
 - Microsoft Edge classic/CDP smoke coverage
 - Mocha, Jasmine, and Cucumber WDIO frameworks

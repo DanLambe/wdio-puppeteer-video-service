@@ -175,4 +175,35 @@ describe('release package validation', () => {
       }),
     ).toBe(false)
   })
+
+  it('aligns Puppeteer support with the WebdriverIO v9 compatibility band', async () => {
+    const [workflow, packageJsonText] = await Promise.all([
+      fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
+      fs.readFile('package.json', 'utf8'),
+    ])
+    const packageJson = JSON.parse(packageJsonText) as {
+      readonly devDependencies?: Readonly<Record<string, string>>
+      readonly peerDependencies?: Readonly<Record<string, string>>
+      readonly peerDependenciesMeta?: Readonly<
+        Record<string, { readonly optional?: boolean }>
+      >
+    }
+
+    expect(packageJson.peerDependencies?.['puppeteer-core']).toBe(
+      '>=24.11.2 <25',
+    )
+    expect(packageJson.devDependencies?.['puppeteer-core']).toBe('^24.11.2')
+    expect(packageJson.devDependencies?.['expect-webdriverio']).toBe(
+      '^5.7.0 || ^6.0.9',
+    )
+    expect(
+      packageJson.peerDependenciesMeta?.['puppeteer-core']?.optional,
+    ).not.toBe(true)
+    expect(workflow).toContain('webdriverio@9.29.1 puppeteer-core@24.11.2')
+    expect(workflow).toContain('expect-webdriverio@5.7.0')
+    expect(workflow).toContain('@wdio/runner@9.29.1')
+    expect(workflow).toContain('webdriverio@9 puppeteer-core@24')
+    expect(workflow).toContain('@wdio/types@9 expect-webdriverio@6')
+    expect(workflow).not.toContain('puppeteer-core@25')
+  })
 })

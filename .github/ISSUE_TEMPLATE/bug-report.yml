@@ -32,7 +32,7 @@ body:
     attributes:
       label: Puppeteer Core version
       description: Exact `puppeteer-core` version in your project
-      placeholder: 25.3.0
+      placeholder: 24.11.2
     validations:
       required: true
 

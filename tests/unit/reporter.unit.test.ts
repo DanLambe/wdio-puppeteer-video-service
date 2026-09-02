@@ -165,7 +165,7 @@ const createManifest = (
       service: '0.8.1',
       node: 'v24.0.0',
       webdriverio: '9.29.1',
-      puppeteer: '25.3.0',
+      puppeteer: '24.11.2',
     },
     entries,
   }

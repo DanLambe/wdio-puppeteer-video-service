@@ -12,7 +12,7 @@ const createRecorder = (): ScreenRecorder => {
   return { id: 'recorder' } as unknown as ScreenRecorder
 }
 
-describe('Puppeteer 25 capture controls', () => {
+describe('Puppeteer screencast capture controls', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.useRealTimers()
