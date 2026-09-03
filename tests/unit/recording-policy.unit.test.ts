@@ -1,7 +1,10 @@
 import type { Frameworks } from '@wdio/types'
 import { describe, expect, it } from 'vitest'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
-import { normalizeTestEntity } from '../../src/service/recording-entity.js'
+import {
+  normalizeScenarioEntity,
+  normalizeTestEntity,
+} from '../../src/service/recording-entity.js'
 import {
   applyRetryCountToMetadata,
   buildSpecLevelSlugMetadata,
@@ -178,6 +181,40 @@ describe('recording policy', () => {
         specRecordingActive: true,
       }),
     ).toMatchObject({ action: 'continue-spec' })
+  })
+
+  it('keys retry tracking on a framework entity id when one exists', () => {
+    const withoutIdentifier = createEntity()
+    const firstScenario = normalizeScenarioEntity(
+      { pickle: { id: 'pickle-a', name: 'shared name' } } as Frameworks.World,
+      { uri: 'features/checkout.feature' },
+      'test',
+    )
+    const retriedScenario = normalizeScenarioEntity(
+      { pickle: { id: 'pickle-a', name: 'shared name' } } as Frameworks.World,
+      { uri: 'features/checkout.feature' },
+      'test',
+    )
+    const sameNameScenario = normalizeScenarioEntity(
+      { pickle: { id: 'pickle-b', name: 'shared name' } } as Frameworks.World,
+      { uri: 'features/checkout.feature' },
+      'test',
+    )
+
+    // A retry reuses its pickle id, so it must resolve to the same key.
+    expect(createRetryTrackingKey(retriedScenario)).toBe(
+      createRetryTrackingKey(firstScenario),
+    )
+    // A distinct scenario that happens to share a name must not.
+    expect(createRetryTrackingKey(sameNameScenario)).not.toBe(
+      createRetryTrackingKey(firstScenario),
+    )
+    expect(createRetryTrackingKey(firstScenario)).toBe(
+      'framework-id|features/checkout.feature|pickle-a',
+    )
+    expect(createRetryTrackingKey(withoutIdentifier)).toContain(
+      'checkout_spec|adds_an_item|',
+    )
   })
 
   it('builds deterministic retry and multi-spec slug metadata', () => {

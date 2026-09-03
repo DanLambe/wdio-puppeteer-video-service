@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import WDIOReporter, { type RunnerStats, type TestStats } from '@wdio/reporter'
+import WDIOReporter, {
+  type RunnerStats,
+  type SuiteStats,
+  type TestStats,
+} from '@wdio/reporter'
 import {
   normalizeReportFileName,
   writeReporterFragment,
@@ -138,8 +142,15 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
     if (!fragment) {
       return
     }
+    const scenarioSuite = this._resolveScenarioSuite()
+    // Cucumber records a scenario retry on the enclosing suite rather than on
+    // the step stats, so both sources must be considered. Mirror the service's
+    // `Math.max` precedence so manifest and reporter attempts stay joinable.
     const attempt =
-      this._runnerRetry + normalizeRetryCount(testStats.retries) + 1
+      Math.max(
+        this._runnerRetry + normalizeRetryCount(testStats.retries),
+        normalizeRetryCount(scenarioSuite?.retries),
+      ) + 1
     const status = normalizeTestStatus(testStats.state)
     const deduplicationKey = `${testStats.uid}\0${attempt.toString()}\0${status}`
     if (this._capturedOutcomes.has(deduplicationKey)) {
@@ -149,7 +160,7 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
     const errors = collectErrors(testStats)
     const fullName = testStats.fullTitle?.trim()
     const parent = testStats.parent?.trim()
-    const containerName = this._resolveScenarioName()
+    const containerName = scenarioSuite?.title.trim()
     const testName = testStats.title?.trim() || fullName || 'unknown test'
     fragment.outcomes.push({
       uid: testStats.uid,
@@ -176,11 +187,10 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
     })
   }
 
-  private _resolveScenarioName(): string | undefined {
+  private _resolveScenarioSuite(): SuiteStats | undefined {
     return [...this.currentSuites]
       .reverse()
       .find((suite) => suite.type === 'scenario')
-      ?.title.trim()
   }
 }
 

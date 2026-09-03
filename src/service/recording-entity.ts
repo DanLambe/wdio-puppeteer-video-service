@@ -9,6 +9,13 @@ export type RecordingEntityKind = 'scenario' | 'test'
 export interface RecordingEntity {
   readonly context: unknown
   readonly explicitFrameworkRetry: number | undefined
+  /**
+   * Stable framework-assigned identity for this entity, when the framework
+   * provides one. Cucumber reuses a pickle id across retry attempts while
+   * giving distinct scenarios distinct ids, and Jasmine assigns each spec a
+   * unique result id. Mocha assigns neither, so it stays `undefined` there.
+   */
+  readonly frameworkEntityId: string | undefined
   readonly framework: ManifestFramework
   readonly kind: RecordingEntityKind
   readonly label: string
@@ -35,6 +42,7 @@ export const normalizeTestEntity = (
   return createRecordingEntity({
     context,
     explicitFrameworkRetry: extractExplicitRetryCount(test, context),
+    frameworkEntityId: extractFrameworkEntityId(test),
     framework,
     kind: 'test',
     label: test.title || test.fullTitle || 'test',
@@ -63,6 +71,7 @@ export const normalizeScenarioEntity = (
       manifestTest,
       entityContext,
     ),
+    frameworkEntityId: extractFrameworkEntityId(world?.pickle),
     framework: 'cucumber',
     kind: 'scenario',
     label: title,
@@ -128,9 +137,20 @@ export const extractExplicitRetryCount = (
   )
 }
 
+export const extractFrameworkEntityId = (
+  value: unknown,
+): string | undefined => {
+  const identifier = asRecord(value)?.id
+  if (typeof identifier !== 'string') {
+    return undefined
+  }
+  return identifier.trim() || undefined
+}
+
 const createRecordingEntity = (input: {
   context: unknown
   explicitFrameworkRetry: number | undefined
+  frameworkEntityId: string | undefined
   framework: ManifestFramework
   kind: RecordingEntityKind
   label: string

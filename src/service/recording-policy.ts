@@ -126,6 +126,12 @@ export const decideRecordingStart = (input: {
 }
 
 export const createRetryTrackingKey = (entity: RecordingEntity): string => {
+  if (entity.frameworkEntityId) {
+    // A framework-assigned id is stable across retry attempts and distinct
+    // between same-named entities, so it identifies the entity exactly.
+    return `framework-id|${entity.specPath}|${entity.frameworkEntityId}`
+  }
+
   const metadata = entity.slugMetadata
   return `${metadata.fileToken}|${metadata.testNameToken}|${metadata.hashInput}`
 }

@@ -2,6 +2,7 @@ import type { Frameworks } from '@wdio/types'
 import { describe, expect, it } from 'vitest'
 import {
   extractExplicitRetryCount,
+  extractFrameworkEntityId,
   normalizeScenarioEntity,
   normalizeScenarioOutcome,
   normalizeTestEntity,
@@ -156,5 +157,42 @@ describe('recording entity normalization', () => {
         extractExplicitRetryCount(createTest(), { _currentRetry: value }),
       ).toBeUndefined()
     }
+  })
+
+  it('captures the framework-assigned entity id when one is available', () => {
+    const scenario = normalizeScenarioEntity(
+      {
+        pickle: { id: 'pickle-7', name: 'customer retries checkout' },
+      } as Frameworks.World,
+      { uri: 'features/checkout.feature' },
+      'test',
+    )
+    expect(scenario.frameworkEntityId).toBe('pickle-7')
+
+    // Jasmine surfaces a unique spec result id; Mocha exposes none.
+    expect(
+      normalizeTestEntity(
+        createTest({ id: 'spec3' } as Partial<Frameworks.Test>),
+        {},
+        'jasmine',
+        'test',
+      ).frameworkEntityId,
+    ).toBe('spec3')
+    expect(
+      normalizeTestEntity(createTest(), {}, 'mocha', 'test').frameworkEntityId,
+    ).toBeUndefined()
+    expect(
+      normalizeScenarioEntity({} as Frameworks.World, undefined, 'test')
+        .frameworkEntityId,
+    ).toBeUndefined()
+  })
+
+  it('ignores framework entity ids that are not usable strings', () => {
+    for (const identifier of [undefined, null, '', '   ', 7, {}]) {
+      expect(extractFrameworkEntityId({ id: identifier })).toBeUndefined()
+    }
+    expect(extractFrameworkEntityId(undefined)).toBeUndefined()
+    expect(extractFrameworkEntityId('pickle-1')).toBeUndefined()
+    expect(extractFrameworkEntityId({ id: '  pickle-2  ' })).toBe('pickle-2')
   })
 })

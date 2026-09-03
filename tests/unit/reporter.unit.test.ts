@@ -396,6 +396,70 @@ describe('WdioPuppeteerVideoReporter', () => {
     ])
   })
 
+  it('counts a Cucumber scenario retry that only the enclosing suite reports', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const config: Record<string, unknown> = {}
+    assignManifestRunContext(config, context)
+    assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
+    const reporter = new WdioPuppeteerVideoReporter({
+      outputDir,
+      writeStream: { write: () => true },
+    })
+    const runner = {
+      cid: '0-0',
+      config,
+      specs: ['tests/cucumber/features/scenario-retry.feature'],
+      capabilities: { browserName: 'chrome' },
+      start: new Date('2026-07-18T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    const scenarioSuite = {
+      type: 'scenario',
+      title: 'retried scenario',
+      retries: 0,
+    }
+    const step = {
+      uid: 'step-1',
+      title: 'Then I fail only the first scenario attempt',
+      fullTitle: 'Then I fail only the first scenario attempt',
+      state: 'failed',
+      duration: 5,
+      retries: 0,
+    } as unknown as TestStats
+
+    reporter.onRunnerStart(runner)
+    reporter.currentSuites.push(scenarioSuite as never)
+    reporter.onTestFail(step)
+    // Cucumber reports the retry on the scenario suite, never on the step.
+    scenarioSuite.retries = 1
+    reporter.onTestPass({ ...step, state: 'passed' } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+
+    const { fragments } = await readReporterFragments(outputDir, context.runId)
+    expect(
+      fragments[0]?.outcomes.map((outcome) => ({
+        attempt: outcome.attempt,
+        retried: outcome.retried,
+        status: outcome.status,
+        containerName: outcome.test.containerName,
+      })),
+    ).toEqual([
+      {
+        attempt: 1,
+        retried: false,
+        status: 'failed',
+        containerName: 'retried scenario',
+      },
+      {
+        attempt: 2,
+        retried: true,
+        status: 'passed',
+        containerName: 'retried scenario',
+      },
+    ])
+  })
+
   it('does not classify a first-attempt pass as retried merely because retries are enabled', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)

@@ -1,7 +1,10 @@
 import type { Frameworks } from '@wdio/types'
 import { describe, expect, it, vi } from 'vitest'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
-import { normalizeTestEntity } from '../../src/service/recording-entity.js'
+import {
+  normalizeScenarioEntity,
+  normalizeTestEntity,
+} from '../../src/service/recording-entity.js'
 import {
   type RecordingAllurePort,
   type RecordingManifestPort,
@@ -27,6 +30,16 @@ const createEntity = (
     } as Frameworks.Test,
     context,
     'mocha',
+    'test',
+  )
+
+const createScenarioEntity = (
+  pickleId: string,
+  name = 'customer retries checkout',
+) =>
+  normalizeScenarioEntity(
+    { pickle: { id: pickleId, name } } as Frameworks.World,
+    { uri: 'features/checkout.feature' },
     'test',
   )
 
@@ -486,5 +499,122 @@ describe('worker recording coordinator', () => {
       fileToken: 'checkout_spec',
       testNameToken: 'checkout_spec',
     })
+  })
+
+  it.each([
+    { attempts: 'all' as const, expectedSkips: 0 },
+    { attempts: 'retries' as const, expectedSkips: 1 },
+  ])(
+    'infers a Cucumber scenario retry with attempts: $attempts',
+    async ({ attempts, expectedSkips }) => {
+      const harness = createHarness({
+        recording: { attempts, retain: 'retries' },
+      })
+      harness.coordinator.configureSession({
+        framework: 'cucumber',
+        manifest: harness.manifest,
+        specFileRetryAttempt: 0,
+      })
+
+      // Cucumber reuses the pickle id when it retries a scenario and never
+      // exposes an attempt number of its own.
+      await harness.coordinator.beginEntity(createScenarioEntity('pickle-a'))
+      await harness.coordinator.endEntity({
+        manifestResult: 'failed',
+        passed: false,
+      })
+      await harness.coordinator.beginEntity(createScenarioEntity('pickle-a'))
+      await harness.coordinator.endEntity({
+        manifestResult: 'passed',
+        passed: true,
+      })
+
+      expect(harness.manifest.attempts).toEqual([1, 2])
+      expect(harness.starts.at(-1)).toMatchObject({
+        retryCount: 1,
+        metadata: { retryToken: '_retry1' },
+      })
+      expect(
+        harness.manifest.completed.filter(
+          (entry) =>
+            (entry as { decision?: string }).decision === 'skipped' &&
+            (entry as { reason?: string }).reason === 'not-a-retry-attempt',
+        ),
+      ).toHaveLength(expectedSkips)
+      // retain: 'retries' must keep the second attempt's media.
+      expect(harness.events).toContain('media:finalize:true:true')
+    },
+  )
+
+  it('does not treat same-named Cucumber scenarios as retries of each other', async () => {
+    const harness = createHarness({
+      recording: { attempts: 'all', retain: 'retries' },
+    })
+    harness.coordinator.configureSession({
+      framework: 'cucumber',
+      manifest: harness.manifest,
+      specFileRetryAttempt: 0,
+    })
+
+    await harness.coordinator.beginEntity(
+      createScenarioEntity('pickle-a', 'shared name'),
+    )
+    await harness.coordinator.endEntity({
+      manifestResult: 'passed',
+      passed: true,
+    })
+    await harness.coordinator.beginEntity(
+      createScenarioEntity('pickle-b', 'shared name'),
+    )
+    await harness.coordinator.endEntity({
+      manifestResult: 'passed',
+      passed: true,
+    })
+
+    expect(harness.manifest.attempts).toEqual([1, 1])
+    expect(harness.starts.map((start) => start.retryCount)).toEqual([0, 0])
+    // retain: 'retries' must discard both first attempts.
+    expect(harness.events).not.toContain('media:finalize:true:true')
+  })
+
+  it('keeps Mocha attempt numbers framework-authoritative for repeated titles', async () => {
+    const harness = createHarness({
+      recording: { attempts: 'all', retain: 'retries' },
+    })
+    const duplicateTitle = createEntity('records checkout', {
+      _currentRetry: 0,
+    } as Partial<Frameworks.Test>)
+
+    await harness.coordinator.beginEntity(duplicateTitle)
+    await harness.coordinator.endEntity({
+      manifestResult: 'passed',
+      passed: true,
+    })
+    await harness.coordinator.beginEntity(duplicateTitle)
+    await harness.coordinator.endEntity({
+      manifestResult: 'passed',
+      passed: true,
+    })
+
+    // `_currentRetry` stays 0, so neither execution may be inferred as a retry.
+    expect(harness.manifest.attempts).toEqual([1, 1])
+    expect(harness.starts.map((start) => start.retryCount)).toEqual([0, 0])
+    expect(harness.events).not.toContain('media:finalize:true:true')
+  })
+
+  it('preserves spec-file retry precedence for entities without framework retries', async () => {
+    const harness = createHarness({
+      recording: { attempts: 'all', retain: 'retries' },
+    })
+    harness.coordinator.configureSession({
+      framework: 'cucumber',
+      manifest: harness.manifest,
+      specFileRetryAttempt: 2,
+    })
+
+    await harness.coordinator.beginEntity(createScenarioEntity('pickle-a'))
+
+    expect(harness.starts[0]?.retryCount).toBe(2)
+    expect(harness.manifest.attempts).toEqual([3])
   })
 })

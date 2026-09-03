@@ -276,13 +276,20 @@ export class WorkerRecordingCoordinator
   }
 
   private consumeInferredRetry(entity: RecordingEntity): number | undefined {
-    if (this.options.recording.attempts !== 'retries') {
-      return undefined
-    }
-
     const retryTrackingKey = createRetryTrackingKey(entity)
     const inferredRetry = this.entityAttemptCount.get(retryTrackingKey) ?? 0
     this.entityAttemptCount.set(retryTrackingKey, inferredRetry + 1)
+
+    if (entity.explicitFrameworkRetry !== undefined) {
+      // Mocha reports its own attempt number, so repeated executions of an
+      // identically named entity must not be inferred as retries.
+      return undefined
+    }
+
+    // Cucumber retries a scenario without exposing an attempt number, so the
+    // per-entity execution count is the only available signal. Track it for
+    // every `recording.attempts` mode so retention, manifest attempts, and
+    // reporter joins observe the same attempt.
     return inferredRetry
   }
 
