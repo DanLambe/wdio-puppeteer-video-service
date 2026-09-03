@@ -226,40 +226,43 @@ export const assertPackedSourceMaps = async (
   }
 
   for (const mapPath of files.filter((fileName) => fileName.endsWith('.map'))) {
-    const sourceMap = parseSourceMap(
-      await fs.readFile(mapPath, 'utf8'),
-      mapPath,
-    )
-    const sourceRoot = readSourceRoot(sourceMap, mapPath)
-    const sources = readMapSources(sourceMap, mapPath)
-    const sourcesContent = sourceMap.sourcesContent
-    if (sourcesContent !== undefined && !Array.isArray(sourcesContent)) {
-      throw new Error(`Invalid sourcesContent in packed source map: ${mapPath}`)
-    }
+    await assertPackedSourceMap(packageRoot, mapPath)
+  }
+}
 
-    for (const [index, source] of sources.entries()) {
-      if (typeof sourcesContent?.[index] === 'string') {
-        continue
-      }
-      const resolvedSource = path.resolve(
-        path.dirname(mapPath),
-        sourceRoot,
-        source,
-      )
-      if (!isPathInside(packageRoot, resolvedSource)) {
-        throw new Error(
-          `Packed source map source is neither embedded nor packaged: ${source} in ${mapPath}`,
-        )
-      }
-      try {
-        await fs.access(resolvedSource)
-      } catch {
-        throw new Error(
-          `Packed source map source is neither embedded nor packaged: ${source} in ${mapPath}`,
-        )
-      }
+const assertPackedSourceMap = async (
+  packageRoot: string,
+  mapPath: string,
+): Promise<void> => {
+  const sourceMap = parseSourceMap(await fs.readFile(mapPath, 'utf8'), mapPath)
+  const sourceRoot = readSourceRoot(sourceMap, mapPath)
+  const sources = readMapSources(sourceMap, mapPath)
+  const sourcesContent = readSourcesContent(sourceMap, mapPath)
+  for (const [index, source] of sources.entries()) {
+    if (typeof sourcesContent[index] !== 'string') {
+      await assertSourceIsPackaged(packageRoot, mapPath, sourceRoot, source)
     }
   }
+}
+
+const assertSourceIsPackaged = async (
+  packageRoot: string,
+  mapPath: string,
+  sourceRoot: string,
+  source: string,
+): Promise<void> => {
+  const resolvedSource = path.resolve(path.dirname(mapPath), sourceRoot, source)
+  if (isPathInside(packageRoot, resolvedSource)) {
+    try {
+      await fs.access(resolvedSource)
+      return
+    } catch {
+      // Use the shared missing-source diagnostic below.
+    }
+  }
+  throw new Error(
+    `Packed source map source is neither embedded nor packaged: ${source} in ${mapPath}`,
+  )
 }
 
 const parseSourceMap = (
@@ -275,7 +278,7 @@ const parseSourceMap = (
     })
   }
   if (!isRecord(parsed)) {
-    throw new Error(`Packed source map must be an object: ${mapPath}`)
+    throw new TypeError(`Packed source map must be an object: ${mapPath}`)
   }
   return parsed
 }
@@ -288,7 +291,7 @@ const readSourceRoot = (
     return ''
   }
   if (typeof sourceMap.sourceRoot !== 'string') {
-    throw new Error(`Invalid sourceRoot in packed source map: ${mapPath}`)
+    throw new TypeError(`Invalid sourceRoot in packed source map: ${mapPath}`)
   }
   return sourceMap.sourceRoot
 }
@@ -301,9 +304,24 @@ const readMapSources = (
     !Array.isArray(sourceMap.sources) ||
     sourceMap.sources.some((source) => typeof source !== 'string')
   ) {
-    throw new Error(`Invalid sources in packed source map: ${mapPath}`)
+    throw new TypeError(`Invalid sources in packed source map: ${mapPath}`)
   }
   return sourceMap.sources
+}
+
+const readSourcesContent = (
+  sourceMap: PackageSourceMap,
+  mapPath: string,
+): readonly unknown[] => {
+  if (sourceMap.sourcesContent === undefined) {
+    return []
+  }
+  if (!Array.isArray(sourceMap.sourcesContent)) {
+    throw new TypeError(
+      `Invalid sourcesContent in packed source map: ${mapPath}`,
+    )
+  }
+  return sourceMap.sourcesContent
 }
 
 const isPathInside = (root: string, candidate: string): boolean => {

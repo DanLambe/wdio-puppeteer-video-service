@@ -196,6 +196,12 @@ describe('release package validation', () => {
     expect(workflow).toContain('scripts/resolve-release-channel.ts')
     expect(workflow).toContain('release_dist_tag:')
     expect(workflow).toContain('steps.release_channel.outputs.dist_tag')
+    expect(workflow).toContain(
+      "needs.verify-and-pack.outputs.release_dist_tag == 'next'",
+    )
+    expect(workflow).not.toContain(
+      "contains(needs.verify-and-pack.outputs.package_version, '-')",
+    )
   })
 
   it('builds the release SBOM through npm with an explicit artifact path', async () => {

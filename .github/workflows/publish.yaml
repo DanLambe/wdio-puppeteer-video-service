@@ -189,4 +189,4 @@ jobs:
           files: |
             release-artifacts/*.tgz
             release-artifacts/sbom.cdx.json
-          prerelease: ${{ contains(needs.verify-and-pack.outputs.package_version, '-') }}
+          prerelease: ${{ needs.verify-and-pack.outputs.release_dist_tag == 'next' }}
