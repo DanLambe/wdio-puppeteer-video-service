@@ -15,6 +15,12 @@ type FrameworkMode =
   | 'cucumber'
   | 'cucumber-retry-all'
   | 'cucumber-retry-retries'
+  | 'cucumber-duplicate-names'
+
+const CUCUMBER_DUPLICATE_TITLES = [
+  'cucumber style should record each same-named scenario',
+  'cucumber style should record each outline row',
+]
 
 const CUCUMBER_RETRY_TITLE =
   'cucumber style should record the retried scenario attempt'
@@ -33,11 +39,65 @@ const resolveFrameworkOrder = (mode: string): FrameworkMode[] => {
     mode === 'jasmine' ||
     mode === 'cucumber' ||
     mode === 'cucumber-retry-all' ||
-    mode === 'cucumber-retry-retries'
+    mode === 'cucumber-retry-retries' ||
+    mode === 'cucumber-duplicate-names'
   ) {
     return [mode]
   }
   return []
+}
+
+/**
+ * Distinct scenarios that share a title must each keep their own media, and
+ * every step of a scenario must reference that scenario's recording.
+ */
+const assertDistinctScenarioMedia = async (
+  resultsDir: string,
+): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      `[e2e:frameworks] ${resultsDir} produced an invalid manifest`,
+    )
+  }
+
+  const entries = manifestValue.runs
+    .flatMap((run) => run.entries)
+    .filter((entry) =>
+      CUCUMBER_DUPLICATE_TITLES.includes(entry.test?.name ?? ''),
+    )
+  if (entries.length !== 4) {
+    throw new Error(
+      `[e2e:frameworks] Expected four same-named scenario captures, found ${entries.length.toString()}`,
+    )
+  }
+
+  const manifestMedia = new Set(
+    entries.flatMap((entry) => entry.capture.segments.map((item) => item.path)),
+  )
+  if (manifestMedia.size !== 4) {
+    throw new Error(
+      `[e2e:frameworks] Expected four distinct scenario recordings, found ${manifestMedia.size.toString()}`,
+    )
+  }
+
+  const report = await readFile(
+    path.join(resultsDir, 'video-report.html'),
+    'utf8',
+  )
+  for (const mediaPath of manifestMedia) {
+    if (!report.includes(`src="./${mediaPath}"`)) {
+      throw new Error(
+        `[e2e:frameworks] Static report never references ${mediaPath}`,
+      )
+    }
+  }
+
+  console.log(
+    `[e2e:frameworks] Verified ${manifestMedia.size.toString()} same-named scenarios kept distinct media.`,
+  )
 }
 
 /**
@@ -109,7 +169,7 @@ const frameworkOrder: FrameworkMode[] = resolveFrameworkOrder(requestedMode)
 
 if (frameworkOrder.length === 0) {
   console.error(
-    `[e2e:frameworks] Invalid mode "${requestedMode}". Use jasmine, cucumber, cucumber-retry, cucumber-retry-all, cucumber-retry-retries, or both.`,
+    `[e2e:frameworks] Invalid mode "${requestedMode}". Use jasmine, cucumber, cucumber-retry, cucumber-retry-all, cucumber-retry-retries, cucumber-duplicate-names, or both.`,
   )
   process.exit(1)
 }
@@ -120,6 +180,7 @@ const frameworkConfigMap: Record<
     configPath: string
     resultsDirName: string
     retryAttempts?: 'all' | 'retries'
+    duplicateNames?: boolean
   }
 > = {
   jasmine: {
@@ -140,6 +201,11 @@ const frameworkConfigMap: Record<
     resultsDirName: 'cucumber-retry-retries',
     retryAttempts: 'retries',
   },
+  'cucumber-duplicate-names': {
+    configPath: 'tests/wdio.cucumber.conf.ts',
+    resultsDirName: 'cucumber-duplicate-names',
+    duplicateNames: true,
+  },
 }
 
 const resolveExpectedTitle = (framework: FrameworkMode): string => {
@@ -150,6 +216,12 @@ const resolveExpectedTitle = (framework: FrameworkMode): string => {
     return 'cucumber style should keep scenario name in video filename'
   }
   return CUCUMBER_RETRY_TITLE
+}
+
+const resolveExpectedTitles = (framework: FrameworkMode): string[] => {
+  return framework === 'cucumber-duplicate-names'
+    ? [...CUCUMBER_DUPLICATE_TITLES]
+    : [resolveExpectedTitle(framework)]
 }
 
 const runWdioFramework = async (
@@ -174,26 +246,30 @@ const runWdioFramework = async (
       ...(target.retryAttempts
         ? { WDIO_CUCUMBER_RETRY_MODE: target.retryAttempts }
         : {}),
+      ...(target.duplicateNames ? { WDIO_CUCUMBER_DUPLICATE_NAMES: '1' } : {}),
     }),
   })
 
   await waitForChildProcess(child, (code) => {
     return `[e2e:frameworks] ${framework} run failed with code ${code}`
   })
-  const expectedTitle = resolveExpectedTitle(framework)
+  const expectedTitles = resolveExpectedTitles(framework)
   await assertStaticVideoReport({
     resultsDir,
-    expectedTitles: [expectedTitle],
+    expectedTitles,
     ...(target.retryAttempts ? { expectRetryOutcomes: true } : {}),
     runLabel: framework,
   })
   await assertAllureVideoAttachments({
     resultsDir,
-    expectedTitles: [expectedTitle],
+    expectedTitles,
     runLabel: `${framework}-allure`,
   })
   if (target.retryAttempts) {
     await assertCucumberRetryAttempts(resultsDir, target.retryAttempts)
+  }
+  if (target.duplicateNames) {
+    await assertDistinctScenarioMedia(resultsDir)
   }
 
   console.log(`[e2e:frameworks] Completed ${framework} run.`)
