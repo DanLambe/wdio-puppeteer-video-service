@@ -10,10 +10,12 @@
 - Mocha, Jasmine, and Cucumber WDIO frameworks
 - Ubuntu and Windows GitHub-hosted runners
 
-The Puppeteer floor is the lowest version currently exercised by the package's
-release-validation matrix, not a claim that every earlier 24.x API is
-incompatible. The floor is widened only after the same package, protocol,
-capture-control, and media checks pass on the proposed version.
+The Puppeteer floor is intentional. Puppeteer Core 24.0.0 was checked during
+release validation, but its public and runtime screencast options do not support
+the `format`, `fps`, and `quality` controls used by this service. Puppeteer Core
+24.11.2 is the lowest version exercised by the package, protocol,
+capture-control, and media matrix. The floor is changed only after the same
+checks pass on a proposed version.
 
 Finalized merge and transcode artifacts use atomic hard-link publication so an
 existing artifact is never overwritten. Keep `outputDir` on a filesystem that

@@ -15,6 +15,11 @@ unsupported Puppeteer 25 installation. Do not bypass the conflict with
 `--force`, `--legacy-peer-deps`, or an override. Keep WebdriverIO on a supported
 9.x release and use Puppeteer Core `>=24.11.2 <25`.
 
+The lower bound is not only a peer-resolution preference. Puppeteer Core
+24.0.0 does not expose or apply the `format`, `fps`, and `quality` screencast
+controls required by the service, so widening the range to all 24.x releases
+would silently ignore configured capture behavior.
+
 ## WDIO launcher context is missing or malformed
 
 Register the service by package name:
