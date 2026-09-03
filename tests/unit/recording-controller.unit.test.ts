@@ -58,6 +58,9 @@ interface ControllerHarness {
   readonly startCapture: ReturnType<
     typeof vi.fn<RecordingControllerOptions['captureEngine']['startCapture']>
   >
+  readonly transcode: ReturnType<
+    typeof vi.fn<Pick<MediaPipeline, 'transcode'>['transcode']>
+  >
 }
 
 const createHarness = (
@@ -108,13 +111,14 @@ const createHarness = (
       },
       release: releaseSlot,
     }
+  const transcode = vi.fn(async () => undefined)
   const mediaPipeline: Pick<
     MediaPipeline,
     'merge' | 'reportFailure' | 'transcode'
   > = {
     merge: vi.fn(async () => undefined),
     reportFailure: vi.fn(),
-    transcode: vi.fn(async () => undefined),
+    transcode,
   }
   const media = new RecordingMediaCoordinator({
     captureSession: session,
@@ -151,6 +155,7 @@ const createHarness = (
     },
     shouldTranscode,
     startCapture,
+    transcode,
   }
 }
 
@@ -167,6 +172,26 @@ const createActiveSegment = (recordingPath: string): ActiveSegment => ({
   writeStreamDone: Promise.resolve(),
   writeStreamErrored: false,
 })
+
+const attachTranscodedSegment = async (
+  harness: ControllerHarness,
+  recordingPath: string,
+  outputPath: string,
+): Promise<void> => {
+  await fs.writeFile(recordingPath, 'captured-media')
+  harness.session.beginRecording(path.parse(recordingPath).name)
+  harness.session.attachCapture({
+    dimensions: undefined,
+    recorder: {} as ScreenRecorder,
+    segment: {
+      ...createActiveSegment(recordingPath),
+      outputFormat: 'mp4',
+      outputPath,
+      transcode: true,
+    },
+    windowHandle: undefined,
+  })
+}
 
 const withTempDir = async (
   run: (tempDir: string) => Promise<void>,
@@ -425,6 +450,72 @@ describe('RecordingController', () => {
     await expect(harness.controller.finalizeMedia(true, true)).resolves.toEqual(
       { deferred: false, paths: [] },
     )
+  })
+
+  it('deletes an unretained raw capture without transcoding it', async () => {
+    await withTempDir(async (tempDir) => {
+      const recordingPath = path.join(tempDir, 'discarded.webm')
+      const outputPath = path.join(tempDir, 'discarded.mp4')
+      const harness = createHarness({
+        outputDir: tempDir,
+        processing: {
+          format: 'mp4',
+          transcode: { enabled: true },
+        },
+      })
+      await attachTranscodedSegment(harness, recordingPath, outputPath)
+
+      await expect(
+        harness.controller.finalizeMedia(true, false),
+      ).resolves.toEqual({ deferred: false, paths: [] })
+
+      expect(harness.transcode).not.toHaveBeenCalled()
+      await expect(fs.stat(recordingPath)).rejects.toThrow()
+      await expect(fs.stat(outputPath)).rejects.toThrow()
+    })
+  })
+
+  it('transcodes a retained final segment exactly once', async () => {
+    await withTempDir(async (tempDir) => {
+      const recordingPath = path.join(tempDir, 'failed.webm')
+      const outputPath = path.join(tempDir, 'failed.mp4')
+      const harness = createHarness({
+        outputDir: tempDir,
+        processing: {
+          format: 'mp4',
+          transcode: { enabled: true },
+        },
+      })
+      harness.transcode.mockResolvedValue(outputPath)
+      await attachTranscodedSegment(harness, recordingPath, outputPath)
+
+      await expect(
+        harness.controller.finalizeMedia(false, true),
+      ).resolves.toEqual({ deferred: false, paths: [outputPath] })
+
+      expect(harness.transcode).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('still transcodes a mid-test segment before retention is known', async () => {
+    await withTempDir(async (tempDir) => {
+      const recordingPath = path.join(tempDir, 'retained.webm')
+      const outputPath = path.join(tempDir, 'retained.mp4')
+      const harness = createHarness({
+        outputDir: tempDir,
+        processing: {
+          format: 'mp4',
+          transcode: { enabled: true },
+        },
+      })
+      harness.transcode.mockResolvedValue(outputPath)
+      await attachTranscodedSegment(harness, recordingPath, outputPath)
+
+      await harness.controller.stopRecording()
+
+      expect(harness.transcode).toHaveBeenCalledOnce()
+      expect(harness.session.recordedPaths).toEqual([outputPath])
+    })
   })
 
   it('retains unmerged media without scheduling post-processing', async () => {

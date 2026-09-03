@@ -301,6 +301,35 @@ describe('Puppeteer capture engine', () => {
     )
   })
 
+  it('clears and unreferences stream timeouts after clean completion', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const timers: Array<{ unref: ReturnType<typeof vi.fn> }> = []
+    const clearTimeout = vi.fn()
+    const clock: ClockBoundary = {
+      ...systemClock,
+      clearTimeout,
+      setTimeout: vi.fn(() => {
+        const timer = { unref: vi.fn() }
+        timers.push(timer)
+        return timer as unknown as NodeJS.Timeout
+      }),
+    }
+    const harness = createHarness({ clock })
+
+    await startCapture(harness, outputPath)
+    harness.recorder.write('recorded-bytes')
+    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+      streamOk: true,
+    })
+
+    expect(timers).toHaveLength(2)
+    expect(timers.every((timer) => timer.unref.mock.calls.length === 1)).toBe(
+      true,
+    )
+    expect(clearTimeout.mock.calls.map(([timer]) => timer)).toEqual(timers)
+  })
+
   it('supports unknown dimensions, frame priming, and viewport restore diagnostics', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
@@ -523,9 +552,8 @@ describe('Puppeteer capture engine', () => {
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {
-    const harness = createHarness({
-      clock: { ...systemClock, delay: vi.fn(async () => {}) },
-    })
+    vi.useFakeTimers()
+    const harness = createHarness()
     let rejectCompletion: ((error: Error) => void) | undefined
     const writeStreamDone = new Promise<void>((_resolve, reject) => {
       rejectCompletion = reject
@@ -565,7 +593,9 @@ describe('Puppeteer capture engine', () => {
       windowHandle: undefined,
     })
 
-    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+    const stopTask = harness.engine.stopCapture()
+    await vi.advanceTimersByTimeAsync(30_000)
+    await expect(stopTask).resolves.toMatchObject({
       segment: {
         outputFormat: 'webm',
         outputPath: 'capture.webm',

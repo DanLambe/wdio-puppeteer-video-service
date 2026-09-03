@@ -391,17 +391,16 @@ export class PuppeteerCaptureEngine {
   }
 
   private async stopRecorder(recorder: ScreenRecorder): Promise<void> {
-    let timeout: NodeJS.Timeout | undefined
-    const timeoutTask = new Promise<never>((_resolve, reject) => {
-      timeout = this.clock.setTimeout(() => {
-        reject(
-          new Error(
-            `Recorder stop timed out after ${RECORDER_STOP_TIMEOUT_MS.toString()}ms`,
-          ),
-        )
-      }, RECORDER_STOP_TIMEOUT_MS)
-      timeout.unref?.()
-    })
+    const { promise: timeoutTask, reject: rejectTimeout } =
+      Promise.withResolvers<never>()
+    const timeout = this.clock.setTimeout(() => {
+      rejectTimeout(
+        new Error(
+          `Recorder stop timed out after ${RECORDER_STOP_TIMEOUT_MS.toString()}ms`,
+        ),
+      )
+    }, RECORDER_STOP_TIMEOUT_MS)
+    timeout.unref()
     try {
       await Promise.race([recorder.stop(), timeoutTask])
     } catch (error) {
@@ -414,9 +413,7 @@ export class PuppeteerCaptureEngine {
         recorder.destroy()
       }
     } finally {
-      if (timeout) {
-        this.clock.clearTimeout(timeout)
-      }
+      this.clock.clearTimeout(timeout)
     }
   }
 
@@ -425,10 +422,21 @@ export class PuppeteerCaptureEngine {
       await segment.writeStreamDone.catch(() => undefined)
       return false
     }
-    const streamOk = await Promise.race([
-      segment.writeStreamDone.then(() => true).catch(() => false),
-      this.clock.delay(WRITE_STREAM_TIMEOUT_MS).then(() => false),
-    ])
+    const { promise: timeoutTask, resolve: resolveTimeout } =
+      Promise.withResolvers<false>()
+    const timeout = this.clock.setTimeout(() => {
+      resolveTimeout(false)
+    }, WRITE_STREAM_TIMEOUT_MS)
+    timeout.unref()
+    let streamOk: boolean
+    try {
+      streamOk = await Promise.race([
+        segment.writeStreamDone.then(() => true).catch(() => false),
+        timeoutTask,
+      ])
+    } finally {
+      this.clock.clearTimeout(timeout)
+    }
     if (streamOk) {
       return true
     }

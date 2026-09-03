@@ -258,6 +258,9 @@ Unknown integrations are rejected instead of being silently ignored.
 - `attempts: 'retries'` skips first-attempt capture.
 - `retain: 'retries'` keeps retry-attempt artifacts, including a retry that passes.
 - `retain: 'all'` keeps every captured artifact.
+- A discarded entity's final raw capture is deleted before optional transcode or
+  merge work. A segment closed earlier by a window change is processed normally
+  because the entity's final result is not yet known.
 - Retry context is passed from the launcher to each worker through WDIO's
   configuration boundary; no retry-state files are written to the artifact
   directory.

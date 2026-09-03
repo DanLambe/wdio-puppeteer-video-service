@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
@@ -21,6 +23,32 @@ type AdvancedMode =
   | 'retention'
   | 'global-concurrency'
   | 'ffmpeg-failure'
+
+const assertDiscardedRetentionEntry = async (
+  resultsDir: string,
+): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] retention mode produced an invalid manifest',
+    )
+  }
+  const discardedEntry = manifestValue.runs
+    .flatMap((run) => run.entries)
+    .find((entry) => entry.test?.name === 'should discard a passing recording')
+  if (
+    discardedEntry?.capture.decision !== 'discarded' ||
+    discardedEntry.capture.segments.length !== 0 ||
+    discardedEntry.capture.final !== undefined ||
+    discardedEntry.processing.outcome !== 'skipped'
+  ) {
+    throw new Error(
+      '[e2e:advanced] passing retention entry should be discarded without published media or post-processing',
+    )
+  }
+}
 
 const requestedMode = process.argv[2] || 'all'
 
@@ -108,6 +136,10 @@ const runMode = async (
     5 * 60_000,
     mode === 'retention' ? [1] : [0],
   )
+
+  if (mode === 'retention') {
+    await assertDiscardedRetentionEntry(resultsDir)
+  }
 
   const retryTitle =
     mode === 'retry'

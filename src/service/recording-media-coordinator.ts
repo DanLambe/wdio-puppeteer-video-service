@@ -195,7 +195,10 @@ export class RecordingMediaCoordinator {
     }
   }
 
-  async finalizeSegment(segment: ActiveSegment): Promise<void> {
+  async finalizeSegment(
+    segment: ActiveSegment,
+    options: Readonly<{ keepArtifacts?: boolean }> = {},
+  ): Promise<void> {
     let recordedSize: number
     try {
       const stats = await this.fileSystem.stat(segment.recordingPath)
@@ -225,8 +228,12 @@ export class RecordingMediaCoordinator {
       return
     }
 
-    if (!segment.transcode) {
-      this.captureSession.addRecordedPath(segment.outputPath)
+    if (!segment.transcode || options.keepArtifacts === false) {
+      this.captureSession.addRecordedPath(
+        options.keepArtifacts === false
+          ? segment.recordingPath
+          : segment.outputPath,
+      )
       return
     }
 

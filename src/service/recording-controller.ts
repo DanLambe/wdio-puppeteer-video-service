@@ -157,7 +157,7 @@ export class RecordingController {
     const deferredTaskCount = this.media.pendingTaskCount
     await this.lifecycle.finalize({
       stopRecording: async () => {
-        await this.stopRecording()
+        await this.stopRecording({ keepArtifacts })
       },
       processArtifacts: async () => {
         this.log(
@@ -185,7 +185,9 @@ export class RecordingController {
     }
   }
 
-  async stopRecording(): Promise<void> {
+  async stopRecording(
+    options: Readonly<{ keepArtifacts?: boolean }> = {},
+  ): Promise<void> {
     let activeSegment: ActiveSegment | undefined
     let streamOk = false
     let recordingSlotReleased = false
@@ -217,7 +219,9 @@ export class RecordingController {
             )
           }
           await releaseRecordingSlot()
-          await this.media.finalizeSegment(activeSegment)
+          await this.media.finalizeSegment(activeSegment, {
+            keepArtifacts: options.keepArtifacts ?? true,
+          })
           this.log(
             'debug',
             `[WdioPuppeteerVideoService] Finalized segment ${this.captureSession.currentSegment} (${activeSegment.outputPath})`,
