@@ -119,6 +119,10 @@ jobs:
       - name: Run Chrome Protocol Tests
         run: corepack npm run test:e2e:capture:${{ matrix.protocol }}
 
+      - name: Verify Retained Media Dimensions
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:metadata
+
   support-floor:
     name: Minimum WDIO And Puppeteer E2E
     runs-on: ubuntu-latest
@@ -151,6 +155,9 @@ jobs:
 
       - name: Run Classic Chrome Capture
         run: corepack npm run test:e2e:capture:classic
+
+      - name: Verify Retained Media Dimensions
+        run: corepack npm run test:e2e:capture:metadata
 
   frameworks:
     name: ${{ matrix.framework }} framework

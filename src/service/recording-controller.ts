@@ -323,7 +323,7 @@ export class RecordingController {
         'debug',
         `[WdioPuppeteerVideoService] Recording segment ${this.captureSession.currentSegment} to ${this.captureSession.activeSegment?.outputPath ?? 'unknown output'}`,
       )
-      this.getManifestRecorder()?.markCaptureStarted(result.dimensions)
+      this.getManifestRecorder()?.markCaptureStarted()
       return true
     } catch (error) {
       this.log(

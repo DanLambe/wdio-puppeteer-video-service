@@ -197,7 +197,7 @@ Top-level options:
 - `format` (`'webm' | 'mp4'`, default `'webm'`).
 - `mp4Mode` (`'auto' | 'direct' | 'transcode'`, default `'auto'`).
 - `timing` (`'after-test' | 'after-worker'`, default `'after-test'`).
-- `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the timeout).
+- `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the processing timeout). Retained-video metadata inspection is always bounded to 5 seconds, or this timeout when it is shorter and positive.
 - `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`.
 - `merge.enabled` (default `false`) and `deleteSegments` (default `true`).
 
@@ -368,6 +368,16 @@ without mixing worker journals. Existing valid run records are retained whenever
 the manifest is aggregated; the service does not prune old runs, so archive or
 remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
+Optional artifact `width` and `height` describe the encoded retained file, not
+an estimate of the page's CSS viewport. A lightweight FFmpeg inspection reads
+each finalized artifact without decoding the full video; this accounts for
+device pixel ratio, crop/scale rounding, H264 padding, custom filters, and
+segments with different sizes. Inspections use the existing post-processing
+capacity limits. Discarded videos and pending deferred inputs are not inspected;
+deferred outputs are measured after processing. If inspection is unavailable,
+the service logs a warning and omits these optional fields while preserving
+the video, including with `failurePolicy: 'error'`.
+
 The dependency-free types and validator are available from the manifest export:
 
 ```typescript
@@ -470,8 +480,10 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
 - `npm run test:e2e:both`: multipart and merged Mocha runs.
 - `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
-- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, and Edge smoke.
+- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, Edge smoke, and retained-file metadata checks.
+- `npm run test:e2e:capture:metadata`: high-DPI, odd-size fractional scaling, H264 padding, and custom-filter dimensions compared with Manifest v1.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
+- Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
 - `npm run test:coverage`: runs the deterministic unit/integration suite with
   95% statements, lines, and functions plus a 90% branch gate.

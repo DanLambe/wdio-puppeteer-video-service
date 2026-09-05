@@ -76,6 +76,9 @@ Equivalent retry-only configuration:
   establishes the recorder canvas and is restored after capture initialization.
   The canvas remains pinned to that start-time size while the test page returns
   to its original viewport mode.
+- Optional manifest media dimensions are now read from finalized retained files,
+  so they can differ from earlier CSS-based estimates. Pending or unreadable
+  artifacts omit dimensions; no Manifest v1 schema change is required.
 - `processing.timing: 'after-worker'` defers FFmpeg work and is incompatible
   with Allure attachment integration.
 - `concurrency.maxPostProcessesPerProcess` now defaults to `1` and must be a

@@ -97,6 +97,91 @@ const createHarness = (
 }
 
 describe('FfmpegRuntime', () => {
+  it.each([
+    [0, 5_000],
+    [250, 250],
+    [30_000, 5_000],
+  ])(
+    'reads dimensions under the post-process lease with timeout %i bounded to %i',
+    async (configuredTimeout, expectedTimeout) => {
+      const harness = createHarness({
+        processing: { ffmpeg: { timeoutMs: configuredTimeout } },
+      })
+      harness.runFfmpeg.mockImplementation(async (options) => {
+        expect(harness.scheduler.acquire).toHaveBeenCalledOnce()
+        expect(harness.scheduler.release).not.toHaveBeenCalled()
+        options.onStderr?.('Stream #0:0: Video: h264, yuv420p, 802x402')
+        return true
+      })
+
+      await expect(
+        harness.runtime.readMediaDimensions('/video.mp4'),
+      ).resolves.toEqual({ width: 802, height: 402 })
+      expect(harness.runFfmpeg).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'metadata probe',
+          timeoutMs: expectedTimeout,
+        }),
+        harness.processRegistry,
+      )
+      expect(harness.scheduler.release).toHaveBeenCalledOnce()
+    },
+  )
+
+  it.each([false, true])(
+    'omits dimensions when the probe success is %s but metadata is unavailable',
+    async (success) => {
+      const harness = createHarness()
+      harness.runFfmpeg.mockImplementation(async (options) => {
+        options.onStderr?.(
+          success ? 'no video stream' : 'Stream #0:0: Video: vp9, 800x600',
+        )
+        return success
+      })
+      await expect(
+        harness.runtime.readMediaDimensions('/video.webm'),
+      ).resolves.toBeUndefined()
+      expect(harness.scheduler.release).toHaveBeenCalledOnce()
+      expect(harness.log).toHaveBeenCalledWith(
+        'warn',
+        expect.stringContaining('omitting optional manifest dimensions'),
+      )
+    },
+  )
+
+  it('preserves media when dimension probing throws', async () => {
+    const harness = createHarness()
+    const failure = new Error('probe failed')
+    harness.runFfmpeg.mockRejectedValue(failure)
+    await expect(
+      harness.runtime.readMediaDimensions('/video.webm'),
+    ).resolves.toBeUndefined()
+    expect(harness.scheduler.release).toHaveBeenCalledOnce()
+    expect(harness.log).toHaveBeenCalledWith(
+      'warn',
+      expect.stringContaining('preserving media'),
+      failure,
+    )
+  })
+
+  it('does not start a metadata probe without FFmpeg or post-processing capacity', async () => {
+    const unavailable = createHarness()
+    unavailable.resolveAvailablePath.mockResolvedValue(undefined)
+    await expect(
+      unavailable.runtime.readMediaDimensions('/video.webm'),
+    ).resolves.toBeUndefined()
+    expect(unavailable.scheduler.acquire).not.toHaveBeenCalled()
+    expect(unavailable.runFfmpeg).not.toHaveBeenCalled()
+
+    const noCapacity = createHarness()
+    noCapacity.scheduler.acquire.mockResolvedValue(false)
+    await expect(
+      noCapacity.runtime.readMediaDimensions('/video.webm'),
+    ).resolves.toBeUndefined()
+    expect(noCapacity.runFfmpeg).not.toHaveBeenCalled()
+    expect(noCapacity.scheduler.release).not.toHaveBeenCalled()
+  })
+
   it('initializes lazily, deduplicates concurrent discovery, and reports the version', async () => {
     const harness = createHarness()
     let finishDiscovery: ((path: string | undefined) => void) | undefined

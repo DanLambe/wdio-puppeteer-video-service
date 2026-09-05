@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { systemClock } from '../../src/service/boundaries.js'
 import {
   primeScreencastFrames,
-  resolveCaptureDimensions,
   startScreencast,
 } from '../../src/service/capture.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
@@ -117,6 +116,58 @@ describe('Puppeteer screencast capture controls', () => {
     expect(onViewportRestoreError).toHaveBeenCalledWith(restoreError)
   })
 
+  it.each(['current', { width: 800, height: 600 }] as const)(
+    'adds crop guidance and preserves the cause with viewport %j',
+    async (viewport) => {
+      const failure = new Error(
+        '`crop.width` cannot be larger than the viewport width (800).',
+      )
+      const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
+      const capture = resolveServiceConfiguration({
+        capture: { viewport, crop: { x: 0, y: 0, width: 900, height: 400 } },
+      }).options.capture
+
+      await expect(
+        startScreencast(
+          {
+            viewport: () => null,
+            setViewport,
+            screencast: async () => {
+              throw failure
+            },
+          } as unknown as Page,
+          { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        ),
+      ).rejects.toMatchObject({
+        cause: failure,
+        message: expect.stringMatching(/capture\.crop.*capture\.viewport/u),
+      })
+      if (viewport === 'current') {
+        expect(setViewport).not.toHaveBeenCalled()
+      } else {
+        expect(setViewport).toHaveBeenLastCalledWith(null)
+      }
+    },
+  )
+
+  it('does not misclassify unrelated screencast failures when crop is configured', async () => {
+    const failure = new Error('FFmpeg failed to start')
+    const capture = resolveServiceConfiguration({
+      capture: { crop: { x: 0, y: 0, width: 400, height: 300 } },
+    }).options.capture
+    await expect(
+      startScreencast(
+        {
+          viewport: () => null,
+          screencast: async () => {
+            throw failure
+          },
+        } as unknown as Page,
+        { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+      ),
+    ).rejects.toBe(failure)
+  })
+
   it('does not emulate a viewport when capture.viewport is current', async () => {
     const recorder = createRecorder()
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
@@ -134,58 +185,19 @@ describe('Puppeteer screencast capture controls', () => {
     expect(setViewport).not.toHaveBeenCalled()
   })
 
-  it('resolves scaled crop dimensions for manifest metadata', async () => {
-    const capture = resolveServiceConfiguration({
-      capture: {
-        viewport: { width: 1280, height: 720 },
-        crop: { x: 10, y: 20, width: 800, height: 400 },
-        scale: 0.5,
-      },
-    }).options.capture
-
-    await expect(
-      resolveCaptureDimensions(
-        { viewport: () => null } as unknown as Page,
-        capture,
-      ),
-    ).resolves.toEqual({ width: 400, height: 200 })
-  })
-
-  it('reads native viewport dimensions and handles unavailable dimensions', async () => {
-    const capture = resolveServiceConfiguration({}).options.capture
-    await expect(
-      resolveCaptureDimensions(
-        {
-          viewport: () => null,
-          evaluate: async () => ({ width: 1024, height: 640 }),
-        } as unknown as Page,
-        capture,
-      ),
-    ).resolves.toEqual({ width: 1024, height: 640 })
-    await expect(
-      resolveCaptureDimensions(
-        {
-          viewport: () => null,
-          evaluate: async () => ({ width: 0, height: 0 }),
-        } as unknown as Page,
-        capture,
-      ),
-    ).resolves.toBeUndefined()
-  })
-
-  it('evaluates native browser dimensions through the page callback', async () => {
-    const capture = resolveServiceConfiguration({}).options.capture
+  it('evaluates the native browser viewport for frame priming', async () => {
+    const setViewport = vi.fn(async () => {})
     const page = {
+      setViewport,
       viewport: () => null,
       evaluate: async (callback: () => { width: number; height: number }) => {
         Object.assign(globalThis, { innerWidth: 900, innerHeight: 500 })
         return callback()
       },
     } as unknown as Page
-    await expect(resolveCaptureDimensions(page, capture)).resolves.toEqual({
-      width: 900,
-      height: 500,
-    })
+    await primeScreencastFrames(page, { ...systemClock, delay: async () => {} })
+    expect(setViewport).toHaveBeenNthCalledWith(1, { width: 901, height: 500 })
+    expect(setViewport).toHaveBeenNthCalledWith(2, null)
     Reflect.deleteProperty(globalThis, 'innerWidth')
     Reflect.deleteProperty(globalThis, 'innerHeight')
   })

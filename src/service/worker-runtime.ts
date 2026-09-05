@@ -232,6 +232,8 @@ export class WdioPuppeteerVideoWorkerRuntime
           cid,
           framework,
           failurePolicy: this._options.failurePolicy,
+          readDimensions: (filePath) =>
+            this._ffmpegRuntime.readMediaDimensions(filePath),
           onJournalError: (operation, error) => {
             this._log(
               'warn',

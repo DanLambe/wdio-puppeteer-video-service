@@ -181,7 +181,6 @@ const attachTranscodedSegment = async (
   await fs.writeFile(recordingPath, 'captured-media')
   harness.session.beginRecording(path.parse(recordingPath).name)
   harness.session.attachCapture({
-    dimensions: undefined,
     recorder: {} as ScreenRecorder,
     segment: {
       ...createActiveSegment(recordingPath),
@@ -292,13 +291,11 @@ describe('RecordingController', () => {
     harness.session.setBrowser({} as Browser)
     harness.startCapture.mockImplementation(async () => {
       harness.session.attachCapture({
-        dimensions: { height: 720, width: 1280 },
         recorder: {} as ScreenRecorder,
         segment: createActiveSegment('active.webm'),
         windowHandle: 'window-1',
       })
       return {
-        dimensions: { height: 720, width: 1280 },
         started: true,
       }
     })
@@ -692,7 +689,6 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('capture.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder: {} as ScreenRecorder,
       segment,
       windowHandle: undefined,
@@ -720,7 +716,6 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('incomplete.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder: {} as ScreenRecorder,
       segment,
       windowHandle: undefined,
@@ -747,7 +742,6 @@ describe('RecordingController', () => {
     const harness = createHarness()
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder: {} as ScreenRecorder,
       segment: createActiveSegment('missing.webm'),
       windowHandle: undefined,

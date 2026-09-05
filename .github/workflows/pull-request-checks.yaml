@@ -72,3 +72,6 @@ jobs:
 
       - name: Run E2E Tests
         run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced
+
+      - name: Verify Retained Media Dimensions
+        run: corepack npm run test:e2e:capture:metadata

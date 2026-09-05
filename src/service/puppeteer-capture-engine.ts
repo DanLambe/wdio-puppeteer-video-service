@@ -9,7 +9,6 @@ import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
   primeScreencastFrames,
-  resolveCaptureDimensions,
   type StartScreencastOptions,
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
@@ -45,16 +44,9 @@ export interface CaptureStartOptions {
   readonly transcodeOptions: ResolvedTranscodeOptions
 }
 
-export type CaptureStartResult =
-  | { readonly started: false }
-  | {
-      readonly dimensions: { readonly height: number; readonly width: number }
-      readonly started: true
-    }
-  | {
-      readonly dimensions: undefined
-      readonly started: true
-    }
+export interface CaptureStartResult {
+  readonly started: boolean
+}
 
 export interface CaptureStopResult {
   readonly segment: ActiveSegment | undefined
@@ -173,7 +165,6 @@ export class PuppeteerCaptureEngine {
       }
 
       const { page, windowHandle } = activePage
-      const dimensions = await resolveCaptureDimensions(page, this.capture)
       const output = await options.createOutput()
       pendingRecordingPath = output.recordingPath
       const recorder = await this.startScreencast(page, {
@@ -200,7 +191,6 @@ export class PuppeteerCaptureEngine {
       }
 
       this.session.attachCapture({
-        dimensions,
         recorder,
         segment,
         windowHandle,
@@ -208,9 +198,7 @@ export class PuppeteerCaptureEngine {
       pendingRecorder = undefined
       pendingSegment = undefined
       pendingRecordingPath = undefined
-      return dimensions
-        ? { dimensions, started: true }
-        : { dimensions: undefined, started: true }
+      return { started: true }
     } catch (error) {
       await this.cleanupPartialCapture(pendingRecorder, pendingSegment)
       if (pendingRecordingPath) {

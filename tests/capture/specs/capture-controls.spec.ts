@@ -16,6 +16,12 @@ describe('Puppeteer capture protocol and media controls', () => {
     if (mode === 'classic') {
       expect(typeof browser.capabilities.webSocketUrl).not.toBe('string')
     }
+    if (mode === 'hidpi') {
+      const dpr = await browser.execute(() =>
+        Reflect.get(globalThis, 'devicePixelRatio'),
+      )
+      expect(dpr).toBe(2)
+    }
     if (mode === 'edge') {
       expect(browser.capabilities.browserName?.toLowerCase()).toContain('edge')
     }

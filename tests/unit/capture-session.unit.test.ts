@@ -35,7 +35,6 @@ describe('capture session', () => {
 
     expect(() =>
       session.attachCapture({
-        dimensions: undefined,
         recorder,
         segment,
         windowHandle: undefined,
@@ -44,7 +43,6 @@ describe('capture session', () => {
 
     session.beginRecording('checkout')
     session.attachCapture({
-      dimensions: { height: 720, width: 1280 },
       recorder,
       segment,
       windowHandle: 'window-1',
@@ -54,11 +52,9 @@ describe('capture session', () => {
     expect(session.isRecordingActive).toBe(true)
     expect(session.recorder).toBe(recorder)
     expect(session.activeSegment).toBe(segment)
-    expect(session.captureDimensions).toEqual({ height: 720, width: 1280 })
     expect(session.currentWindowHandle).toBe('window-1')
     expect(() =>
       session.attachCapture({
-        dimensions: undefined,
         recorder,
         segment,
         windowHandle: undefined,
@@ -97,7 +93,6 @@ describe('capture session', () => {
     const segment = createSegment()
     session.beginRecording('checkout')
     session.attachCapture({
-      dimensions: { height: 400, width: 800 },
       recorder,
       segment,
       windowHandle: 'window-1',
@@ -109,7 +104,6 @@ describe('capture session', () => {
     expect(session.currentSegment).toBe(0)
     expect(session.currentTestSlug).toBe('')
     expect(session.currentWindowHandle).toBeUndefined()
-    expect(session.captureDimensions).toBeUndefined()
     expect(session.recordedPaths).toEqual([])
     expect(session.isRecordingActive).toBe(false)
     expect(() => session.advanceSegment()).toThrow(

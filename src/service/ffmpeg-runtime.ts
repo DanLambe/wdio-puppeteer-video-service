@@ -14,6 +14,11 @@ import type {
   RunFfmpegOptions,
 } from './ffmpeg-runner.js'
 import type { ServiceLogger } from './logging.js'
+import {
+  buildMediaMetadataArgs,
+  type MediaDimensions,
+  parseMediaDimensions,
+} from './media-metadata.js'
 import type { PostProcessSlotScheduler } from './recording-slots.js'
 
 export type FfmpegRunner = (
@@ -133,7 +138,11 @@ export class FfmpegRuntime {
     return mode === 'transcode' || (mode === 'auto' && this.forceMp4Transcode)
   }
 
-  async run(args: string[], operation: string): Promise<boolean> {
+  async run(
+    args: string[],
+    operation: string,
+    overrides: Partial<Pick<RunFfmpegOptions, 'onStderr' | 'timeoutMs'>> = {},
+  ): Promise<boolean> {
     if (!this.acceptingWork) {
       return false
     }
@@ -151,9 +160,52 @@ export class FfmpegRuntime {
         warnMissing: (reason) => {
           this.warnMissingFfmpeg(reason)
         },
+        ...overrides,
       },
       this.processRegistry,
     )
+  }
+
+  async readMediaDimensions(
+    inputPath: string,
+  ): Promise<MediaDimensions | undefined> {
+    try {
+      if (!(await this.ensureReady())) {
+        return undefined
+      }
+      return await this.withPostProcessSlot('metadata probe', async () => {
+        let dimensions: MediaDimensions | undefined
+        const configuredTimeout = this.options.processing.ffmpeg.timeoutMs
+        const success = await this.run(
+          buildMediaMetadataArgs(inputPath),
+          'metadata probe',
+          {
+            timeoutMs:
+              configuredTimeout > 0
+                ? Math.min(configuredTimeout, 5_000)
+                : 5_000,
+            onStderr: (output) => {
+              dimensions = parseMediaDimensions(output)
+            },
+          },
+        )
+        if (!success || !dimensions) {
+          this.log(
+            'warn',
+            `[WdioPuppeteerVideoService] Video dimensions unavailable for ${inputPath}; preserving media and omitting optional manifest dimensions.`,
+          )
+          return undefined
+        }
+        return dimensions
+      })
+    } catch (error) {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to read video dimensions for ${inputPath}; preserving media.`,
+        error,
+      )
+      return undefined
+    }
   }
 
   async withPostProcessSlot<T>(

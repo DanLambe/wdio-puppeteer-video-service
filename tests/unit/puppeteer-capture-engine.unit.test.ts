@@ -287,7 +287,6 @@ describe('Puppeteer capture engine', () => {
     const harness = createHarness()
 
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
-      dimensions: { height: 600, width: 800 },
       started: true,
     })
     harness.recorder.write('recorded-bytes')
@@ -330,7 +329,7 @@ describe('Puppeteer capture engine', () => {
     expect(clearTimeout.mock.calls.map(([timer]) => timer)).toEqual(timers)
   })
 
-  it('supports unknown dimensions, frame priming, and viewport restore diagnostics', async () => {
+  it('handles unavailable priming viewport and reports viewport restore failures', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness({ framePriming: true })
@@ -343,14 +342,12 @@ describe('Puppeteer capture engine', () => {
     evaluate
       .mockImplementationOnce(evaluateMarker)
       .mockResolvedValueOnce({ height: 0, width: 0 })
-      .mockResolvedValueOnce({ height: 0, width: 0 })
     harness.startScreencast.mockImplementationOnce(async (_page, options) => {
       options.onViewportRestoreError?.(new Error('viewport closed'))
       return harness.recorder as never
     })
 
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
-      dimensions: undefined,
       started: true,
     })
     harness.recorder.end()
@@ -498,7 +495,6 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('write-error')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,
@@ -538,7 +534,6 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,
@@ -587,7 +582,6 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,

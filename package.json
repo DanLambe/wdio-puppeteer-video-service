@@ -70,6 +70,7 @@
     "test:e2e:capture:bidi": "tsx tests/scripts/run-e2e-capture-modes.ts bidi",
     "test:e2e:capture:classic": "tsx tests/scripts/run-e2e-capture-modes.ts classic",
     "test:e2e:capture:controls": "tsx tests/scripts/run-e2e-capture-modes.ts controls",
+    "test:e2e:capture:metadata": "tsx tests/scripts/run-e2e-capture-modes.ts metadata",
     "test:e2e:capture:edge": "tsx tests/scripts/run-e2e-capture-modes.ts edge",
     "test:e2e:advanced": "tsx tests/scripts/run-e2e-advanced-options.ts all",
     "test:e2e:advanced:retry": "tsx tests/scripts/run-e2e-advanced-options.ts retry",

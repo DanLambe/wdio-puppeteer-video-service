@@ -40,6 +40,30 @@ service rejects class-based registration before browser startup.
   runner, Firefox, Safari, mobile, and remote-debugging pipes are unsupported.
 - Check recording filters and retry-only settings before increasing timeouts.
 
+## Capture crop does not fit the viewport
+
+`capture.crop` is checked against the viewport at screencast startup. Its
+right and bottom edges must fit within that viewport, not just its width and
+height in isolation. Reduce the crop or adjust `capture.viewport`. An explicit
+capture viewport is temporary and is restored after initialization, including
+when Puppeteer rejects the crop. The diagnostic retains Puppeteer's original
+error as its cause; unrelated browser or FFmpeg failures are not labeled crop
+errors.
+
+## Manifest video dimensions are missing or differ from the viewport
+
+Dimensions come from the retained encoded file. Browser device pixel ratio,
+Puppeteer scaling, H264 padding, and custom processing filters can make them
+different from CSS viewport dimensions. Deferred inputs have no dimensions
+until processing completes. Missing, empty, or uninspectable files omit these
+optional fields rather than guessing; the video itself is preserved.
+
+Look for metadata-probe or post-processing-capacity warnings and verify FFmpeg
+can read the retained file. A metadata probe uses a post-processing slot and
+has a 5-second execution limit (or a shorter positive
+`processing.ffmpeg.timeoutMs`). Setting that option to `0` does not disable the
+metadata limit. Optional metadata failures warn even under the error policy.
+
 ## FFmpeg is unavailable
 
 Set `processing.ffmpeg.path` or `FFMPEG_PATH`, or put `ffmpeg` on `PATH`.

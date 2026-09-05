@@ -3,6 +3,8 @@ import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
+import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -140,6 +142,12 @@ const runMode = async (
   if (mode === 'retention') {
     await assertDiscardedRetentionEntry(resultsDir)
   }
+  if (mode === 'retry' || mode === 'deferred-merge') {
+    await assertManifestMediaDimensions(
+      resultsDir,
+      environment.ffmpegDetection.resolvedPath,
+    )
+  }
 
   if (mode === 'global-concurrency') {
     // Config onComplete runs before launcher services, so verify final cleanup here.
@@ -176,6 +184,10 @@ const runMode = async (
       expectRetryOutcomes: false,
       runLabel: 'advanced-deferred-merge',
     })
+  }
+
+  if (mode === 'retry') {
+    await assertOfflineReportInBrowser(resultsDir)
   }
 
   if (mode === 'retry' || mode === 'spec-file-retry' || mode === 'retention') {

@@ -11,6 +11,7 @@ vi.mock('node:child_process', () => ({
 import { FFMPEG_TERMINATION_GRACE_MS } from '../../src/service/constants.js'
 import {
   FfmpegProcessRegistry,
+  type RunFfmpegOptions,
   runFfmpeg,
   spawnFfmpegProcess,
 } from '../../src/service/ffmpeg-runner.js'
@@ -23,7 +24,10 @@ class FakeFfmpegProcess extends EventEmitter implements FfmpegProcess {
   unref = vi.fn(() => this)
 }
 
-const createRunnerHarness = (timeoutMs = 0) => {
+const createRunnerHarness = (
+  timeoutMs = 0,
+  overrides: Partial<RunFfmpegOptions> = {},
+) => {
   const warnMessages: string[] = []
   const warnMissing = vi.fn()
   const markUnavailable = vi.fn()
@@ -42,6 +46,7 @@ const createRunnerHarness = (timeoutMs = 0) => {
         operation: 'merge',
         timeoutMs,
         warnMissing,
+        ...overrides,
       },
       {
         spawnProcess: () => process,
@@ -131,6 +136,50 @@ describe('ffmpeg runner process handling', () => {
     expect(harness.warnMessages).toHaveLength(1)
     expect(harness.warnMessages[0]).toContain('muxer failed')
   })
+
+  it('returns successful bounded UTF-8 diagnostics only once', async () => {
+    const process = new FakeFfmpegProcess()
+    const onStderr = vi.fn()
+    const harness = createRunnerHarness(0, { onStderr })
+    const result = harness.run(process)
+    const output = Buffer.from('Video: 测试, 801x401')
+    process.stderr?.write(output.subarray(0, 8))
+    process.stderr?.write(output.subarray(8))
+    process.emit('close', 0)
+    process.emit('close', 0)
+    await expect(result).resolves.toBe(true)
+    expect(onStderr).toHaveBeenCalledExactlyOnceWith('Video: 测试, 801x401')
+  })
+
+  it('settles failure if the diagnostic callback throws', async () => {
+    const process = new FakeFfmpegProcess()
+    const harness = createRunnerHarness(10, {
+      onStderr: () => {
+        throw new Error('callback failed')
+      },
+    })
+    const result = harness.run(process)
+    process.emit('close', 0)
+    await expect(result).resolves.toBe(false)
+    expect(harness.warnMessages).toEqual(['Failed to read FFmpeg diagnostics:'])
+  })
+
+  it.each([0, 1])(
+    'does not deliver metadata after timeout or failed exit %i',
+    async (code) => {
+      vi.useFakeTimers()
+      const process = new FakeFfmpegProcess()
+      const onStderr = vi.fn()
+      const harness = createRunnerHarness(25, { onStderr })
+      const result = harness.run(process)
+      if (code === 0) {
+        await vi.advanceTimersByTimeAsync(25)
+      }
+      process.emit('close', code)
+      await expect(result).resolves.toBe(false)
+      expect(onStderr).not.toHaveBeenCalled()
+    },
+  )
 
   it('preserves UTF-8 characters split across stderr chunks', async () => {
     const process = new FakeFfmpegProcess()

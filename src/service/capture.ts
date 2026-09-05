@@ -14,11 +14,6 @@ export interface StartScreencastOptions {
   onViewportRestoreError?: (error: unknown) => void
 }
 
-export interface CaptureDimensions {
-  width: number
-  height: number
-}
-
 export const startScreencast = async (
   page: Page,
   options: StartScreencastOptions,
@@ -30,6 +25,18 @@ export const startScreencast = async (
 
   try {
     return await page.screencast(createScreencastOptions(options))
+  } catch (error) {
+    if (
+      options.capture.crop &&
+      error instanceof Error &&
+      error.message.startsWith('`crop.')
+    ) {
+      throw new Error(
+        `[WdioPuppeteerVideoService] Invalid capture.crop for capture.viewport at screencast startup. The crop rectangle must fit within the start-time viewport: ${error.message}`,
+        { cause: error },
+      )
+    }
+    throw error
   } finally {
     if (options.capture.viewport !== 'current') {
       await page.setViewport(originalViewport).catch((error) => {
@@ -51,26 +58,6 @@ export const createScreencastOptions = (
     speed: capture.speed,
     ffmpegPath: options.ffmpegPath,
     ...(capture.crop ? { crop: capture.crop } : {}),
-  }
-}
-
-export const resolveCaptureDimensions = async (
-  page: Page,
-  capture: ResolvedCaptureOptions,
-): Promise<CaptureDimensions | undefined> => {
-  const currentViewport =
-    typeof page.viewport === 'function' ? page.viewport() : null
-  const viewport =
-    capture.viewport === 'current'
-      ? (currentViewport ?? (await readCurrentViewport(page)))
-      : capture.viewport
-  const source = capture.crop ?? viewport
-  if (!source) {
-    return undefined
-  }
-  return {
-    width: Math.max(1, Math.round(source.width * capture.scale)),
-    height: Math.max(1, Math.round(source.height * capture.scale)),
   }
 }
 

@@ -1,20 +1,41 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
-type CaptureMode = 'bidi' | 'classic' | 'controls' | 'edge'
+type CaptureMode =
+  | 'bidi'
+  | 'classic'
+  | 'controls'
+  | 'edge'
+  | 'hidpi'
+  | 'odd-scale'
+  | 'padded-mp4'
+  | 'filtered-mp4'
 
 const requestedMode = process.argv[2] ?? 'all'
-const allModes: CaptureMode[] = ['bidi', 'classic', 'controls', 'edge']
-const modes =
-  requestedMode === 'all'
-    ? allModes
-    : allModes.filter((mode) => mode === requestedMode)
+const allModes: CaptureMode[] = [
+  'bidi',
+  'classic',
+  'controls',
+  'edge',
+  'hidpi',
+  'odd-scale',
+  'padded-mp4',
+  'filtered-mp4',
+]
+const modes = allModes.filter(
+  (mode) =>
+    requestedMode === 'all' ||
+    mode === requestedMode ||
+    (requestedMode === 'metadata' &&
+      ['hidpi', 'odd-scale', 'padded-mp4', 'filtered-mp4'].includes(mode)),
+)
 
 if (modes.length === 0) {
   console.error(
-    `[e2e:capture] Invalid mode "${requestedMode}". Use ${allModes.join(', ')}, or all.`,
+    `[e2e:capture] Invalid mode "${requestedMode}". Use ${allModes.join(', ')}, metadata, or all.`,
   )
   process.exit(1)
 }
@@ -41,6 +62,10 @@ const runMode = async (
   await waitForChildProcess(child, (code) => {
     return `[e2e:capture] ${mode} run failed with code ${code}`
   })
+  await assertManifestMediaDimensions(
+    resultsDir,
+    environment.ffmpegDetection.resolvedPath,
+  )
 }
 
 const environment = await startE2eEnvironment()

@@ -24,6 +24,7 @@ export interface RunFfmpegOptions {
   log: ServiceLogger
   markUnavailable: () => void
   operation: string
+  onStderr?: (output: string) => void
   timeoutMs: number
   warnMissing: (reason: string) => void
 }
@@ -182,6 +183,13 @@ export const runFfmpeg = async (
       }
 
       if (code === 0) {
+        try {
+          options.onStderr?.(stderr.finish())
+        } catch (error) {
+          options.log('warn', 'Failed to read FFmpeg diagnostics:', error)
+          settle(false)
+          return
+        }
         settle(true)
         return
       }

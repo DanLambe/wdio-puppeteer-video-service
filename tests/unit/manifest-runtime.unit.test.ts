@@ -21,6 +21,7 @@ import {
   normalizeManifestPath,
   readManifestRunContext,
 } from '../../src/service/manifest-runtime.js'
+import type { MediaDimensions } from '../../src/service/media-metadata.js'
 
 const tempDirs: string[] = []
 
@@ -36,14 +37,23 @@ const createRecorder = async (
   framework: 'mocha' | 'jasmine' | 'cucumber' | 'unknown' = 'mocha',
 ) => {
   const context = await createManifestRunContext(outputDir)
-  const recorder = new ManifestWorkerRecorder({ context, cid, framework })
+  const readDimensions = vi.fn(
+    async (_filePath: string): Promise<MediaDimensions | undefined> =>
+      undefined,
+  )
+  const recorder = new ManifestWorkerRecorder({
+    context,
+    cid,
+    framework,
+    readDimensions,
+  })
   recorder.configureSession({
     sessionId: 'raw-private-session-id',
     browserName: 'chrome',
     browserVersion: '140.0.0',
     protocol: 'bidi+cdp',
   })
-  return { context, recorder }
+  return { context, recorder, readDimensions }
 }
 
 const journalDir = (outputDir: string, runId: string): string => {
@@ -216,7 +226,9 @@ describe('manifest runtime', () => {
     const artifactPath = path.join(outputDir, 'nested', 'recording.webm')
     await fs.mkdir(path.dirname(artifactPath), { recursive: true })
     await fs.writeFile(artifactPath, Buffer.alloc(64))
-    const { context, recorder } = await createRecorder(outputDir)
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    readDimensions.mockResolvedValue({ width: 640, height: 360 })
 
     await recorder.beginEntity({
       test: {
@@ -229,7 +241,7 @@ describe('manifest runtime', () => {
       specPaths: [],
     })
     expect(recorder.currentEntryId).toBeTypeOf('string')
-    recorder.markCaptureStarted({ width: 640, height: 360 })
+    recorder.markCaptureStarted()
     recorder.updateProtocol('classic+cdp')
     await recorder.recordResult('passed')
     await recorder.noteFfmpegVersion('7.1.1')
@@ -245,6 +257,7 @@ describe('manifest runtime', () => {
 
     const manifest = await aggregateManifestRun(context, 0)
     const entry = firstEntry(manifest)
+    expect(readDimensions).toHaveBeenCalledExactlyOnceWith(artifactPath)
     expect(isVideoManifest(manifest)).toBe(true)
     expect(firstRun(manifest).tools.ffmpeg).toBe('7.1.1')
     expect(entry).toMatchObject({
@@ -285,6 +298,113 @@ describe('manifest runtime', () => {
     expect(entry.sessionHash).not.toContain('raw-private-session-id')
     expect(JSON.stringify(manifest)).not.toContain('raw-private-session-id')
     expect(entry.timings.durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('measures distinct retained segments independently and omits unavailable metadata', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    const files = [
+      'first.webm',
+      'second.mp4',
+      'unknown.webm',
+      'empty.webm',
+      'missing.webm',
+    ]
+    await Promise.all(
+      files
+        .slice(0, 4)
+        .map((file) =>
+          fs.writeFile(
+            path.join(outputDir, file),
+            file === 'empty.webm' ? '' : 'media',
+          ),
+        ),
+    )
+    readDimensions.mockImplementation(async (file) => {
+      if (file.endsWith('first.webm')) {
+        return { width: 801, height: 401 }
+      }
+      if (file.endsWith('second.mp4')) {
+        return { width: 402, height: 202 }
+      }
+      return undefined
+    })
+    await recorder.beginEntity({ scope: 'test', specPaths: ['test.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'failed',
+      paths: files,
+    })
+
+    const entry = firstEntry(await aggregateManifestRun(context, 0))
+    expect(readDimensions).toHaveBeenCalledTimes(3)
+    expect(entry.capture.final).toBeUndefined()
+    expect(entry.capture.segments).toEqual([
+      {
+        path: 'first.webm',
+        mimeType: 'video/webm',
+        size: 5,
+        width: 801,
+        height: 401,
+      },
+      {
+        path: 'second.mp4',
+        mimeType: 'video/mp4',
+        size: 5,
+        width: 402,
+        height: 202,
+      },
+      { path: 'unknown.webm', mimeType: 'video/webm', size: 5 },
+      { path: 'empty.webm', mimeType: 'video/webm', size: 0 },
+      { path: 'missing.webm', mimeType: 'video/webm', size: 0 },
+    ])
+  })
+
+  it('probes only finalized deferred media, not pending or discarded recordings', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    await fs.writeFile(path.join(outputDir, 'input.webm'), 'source')
+    await fs.writeFile(path.join(outputDir, 'final.mp4'), 'output')
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['deferred.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'failed',
+      paths: ['input.webm'],
+      processingOutcome: 'pending',
+    })
+    expect(readDimensions).not.toHaveBeenCalled()
+    const pending = firstEntry(await aggregateManifestRun(context, 0))
+    expect(pending.capture.segments[0]).not.toHaveProperty('width')
+    expect(pending.capture.final).toBeUndefined()
+
+    readDimensions.mockResolvedValue({ width: 802, height: 402 })
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: ['final.mp4'],
+      processingOutcome: 'completed',
+    })
+    expect(readDimensions).toHaveBeenCalledExactlyOnceWith(
+      path.join(outputDir, 'final.mp4'),
+    )
+    const completed = firstEntry(await aggregateManifestRun(context, 0))
+    expect(completed.capture.final).toMatchObject({
+      path: 'final.mp4',
+      width: 802,
+      height: 402,
+    })
+
+    await recorder.beginEntity({ scope: 'test', specPaths: ['discarded.ts'] })
+    await recorder.completeCurrent({
+      decision: 'discarded',
+      result: 'passed',
+      paths: [],
+    })
+    expect(readDimensions).toHaveBeenCalledOnce()
   })
 
   it('preserves a checkpoint when a worker is killed before finalization', async () => {
@@ -451,7 +571,7 @@ describe('manifest runtime', () => {
       result: 'unknown',
     })
     await recorder.recordResult('passed')
-    recorder.markCaptureStarted({ width: 1, height: 1 })
+    recorder.markCaptureStarted()
     recorder.setCurrentAttempt(4)
     await expect(
       recorder.completeCurrent({ decision: 'failed', result: 'failed' }),

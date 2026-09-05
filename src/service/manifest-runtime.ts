@@ -19,6 +19,7 @@ import {
   ManifestJournalWriter,
 } from './manifest-journal.js'
 import { hashPrivateValue, normalizeManifestPath } from './manifest-paths.js'
+import type { MediaDimensions } from './media-metadata.js'
 
 export { aggregateManifestRun } from './manifest-aggregation.js'
 export type {
@@ -40,11 +41,6 @@ export {
   normalizeManifestFramework,
   normalizeManifestPath,
 } from './manifest-paths.js'
-
-export interface ManifestCaptureDimensions {
-  readonly width: number
-  readonly height: number
-}
 
 export interface ManifestEntityInput {
   readonly test?: Partial<
@@ -73,7 +69,6 @@ interface ManifestEntryDraft {
   readonly startedAt: string
   captureStartedAt?: string
   captureStoppedAt?: string
-  dimensions?: ManifestCaptureDimensions
   cumulativeResult: ManifestResult
 }
 
@@ -82,6 +77,9 @@ export class ManifestWorkerRecorder {
   private readonly cid: string
   private readonly framework: ManifestFramework
   private readonly journal: ManifestJournalWriter
+  private readonly readDimensions:
+    | ((filePath: string) => Promise<MediaDimensions | undefined>)
+    | undefined
   private readonly attempts = new Map<string, number>()
   private readonly completedEntries = new Map<string, ManifestEntryV1>()
   private browser: ManifestBrowser = {
@@ -98,10 +96,14 @@ export class ManifestWorkerRecorder {
     readonly framework: ManifestFramework
     readonly failurePolicy?: 'error' | 'warn'
     readonly onJournalError?: (operation: string, error: unknown) => void
+    readonly readDimensions?: (
+      filePath: string,
+    ) => Promise<MediaDimensions | undefined>
   }) {
     this.context = options.context
     this.cid = options.cid
     this.framework = options.framework
+    this.readDimensions = options.readDimensions
     this.journal = new ManifestJournalWriter({
       failurePolicy: options.failurePolicy ?? 'warn',
       journalPath: createManifestJournalPath(options.context, options.cid),
@@ -191,14 +193,11 @@ export class ManifestWorkerRecorder {
     return draft.id
   }
 
-  markCaptureStarted(dimensions?: ManifestCaptureDimensions): void {
+  markCaptureStarted(): void {
     if (!this.current) {
       return
     }
     this.current.captureStartedAt ??= new Date().toISOString()
-    if (dimensions) {
-      this.current.dimensions = dimensions
-    }
   }
 
   setCurrentAttempt(attempt: number): void {
@@ -268,7 +267,6 @@ export class ManifestWorkerRecorder {
     }
     const artifacts = await this.createArtifacts(
       options.paths ?? existing.capture.segments.map((item) => item.path),
-      undefined,
       true,
     )
     const completedAt = new Date().toISOString()
@@ -322,7 +320,6 @@ export class ManifestWorkerRecorder {
   ): Promise<ManifestEntryV1> {
     const artifacts = await this.createArtifacts(
       options.paths ?? [],
-      draft.dimensions,
       options.processingOutcome !== 'pending',
     )
     const completedAt = new Date().toISOString()
@@ -374,8 +371,7 @@ export class ManifestWorkerRecorder {
 
   private async createArtifacts(
     paths: string[],
-    dimensions: ManifestCaptureDimensions | undefined,
-    selectFinal: boolean,
+    finalized: boolean,
   ): Promise<{
     segments: ManifestMediaArtifact[]
     final?: ManifestMediaArtifact
@@ -389,6 +385,11 @@ export class ManifestWorkerRecorder {
           .stat(absolutePath)
           .then((stats) => stats.size)
           .catch(() => 0)
+        // Pending deferred inputs are not final media; measure only after processing.
+        const dimensions =
+          finalized && size > 0
+            ? await this.readDimensions?.(absolutePath)
+            : undefined
         const artifact: ManifestMediaArtifact = {
           path: normalizeManifestPath(absolutePath, this.context.outputDir),
           mimeType:
@@ -403,8 +404,7 @@ export class ManifestWorkerRecorder {
         return artifact
       }),
     )
-    const final =
-      selectFinal && artifacts.length === 1 ? artifacts[0] : undefined
+    const final = finalized && artifacts.length === 1 ? artifacts[0] : undefined
     return {
       segments: artifacts,
       ...(final ? { final } : {}),
