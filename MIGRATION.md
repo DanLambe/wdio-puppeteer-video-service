@@ -89,8 +89,9 @@ Equivalent retry-only configuration:
   invocations must share a host-wide resource budget. Old run directories do not
   consume a new run's capacity.
 - Artifact collision resolution stops after 1,000 candidates. Storage failures
-  fail acquisition immediately instead of being treated as occupied slots;
-  the configured failure policy applies after cleanup.
+  are distinct from occupied slots: healthy-but-busy slots and retryable slot
+  errors retain their bounded wait, while all-non-retryable failures abort
+  acquisition immediately. The configured failure policy applies after cleanup.
 - Allure requires test scope because the media must be attached while the
   corresponding reporter test remains active.
 - The package is ESM-only and requires Node.js 24. Use NodeNext module

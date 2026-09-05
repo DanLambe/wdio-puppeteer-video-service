@@ -84,6 +84,19 @@ afterEach(async () => {
 })
 
 describe('manifest runtime', () => {
+  it.each(['', '..', '../escape', 'nested/run', 'C:\\escape', 'run.'])(
+    'rejects unsafe manifest run ID %j before creating directories',
+    async (runId) => {
+      const outputDir = await createTempDir()
+      const mkdir = vi.spyOn(fs, 'mkdir')
+      await expect(createManifestRunContext(outputDir, runId)).rejects.toThrow(
+        'unsafe',
+      )
+      expect(mkdir).not.toHaveBeenCalled()
+      expect(await fs.readdir(outputDir)).toEqual([])
+    },
+  )
+
   it('warns and recovers when a journal append fails', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)

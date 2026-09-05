@@ -84,8 +84,22 @@ errors. If the launcher crashes, its old directory may remain but cannot block
 a new run. Remove abandoned directories only after confirming their runs ended.
 
 Permission, read/write, and directory failures are operational errors, not busy
-slots. Check the reported path and filesystem permissions instead of raising
-the capacity wait timeout. If artifact naming exhausts 1,000 candidates, choose
+slots. A faulty candidate does not abandon the wait for other healthy-but-busy
+slots. Transient slot errors (`EBUSY`, `EAGAIN`, `EMFILE`, `ENFILE`, and Windows
+`EPERM`) are retried with the normal polling interval until the existing deadline.
+This does not guarantee they will recover. If every candidate has a non-retryable
+error (for example `EACCES` or `ENOSPC`), acquisition fails immediately. Directory
+creation failures also fail immediately. At the deadline, unresolved errors are
+reported with their original causes; recovered errors do not turn a later pure
+capacity timeout into a storage failure. Check the reported path and permissions
+instead of raising the wait timeout for persistent failures.
+
+If global limits report a missing launcher context, register the service through
+`services: [['puppeteer-video', options]]`; a worker constructed without launcher
+configuration cannot safely share global slots. Unsafe run identifiers are
+rejected before slot or manifest directory creation.
+
+If artifact naming exhausts 1,000 candidates, choose
 a fresh output directory or a more distinctive naming style; existing artifacts
 are not overwritten. Persistent artifact reservations and manifest aggregation
 locks still conservatively respect live PIDs, independently of slot run isolation.

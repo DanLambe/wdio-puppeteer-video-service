@@ -136,7 +136,11 @@ describe('recording slot scheduler', () => {
         },
       },
     )
-    await expect(scheduler.acquire()).rejects.toBe(failure)
+    await expect(scheduler.acquire()).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'create the global slot directory',
+      cause: failure,
+    })
     expect(state.activeSlots).toBe(0)
   })
 
@@ -449,6 +453,25 @@ describe('recording slot scheduler', () => {
 
     await expect(scheduler.release()).resolves.toBeUndefined()
     await expect(scheduler.release()).resolves.toBeUndefined()
+  })
+
+  it('diagnoses missing launcher context separately from unsafe run identities', async () => {
+    const state = createInProcessRecordingSlotState()
+    const scheduler = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1, maxGlobalRecordings: 1 },
+      noopLogger,
+      { inProcessState: state },
+    )
+    await expect(scheduler.acquire()).rejects.toThrow(
+      "services: [['puppeteer-video', options]]",
+    )
+    expect(state.activeSlots).toBe(0)
+    expect(() =>
+      new RecordingSlotScheduler(
+        { runId: '../unsafe' },
+        noopLogger,
+      ).resolveLockDir(),
+    ).toThrow('unsafe')
   })
 
   it('surfaces global I/O failure and releases its in-process slot', async () => {

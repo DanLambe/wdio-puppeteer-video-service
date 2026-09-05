@@ -15,9 +15,11 @@ import {
   IN_PROCESS_RECORDING_SLOT_POLL_MS,
 } from './constants.js'
 import { resolveGlobalSlotRunDirectories } from './global-slot-directory.js'
+import { createLauncherRegistrationError } from './launcher-context.js'
 import type { ServiceLogger } from './logging.js'
 import {
   type OwnedFileLease,
+  OwnedFileLeaseOperationalError,
   tryAcquireOwnedFileLease,
 } from './owned-file-lease.js'
 
@@ -55,6 +57,31 @@ const sharedPostProcessState = createInProcessRecordingSlotState()
 
 interface GlobalSlotPayload {
   readonly resource: 'recording' | 'post-processing'
+}
+
+interface GlobalSlotAttempt {
+  readonly acquired: boolean
+  readonly canRetry: boolean
+  readonly failures: unknown[]
+}
+
+const isRetryableSlotError = (
+  error: unknown,
+  platform: NodeJS.Platform,
+): boolean => {
+  const cause =
+    error instanceof OwnedFileLeaseOperationalError ? error.cause : error
+  if (!(cause instanceof Error)) {
+    return false
+  }
+  const code = (cause as NodeJS.ErrnoException).code
+  return (
+    code === 'EBUSY' ||
+    code === 'EAGAIN' ||
+    code === 'EMFILE' ||
+    code === 'ENFILE' ||
+    (platform === 'win32' && code === 'EPERM')
+  )
 }
 
 export class RecordingSlotScheduler {
@@ -174,21 +201,40 @@ export class RecordingSlotScheduler {
     }
 
     const lockDir = this.resolveLockDir()
-    await this.fileSystem.mkdir(lockDir)
+    await this.fileSystem.mkdir(lockDir).catch((error: unknown) => {
+      throw new OwnedFileLeaseOperationalError(
+        lockDir,
+        'create the global slot directory',
+        error,
+      )
+    })
 
     const timeout = timeoutMs ?? GLOBAL_RECORDING_SLOT_TIMEOUT_MS
     const deadline = this.clock.now() + Math.max(0, timeout)
-    while (this.clock.now() <= deadline) {
-      const acquired = await this.tryAcquireGlobal(lockDir, maxGlobalRecordings)
-      if (acquired) {
+    let attempt: GlobalSlotAttempt
+    do {
+      attempt = await this.tryAcquireGlobal(lockDir, maxGlobalRecordings)
+      if (attempt.acquired) {
         return true
       }
 
-      if (this.clock.now() >= deadline) {
+      if (!attempt.canRetry || this.clock.now() >= deadline) {
         break
       }
 
-      await this.clock.delay(GLOBAL_RECORDING_SLOT_POLL_MS)
+      await this.clock.delay(
+        Math.min(
+          GLOBAL_RECORDING_SLOT_POLL_MS,
+          Math.max(0, deadline - this.clock.now()),
+        ),
+      )
+    } while (this.clock.now() <= deadline)
+
+    if (attempt.failures.length > 0) {
+      throw new AggregateError(
+        attempt.failures,
+        `[WdioPuppeteerVideoService] Failed to acquire a global ${this.resourceLabel} slot in ${lockDir} due to storage errors.`,
+      )
     }
 
     return false
@@ -197,27 +243,24 @@ export class RecordingSlotScheduler {
   async tryAcquireGlobal(
     lockDir: string,
     maxGlobalRecordings: number,
-  ): Promise<boolean> {
+  ): Promise<GlobalSlotAttempt> {
     const failures: unknown[] = []
+    let canRetry = false
     for (let slotIndex = 1; slotIndex <= maxGlobalRecordings; slotIndex += 1) {
       const slotPath = path.join(lockDir, `slot-${slotIndex}.lock`)
       try {
         const acquired = await this.openOwnedGlobalSlot(slotPath)
         if (acquired) {
-          return true
+          return { acquired: true, canRetry: false, failures: [] }
         }
+        canRetry = true
       } catch (error) {
         failures.push(error)
+        canRetry ||= isRetryableSlotError(error, this.process.platform)
       }
     }
 
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        `[WdioPuppeteerVideoService] Failed to inspect any available global ${this.resourceLabel} slot in ${lockDir}.`,
-      )
-    }
-    return false
+    return { acquired: false, canRetry, failures }
   }
 
   async openOwnedGlobalSlot(slotPath: string): Promise<boolean> {
@@ -252,6 +295,10 @@ export class RecordingSlotScheduler {
   }
 
   resolveLockDir(): string {
+    const runId = this.options.runId
+    if (runId === undefined) {
+      throw createLauncherRegistrationError('missing')
+    }
     const directories = resolveGlobalSlotRunDirectories({
       ...(this.options.globalRecordingLockDir === undefined
         ? {}
@@ -259,7 +306,7 @@ export class RecordingSlotScheduler {
       ...(this.options.outputDir === undefined
         ? {}
         : { outputDir: this.options.outputDir }),
-      runId: this.options.runId ?? '',
+      runId,
     })
     return this.resourceLabel === 'post-processing'
       ? directories.postProcess
