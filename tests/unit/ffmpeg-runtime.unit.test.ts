@@ -369,6 +369,30 @@ describe('FfmpegRuntime', () => {
     expect(harness.scheduler.release).toHaveBeenCalledTimes(2)
   })
 
+  it.each(['transcode', 'merge', 'direct MP4 capability probe'])(
+    'reports operational acquisition failure for %s without starting work or reporting contention',
+    async (operation) => {
+      const harness = createHarness()
+      const failure = Object.assign(new Error('lease directory denied'), {
+        code: 'EACCES',
+      })
+      harness.scheduler.acquire.mockRejectedValue(failure)
+      const task = vi.fn(async () => 'unexpected work')
+
+      await expect(
+        harness.runtime.withPostProcessSlot(operation, task),
+      ).resolves.toBeUndefined()
+      expect(harness.scheduler.acquire).toHaveBeenCalledOnce()
+      expect(task).not.toHaveBeenCalled()
+      expect(harness.scheduler.release).not.toHaveBeenCalled()
+      expect(harness.log).toHaveBeenCalledExactlyOnceWith(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
+        failure,
+      )
+    },
+  )
+
   it('creates an independently owned scheduler for every concurrent operation', async () => {
     const harness = createHarness()
     const firstScheduler = createScheduler()

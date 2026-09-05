@@ -164,7 +164,19 @@ export class FfmpegRuntime {
       return undefined
     }
     const slotScheduler = this.createPostProcessSlotScheduler()
-    const acquired = await slotScheduler.acquire()
+    const acquired = await slotScheduler.acquire().catch((error: unknown) => {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
+        error,
+      )
+      return undefined
+    })
+    if (acquired === undefined) {
+      // Let the media coordinator preserve sources and record the failed outcome
+      // before applying failurePolicy, just as it does for FFmpeg failures.
+      return undefined
+    }
     if (!acquired) {
       const timeout = this.options.concurrency.postProcessStartTimeoutMs
       this.log(

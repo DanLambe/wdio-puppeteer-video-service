@@ -218,15 +218,24 @@ Top-level options:
 Recording and post-processing use separate in-process and cross-worker slot
 pools. Each FFmpeg operation acquires its own post-processing lease, including
 operations started concurrently by the deferred queue. A merge followed by a
-transcode remains one ordered job chain. Global slots carry heartbeats, but a
-lease owned by a live process is never reclaimed solely because its heartbeat
-expired. Dead owners are reclaimed immediately; malformed lock files are
-reclaimed only after an invalid-file grace period. Capture paths are exclusively
+transcode remains one ordered job chain. Global limits apply to local workers
+within **one WDIO invocation**, not to independent invocations or machines.
+`lockDir` is a shared base directory (default: `<outputDir>/.wdio-video-global-slots`);
+each launcher creates a unique run subdirectory containing separate recording
+and post-processing pools. This remains true if manifest initialization fails
+under the warning policy. The launcher removes only its run directory after
+workers finish. An abandoned directory cannot consume capacity in a later run.
+
+Lease metadata is immutable after acquisition. A lease owned by a live PID is
+never reclaimed solely because it is old; dead owners are reclaimed immediately,
+and malformed lock files only after an invalid-file grace period. Capture paths are exclusively
 reserved, while merge and transcode outputs are decoded from unique temporary
 files and published only after validation through an atomic hard-link operation
 that never replaces an existing artifact. The output filesystem must support
 hard links. A failed, timed-out, or unsupported publication keeps its source
-recordings and removes unpublished partial output.
+recordings and removes unpublished partial output. Artifact naming tries at most
+1,000 candidates before reporting exhaustion. Storage/permission failures are
+reported as errors rather than retried as busy capacity.
 
 `artifacts.naming`:
 

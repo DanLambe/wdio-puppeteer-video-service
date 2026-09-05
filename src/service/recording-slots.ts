@@ -9,19 +9,17 @@ import {
   systemClock,
 } from './boundaries.js'
 import {
-  GLOBAL_POST_PROCESS_SLOT_DIR_NAME,
-  GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
   GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
   GLOBAL_RECORDING_SLOT_POLL_MS,
   GLOBAL_RECORDING_SLOT_TIMEOUT_MS,
   IN_PROCESS_RECORDING_SLOT_POLL_MS,
 } from './constants.js'
+import { resolveGlobalSlotRunDirectories } from './global-slot-directory.js'
 import type { ServiceLogger } from './logging.js'
 import {
   type OwnedFileLease,
   tryAcquireOwnedFileLease,
 } from './owned-file-lease.js'
-import { resolveGlobalRecordingLockDir } from './retry-state.js'
 
 export interface InProcessRecordingSlotState {
   activeSlots: number
@@ -43,6 +41,7 @@ export interface RecordingSlotSchedulerOptions {
   recordingStartMode?: RecordingStartMode
   recordingStartTimeoutMs?: number
   resourceLabel?: 'recording' | 'post-processing'
+  runId?: string
 }
 
 export const createInProcessRecordingSlotState =
@@ -66,7 +65,7 @@ export class RecordingSlotScheduler {
   private readonly options: RecordingSlotSchedulerOptions
   private readonly process: ProcessBoundary
   private readonly resourceLabel: 'recording' | 'post-processing'
-  private globalSlotLease: OwnedFileLease<GlobalSlotPayload> | undefined
+  private globalSlotLease: OwnedFileLease | undefined
   private globalSlotPath: string | undefined
   private ownsGlobalSlot = false
   private ownsInProcessSlot = false
@@ -120,13 +119,18 @@ export class RecordingSlotScheduler {
       return false
     }
 
-    const globalSlotAcquired = await this.acquireGlobal(this.startTimeoutMs)
-    if (globalSlotAcquired) {
-      return true
-    }
+    try {
+      const globalSlotAcquired = await this.acquireGlobal(this.startTimeoutMs)
+      if (globalSlotAcquired) {
+        return true
+      }
 
-    this.releaseInProcess()
-    return false
+      this.releaseInProcess()
+      return false
+    } catch (error) {
+      this.releaseInProcess()
+      throw error
+    }
   }
 
   async acquireInProcess(timeoutMs: number | undefined): Promise<boolean> {
@@ -170,9 +174,7 @@ export class RecordingSlotScheduler {
     }
 
     const lockDir = this.resolveLockDir()
-    await this.fileSystem.mkdir(lockDir).catch(() => {
-      /* best-effort lock-dir creation */
-    })
+    await this.fileSystem.mkdir(lockDir)
 
     const timeout = timeoutMs ?? GLOBAL_RECORDING_SLOT_TIMEOUT_MS
     const deadline = this.clock.now() + Math.max(0, timeout)
@@ -196,6 +198,7 @@ export class RecordingSlotScheduler {
     lockDir: string,
     maxGlobalRecordings: number,
   ): Promise<boolean> {
+    const failures: unknown[] = []
     for (let slotIndex = 1; slotIndex <= maxGlobalRecordings; slotIndex += 1) {
       const slotPath = path.join(lockDir, `slot-${slotIndex}.lock`)
       try {
@@ -203,11 +206,17 @@ export class RecordingSlotScheduler {
         if (acquired) {
           return true
         }
-      } catch {
-        // An unusable slot candidate must not block checking other capacity.
+      } catch (error) {
+        failures.push(error)
       }
     }
 
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `[WdioPuppeteerVideoService] Failed to inspect any available global ${this.resourceLabel} slot in ${lockDir}.`,
+      )
+    }
     return false
   }
 
@@ -215,7 +224,6 @@ export class RecordingSlotScheduler {
     const lease = await tryAcquireOwnedFileLease<GlobalSlotPayload>(
       {
         filePath: slotPath,
-        heartbeatIntervalMs: GLOBAL_RECORDING_SLOT_HEARTBEAT_MS,
         invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
         payload: { resource: this.resourceLabel },
       },
@@ -244,10 +252,18 @@ export class RecordingSlotScheduler {
   }
 
   resolveLockDir(): string {
-    return resolveGlobalRecordingLockDir(
-      this.options.outputDir,
-      this.options.globalRecordingLockDir,
-    )
+    const directories = resolveGlobalSlotRunDirectories({
+      ...(this.options.globalRecordingLockDir === undefined
+        ? {}
+        : { lockDir: this.options.globalRecordingLockDir }),
+      ...(this.options.outputDir === undefined
+        ? {}
+        : { outputDir: this.options.outputDir }),
+      runId: this.options.runId ?? '',
+    })
+    return this.resourceLabel === 'post-processing'
+      ? directories.postProcess
+      : directories.recording
   }
 
   async release(): Promise<void> {
@@ -297,21 +313,6 @@ export class RecordingSlotScheduler {
     }
   }
 
-  async refreshGlobalSlotHeartbeat(): Promise<void> {
-    const slotPath = this.globalSlotPath
-    const lease = this.globalSlotLease
-    if (!this.ownsGlobalSlot || !slotPath || !lease) {
-      return
-    }
-
-    if (!(await lease.refresh())) {
-      this.log(
-        'trace',
-        `[WdioPuppeteerVideoService] Failed to refresh global ${this.resourceLabel} slot heartbeat: ${slotPath}`,
-      )
-    }
-  }
-
   private tryAcquireInProcess(maxConcurrentRecordings: number): boolean {
     if (this.inProcessState.activeSlots >= maxConcurrentRecordings) {
       return false
@@ -338,20 +339,17 @@ export class PostProcessSlotScheduler {
       outputDir?: string
       postProcessStartMode?: RecordingStartMode
       postProcessStartTimeoutMs?: number
+      runId?: string
     },
     log: ServiceLogger,
     dependencies: RecordingSlotSchedulerDependencies = {},
   ) {
-    const lockDir = options.globalRecordingLockDir?.trim()
-      ? path.join(options.globalRecordingLockDir, 'post-process')
-      : path.join(
-          options.outputDir ?? 'videos',
-          GLOBAL_POST_PROCESS_SLOT_DIR_NAME,
-        )
     this.scheduler = new RecordingSlotScheduler(
       {
-        globalRecordingLockDir: lockDir,
         resourceLabel: 'post-processing',
+        ...(options.globalRecordingLockDir === undefined
+          ? {}
+          : { globalRecordingLockDir: options.globalRecordingLockDir }),
         ...(options.maxConcurrentPostProcesses === undefined
           ? {}
           : {
@@ -363,6 +361,7 @@ export class PostProcessSlotScheduler {
         ...(options.outputDir === undefined
           ? {}
           : { outputDir: options.outputDir }),
+        ...(options.runId === undefined ? {} : { runId: options.runId }),
         ...(options.postProcessStartMode === undefined
           ? {}
           : { recordingStartMode: options.postProcessStartMode }),

@@ -91,13 +91,10 @@ export const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
 export const IN_PROCESS_RECORDING_SLOT_POLL_MS = 25
 export const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 export const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
-export const GLOBAL_RECORDING_SLOT_HEARTBEAT_MS = 1_000
 export const DEFAULT_RECORDING_START_TIMEOUT_MS = 2_500
 export const DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS = 10_000
 export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
-export const GLOBAL_POST_PROCESS_SLOT_DIR_NAME =
-  '.wdio-video-post-process-global-slots'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 

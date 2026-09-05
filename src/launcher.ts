@@ -36,6 +36,7 @@ export default class WdioPuppeteerVideoLauncher
   private readonly _specRetryAttempts = new Map<string, number>()
   private _manifestRunContext: ManifestRunContext | undefined
   private _prepared = false
+  private _runId: string | undefined
 
   constructor(
     options: WdioPuppeteerVideoServiceOptions = {},
@@ -53,11 +54,22 @@ export default class WdioPuppeteerVideoLauncher
 
   async onPrepare(): Promise<void> {
     this._specRetryAttempts.clear()
-    this._manifestRunContext = await this._runManifestTask(
-      'initialize manifest journaling',
-      () => this._composition.createManifestRunContext(this._options.outputDir),
-    )
-    this._prepared = true
+    const runId = this._composition.uuid()
+    this._runId = runId
+    try {
+      this._manifestRunContext = await this._runManifestTask(
+        'initialize manifest journaling',
+        () =>
+          this._composition.createManifestRunContext(
+            this._options.outputDir,
+            runId,
+          ),
+      )
+      this._prepared = true
+    } catch (error) {
+      this._runId = undefined
+      throw error
+    }
   }
 
   onWorkerStart(
@@ -66,11 +78,16 @@ export default class WdioPuppeteerVideoLauncher
     specs: string[],
     args?: object,
   ): void {
-    if (!this._prepared || !args) {
+    const runId = this._runId
+    if (!this._prepared || !args || !runId) {
       throw createLauncherRegistrationError('missing')
     }
 
-    assignLauncherWorkerContext(args, this._manifestRunContext !== undefined)
+    assignLauncherWorkerContext(
+      args,
+      this._manifestRunContext !== undefined,
+      runId,
+    )
     if (this._manifestRunContext) {
       assignManifestRunContext(args, this._manifestRunContext)
     }
@@ -100,12 +117,12 @@ export default class WdioPuppeteerVideoLauncher
   async onComplete(exitCode = 0): Promise<void> {
     this._specRetryAttempts.clear()
     this._prepared = false
-    if (!this._manifestRunContext) {
-      return
-    }
-
+    const runId = this._runId
     const manifestRunContext = this._manifestRunContext
     try {
+      if (!manifestRunContext) {
+        return
+      }
       const manifest = await this._runManifestTask(
         'aggregate manifest journals',
         () =>
@@ -123,6 +140,27 @@ export default class WdioPuppeteerVideoLauncher
       )
     } finally {
       this._manifestRunContext = undefined
+      this._runId = undefined
+      if (runId) {
+        await this._cleanupGlobalSlots(runId)
+      }
+    }
+  }
+
+  private async _cleanupGlobalSlots(runId: string): Promise<void> {
+    try {
+      await this._composition.cleanupGlobalSlotRunDirectory({
+        ...(this._options.concurrency.lockDir === undefined
+          ? {}
+          : { lockDir: this._options.concurrency.lockDir }),
+        outputDir: this._options.outputDir,
+        runId,
+      })
+    } catch (error) {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to clean the completed run's global slot directory: ${normalization.describeError(error)}. Later runs remain isolated by run ID.`,
+      )
     }
   }
 

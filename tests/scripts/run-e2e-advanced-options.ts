@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
@@ -139,6 +139,18 @@ const runMode = async (
 
   if (mode === 'retention') {
     await assertDiscardedRetentionEntry(resultsDir)
+  }
+
+  if (mode === 'global-concurrency') {
+    // Config onComplete runs before launcher services, so verify final cleanup here.
+    const remainingRuns = await readdir(
+      path.join(resultsDir, '.global-recording-locks'),
+    )
+    if (remainingRuns.length > 0) {
+      throw new Error(
+        `[e2e:advanced] launcher left global slot run directories: ${remainingRuns.join(', ')}`,
+      )
+    }
   }
 
   const retryTitle =

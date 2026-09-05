@@ -22,6 +22,7 @@ import {
   type RunFfmpegOptions,
   runFfmpeg,
 } from './ffmpeg-runner.js'
+import { cleanupGlobalSlotRunDirectory } from './global-slot-directory.js'
 import type { ServiceLogger } from './logging.js'
 import { writeLog } from './logging.js'
 import {
@@ -86,10 +87,12 @@ export interface WorkerCompositionRoot {
   createPostProcessSlotScheduler(
     options: ResolvedWdioPuppeteerVideoServiceOptions,
     log: ServiceLogger,
+    runId?: string,
   ): PostProcessSlotScheduler
   createRecordingSlotScheduler(
     options: ResolvedWdioPuppeteerVideoServiceOptions,
     log: ServiceLogger,
+    runId?: string,
   ): RecordingSlotScheduler
 }
 
@@ -140,6 +143,7 @@ export const createWorkerCompositionRoot = (
     createRecordingSlotScheduler(
       options: ResolvedWdioPuppeteerVideoServiceOptions,
       log: ServiceLogger,
+      runId?: string,
     ) {
       return new RecordingSlotScheduler(
         {
@@ -149,6 +153,7 @@ export const createWorkerCompositionRoot = (
           recordingStartMode: options.concurrency.startMode,
           recordingStartTimeoutMs: options.concurrency.startTimeoutMs,
           globalRecordingLockDir: options.concurrency.lockDir,
+          ...(runId === undefined ? {} : { runId }),
         },
         log,
         schedulerDependencies,
@@ -157,6 +162,7 @@ export const createWorkerCompositionRoot = (
     createPostProcessSlotScheduler(
       options: ResolvedWdioPuppeteerVideoServiceOptions,
       log: ServiceLogger,
+      runId?: string,
     ) {
       return new PostProcessSlotScheduler(
         {
@@ -168,6 +174,7 @@ export const createWorkerCompositionRoot = (
           postProcessStartTimeoutMs:
             options.concurrency.postProcessStartTimeoutMs,
           globalRecordingLockDir: options.concurrency.lockDir,
+          ...(runId === undefined ? {} : { runId }),
         },
         log,
         schedulerDependencies,
@@ -178,15 +185,19 @@ export const createWorkerCompositionRoot = (
 
 export interface LauncherCompositionOverrides {
   readonly aggregateManifestRun?: typeof aggregateManifestRun
+  readonly cleanupGlobalSlotRunDirectory?: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext?: typeof createManifestRunContext
   readonly generateVideoReportForRun?: typeof generateVideoReportForRun
+  readonly uuid?: UuidFactory
   readonly writeLog?: typeof writeLog
 }
 
 export interface LauncherCompositionRoot {
   readonly aggregateManifestRun: typeof aggregateManifestRun
+  readonly cleanupGlobalSlotRunDirectory: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext: typeof createManifestRunContext
   readonly generateVideoReportForRun: typeof generateVideoReportForRun
+  readonly uuid: UuidFactory
   readonly writeLog: typeof writeLog
 }
 
@@ -196,10 +207,13 @@ export const createLauncherCompositionRoot = (
   return Object.freeze({
     aggregateManifestRun:
       overrides.aggregateManifestRun ?? aggregateManifestRun,
+    cleanupGlobalSlotRunDirectory:
+      overrides.cleanupGlobalSlotRunDirectory ?? cleanupGlobalSlotRunDirectory,
     createManifestRunContext:
       overrides.createManifestRunContext ?? createManifestRunContext,
     generateVideoReportForRun:
       overrides.generateVideoReportForRun ?? generateVideoReportForRun,
+    uuid: overrides.uuid ?? randomUUID,
     writeLog: overrides.writeLog ?? writeLog,
   })
 }

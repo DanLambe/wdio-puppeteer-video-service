@@ -60,7 +60,7 @@ const assignWorkerConfiguration = (
   context: ManifestRunContext,
   specFileRetryAttempt = 0,
 ): void => {
-  assignLauncherWorkerContext(config, true)
+  assignLauncherWorkerContext(config, true, context.runId)
   assignManifestRunContext(config, context)
   assignManifestWorkerContext(config, cid, { specFileRetryAttempt })
 }

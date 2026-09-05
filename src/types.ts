@@ -102,7 +102,7 @@ export interface ProcessingOptions {
 export interface ConcurrencyOptions {
   /** Use 0 for no explicit in-process limit. @default 0 */
   maxRecordingsPerProcess?: number
-  /** Use 0 to disable the cross-worker limit. @default 0 */
+  /** Limit local workers within one WDIO invocation; 0 disables the limit. @default 0 */
   maxRecordingsGlobal?: number
   /** @default 'blocking' */
   startMode?: RecordingStartMode
@@ -110,12 +110,13 @@ export interface ConcurrencyOptions {
   startTimeoutMs?: number
   /** Number of deferred jobs that may run concurrently in this worker. @default 1 */
   maxPostProcessesPerProcess?: number
-  /** Use 0 to disable the cross-worker limit. The `ci` profile defaults to 1. @default 0 */
+  /** Limit local workers within one WDIO invocation; 0 disables it. The `ci` profile defaults to 1. @default 0 */
   maxPostProcessesGlobal?: number
   /** @default 'blocking' */
   postProcessStartMode?: RecordingStartMode
   /** @default 2500 */
   postProcessStartTimeoutMs?: number
+  /** Shared local base directory. Each WDIO invocation uses its own run subdirectory. */
   lockDir?: string
 }
 

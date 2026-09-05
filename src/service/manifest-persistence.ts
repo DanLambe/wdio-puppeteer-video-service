@@ -20,7 +20,6 @@ const MANIFEST_LOCK_FILE_NAME = '.wdio-video-manifest.lock'
 const MANIFEST_LOCK_TIMEOUT_MS = 30_000
 const MANIFEST_LOCK_STALE_MS = 120_000
 const MANIFEST_LOCK_POLL_MS = 25
-const MANIFEST_LOCK_HEARTBEAT_MS = 1_000
 const ignoreFileError = (): undefined => undefined
 
 export const persistManifestRun = async (
@@ -112,7 +111,6 @@ const acquireManifestLock = async (
   while (systemClock.now() < deadline) {
     const lease = await tryAcquireOwnedFileLease({
       filePath: lockPath,
-      heartbeatIntervalMs: MANIFEST_LOCK_HEARTBEAT_MS,
       invalidStaleMs: MANIFEST_LOCK_STALE_MS,
       payload: { resource: 'manifest-aggregation' },
     })

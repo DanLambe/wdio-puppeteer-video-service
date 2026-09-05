@@ -5,6 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  ARTIFACT_PATH_CANDIDATE_LIMIT,
+  ArtifactPathExhaustedError,
   publishAtomicArtifact,
   reserveArtifactPath,
 } from '../../src/service/artifact-integrity.js'
@@ -34,6 +36,113 @@ describe('artifact integrity', () => {
     await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
       'existing-media',
     )
+  })
+
+  it.each(['existing-output', 'occupied-reservation'] as const)(
+    'bounds candidate search for %s and never starts production',
+    async (mode) => {
+      const tempDir = await createTempDir(tempDirs)
+      const desiredPath = path.join(tempDir, 'bounded.webm')
+      const stats = await fs.stat(tempDir)
+      const missing = Object.assign(new Error('missing'), { code: 'ENOENT' })
+      const stat = vi.spyOn(fs, 'stat').mockImplementation(async (filePath) => {
+        if (
+          mode === 'existing-output' ||
+          String(filePath).endsWith('.wdio-reserve')
+        ) {
+          return stats
+        }
+        throw missing
+      })
+      const open = vi
+        .spyOn(fs, 'open')
+        .mockRejectedValue(
+          Object.assign(new Error('occupied'), { code: 'EEXIST' }),
+        )
+      vi.spyOn(fs, 'readFile').mockResolvedValue(
+        JSON.stringify({ pid: process.pid }),
+      )
+      await expect(reserveArtifactPath(desiredPath)).rejects.toBeInstanceOf(
+        ArtifactPathExhaustedError,
+      )
+      expect(stat).toHaveBeenCalledTimes(
+        ARTIFACT_PATH_CANDIDATE_LIMIT * (mode === 'existing-output' ? 1 : 2),
+      )
+      expect(open).toHaveBeenCalledTimes(
+        mode === 'existing-output' ? 0 : ARTIFACT_PATH_CANDIDATE_LIMIT,
+      )
+      const produce = vi.fn(async () => true)
+      const validate = vi.fn(async () => true)
+      const warn = vi.fn()
+      await expect(
+        publishAtomicArtifact({ desiredPath, produce, validate, warn }),
+      ).resolves.toBeUndefined()
+      expect(produce).not.toHaveBeenCalled()
+      expect(validate).not.toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('ArtifactPathExhaustedError'),
+      )
+    },
+  )
+
+  it('surfaces permission failures without treating the desired path as absent', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const failure = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    })
+    const stat = vi.spyOn(fs, 'stat').mockRejectedValue(failure)
+    const open = vi.spyOn(fs, 'open')
+    await expect(
+      reserveArtifactPath(path.join(tempDir, 'unreadable.webm')),
+    ).rejects.toBe(failure)
+    expect(stat).toHaveBeenCalledOnce()
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('aborts on a metadata write failure and removes the exclusive candidate', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'storage.webm')
+    const openFile = fs.open.bind(fs)
+    const open = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (filePath, flags, mode) => {
+        const handle = await openFile(filePath, flags, mode)
+        vi.spyOn(handle, 'write').mockRejectedValue(
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        )
+        return handle
+      })
+    await expect(reserveArtifactPath(desiredPath)).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      cause: { code: 'ENOSPC' },
+    })
+    expect(open).toHaveBeenCalledOnce()
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('releases its reservation when the final existence recheck fails', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'recheck.webm')
+    const originalStat = fs.stat.bind(fs)
+    let outputStatCalls = 0
+    vi.spyOn(fs, 'stat').mockImplementation(async (filePath) => {
+      if (filePath === desiredPath && ++outputStatCalls > 1) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalStat(filePath)
+    })
+    const produce = vi.fn(async () => true)
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce,
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBeUndefined()
+    expect(produce).not.toHaveBeenCalled()
+    expect(await fs.readdir(tempDir)).toEqual([])
   })
 
   it('publishes only after production and validation complete', async () => {

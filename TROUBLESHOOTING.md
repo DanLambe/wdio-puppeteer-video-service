@@ -66,10 +66,29 @@ Inspect `concurrency` recording and post-processing limits independently.
 increase it only when the worker has enough CPU, memory, and I/O capacity for
 concurrent FFmpeg work. `maxPostProcessesGlobal: 0` disables only the
 cross-worker limit. Each operation still acquires its own per-process slot.
-Cross-worker lock files carry heartbeats. A lease with a live owner PID is kept
-even when its heartbeat is old; dead owners are reclaimed immediately, while
-malformed locks must exceed the invalid-file grace period. Keep
-`concurrency.lockDir` on storage shared by the participating local workers.
+Global limits cover workers within one WDIO invocation on the same host/PID
+namespace. Keep `concurrency.lockDir` on local storage shared by those workers.
+The launcher creates a unique run subdirectory, with recording slots at
+`<lockDir>/<runId>/slot-N.lock` and processing slots beneath `post-process/`.
+Separate invocations do not share capacity; use CI job limits for a host-wide
+budget. The run identity is available even if manifest setup fails.
+
+Lease metadata is written once. A lease with a live owner PID is kept regardless
+of age; dead owners are reclaimed immediately, while malformed locks must exceed
+the invalid-file grace period. Never delete a live run's locks to clear capacity:
+that can allow two workers to use the same slot. PID reuse within a very long
+invocation can still strand a slot conservatively; stop that invocation before
+removing its directory. A later invocation uses fresh capacity. Normal launcher
+completion removes only its own run directory, including after manifest/report
+errors. If the launcher crashes, its old directory may remain but cannot block
+a new run. Remove abandoned directories only after confirming their runs ended.
+
+Permission, read/write, and directory failures are operational errors, not busy
+slots. Check the reported path and filesystem permissions instead of raising
+the capacity wait timeout. If artifact naming exhausts 1,000 candidates, choose
+a fresh output directory or a more distinctive naming style; existing artifacts
+are not overwritten. Persistent artifact reservations and manifest aggregation
+locks still conservatively respect live PIDs, independently of slot run isolation.
 
 ## Allure has no video
 

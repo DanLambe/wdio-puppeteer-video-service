@@ -8,7 +8,6 @@ if (!leasePath) {
 
 const lease = await tryAcquireOwnedFileLease({
   filePath: leasePath,
-  heartbeatIntervalMs: 25,
   invalidStaleMs: 100,
   payload: { child: true },
 })

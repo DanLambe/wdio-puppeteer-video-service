@@ -31,11 +31,9 @@ const createProcess = (
 const createClock = (
   initialNow = 1_000,
 ): ClockBoundary & {
-  runInterval(): void
   setNow(value: number): void
 } => {
   let now = initialNow
-  let intervalCallback: (() => void) | undefined
   return {
     clearInterval: vi.fn(),
     clearTimeout: vi.fn(),
@@ -44,13 +42,7 @@ const createClock = (
     },
     now: () => now,
     queueMicrotask,
-    runInterval(): void {
-      intervalCallback?.()
-    },
-    setInterval: vi.fn((callback) => {
-      intervalCallback = callback
-      return { unref: vi.fn() } as unknown as NodeJS.Timeout
-    }),
+    setInterval: vi.fn(() => ({}) as NodeJS.Timeout),
     setNow(value): void {
       now = value
     },
@@ -77,7 +69,6 @@ describe('owned file lease', () => {
     const lease = await tryAcquireOwnedFileLease(
       {
         filePath: leasePath,
-        heartbeatIntervalMs: 25,
         invalidStaleMs: 100,
         payload: { resource: 'test' },
       },
@@ -93,29 +84,48 @@ describe('owned file lease', () => {
       updatedAt: 100,
       payload: { resource: 'test' },
     })
-    expect(clock.setInterval).toHaveBeenCalledWith(expect.any(Function), 25)
+    expect(clock.setInterval).not.toHaveBeenCalled()
 
     await expect(lease?.release()).resolves.toBe(true)
     await expect(lease?.release()).resolves.toBe(true)
-    expect(clock.clearInterval).toHaveBeenCalledOnce()
+    expect(clock.clearInterval).not.toHaveBeenCalled()
     await expect(fs.stat(leasePath)).rejects.toThrow()
   })
 
-  it('refreshes timestamps without changing identity or creation time', async () => {
+  it('reclaims a future-format lease only when its owner is dead', async () => {
+    const leasePath = await createLeasePath(tempDirs)
+    await fs.writeFile(
+      leasePath,
+      JSON.stringify({ schemaVersion: 2, ownerToken: 'future', pid: 222 }),
+      'utf8',
+    )
+
+    await expect(
+      cleanupStaleOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 10_000 },
+        { process: createProcess(333, () => false) },
+      ),
+    ).resolves.toBe(true)
+    await expect(fs.stat(leasePath)).rejects.toThrow()
+  })
+
+  it('keeps ownership metadata immutable while a lease is held', async () => {
     const leasePath = await createLeasePath(tempDirs)
     const clock = createClock(100)
     const lease = await tryAcquireOwnedFileLease(
       { filePath: leasePath, invalidStaleMs: 100 },
       { clock, process: createProcess() },
     )
+    const originalMetadata = await fs.readFile(leasePath, 'utf8')
     clock.setNow(250)
+    await Promise.resolve()
 
-    await expect(lease?.refresh()).resolves.toBe(true)
-    expect(readJson(await fs.readFile(leasePath, 'utf8'))).toMatchObject({
-      ownerToken: lease?.ownerToken,
+    await expect(fs.readFile(leasePath, 'utf8')).resolves.toBe(originalMetadata)
+    expect(readJson(originalMetadata)).toMatchObject({
       createdAt: 100,
-      updatedAt: 250,
+      updatedAt: 100,
     })
+    expect(clock.setInterval).not.toHaveBeenCalled()
     await lease?.release()
   })
 
@@ -165,34 +175,6 @@ describe('owned file lease', () => {
     expect(close).toHaveBeenCalledOnce()
   })
 
-  it('runs heartbeat refreshes and becomes inactive after release', async () => {
-    const leasePath = await createLeasePath(tempDirs)
-    const clock = createClock(100)
-    const lease = await tryAcquireOwnedFileLease(
-      {
-        filePath: leasePath,
-        heartbeatIntervalMs: 25,
-        invalidStaleMs: 100,
-      },
-      { clock, process: createProcess() },
-    )
-
-    expect(lease?.active).toBe(true)
-    clock.setNow(250)
-    clock.runInterval()
-    await vi.waitFor(async () => {
-      expect(readJson(await fs.readFile(leasePath, 'utf8'))).toMatchObject({
-        updatedAt: 250,
-      })
-    })
-
-    await expect(lease?.release()).resolves.toBe(true)
-    expect(lease?.active).toBe(false)
-    await expect(lease?.refresh()).resolves.toBe(false)
-    lease?.startHeartbeat(25)
-    expect(clock.setInterval).toHaveBeenCalledOnce()
-  })
-
   it('preserves a same-file replacement with a different owner token', async () => {
     const leasePath = await createLeasePath(tempDirs)
     const lease = await tryAcquireOwnedFileLease(
@@ -211,7 +193,7 @@ describe('owned file lease', () => {
       'utf8',
     )
 
-    await expect(lease?.refresh()).resolves.toBe(false)
+    await expect(lease?.isOwner()).resolves.toBe(false)
     await expect(lease?.release()).resolves.toBe(false)
     await expect(fs.readFile(leasePath, 'utf8')).resolves.toContain(
       'replacement-owner',
@@ -234,14 +216,12 @@ describe('owned file lease', () => {
       unlink: vi.fn(async () => {}),
     }
     const lease = new OwnedFileLease({
-      clock: createClock(),
       createdAt: 1,
       fileHandle: { close } as never,
       fileIdentity: { dev: 1, ino: 1, mtimeMs: 1, size: 1 },
       filePath: 'lease.lock',
       fileSystem,
       ownerToken: 'owner-token',
-      payload: undefined,
       pid: 12345,
     })
 
@@ -293,14 +273,12 @@ describe('owned file lease', () => {
         },
       }
       const lease = new OwnedFileLease({
-        clock: createClock(),
         createdAt: 1,
         fileHandle: { close } as never,
         fileIdentity: original,
         filePath: 'lease.lock',
         fileSystem,
         ownerToken: 'owner-token',
-        payload: undefined,
         pid: 12345,
       })
 
@@ -309,20 +287,21 @@ describe('owned file lease', () => {
     },
   )
 
-  it('keeps live v1 and legacy owners despite expired heartbeats', async () => {
+  it('keeps live current, future, and legacy owners despite old timestamps', async () => {
     const tempDir = await createTempDir(tempDirs)
     const clock = createClock(50_000)
     for (const [name, metadata] of [
       [
         'v1',
         {
-          schemaVersion: OWNED_FILE_LEASE_SCHEMA_VERSION,
+          schemaVersion: 1,
           ownerToken: 'v1-owner',
           pid: 222,
           createdAt: 1,
           updatedAt: 1,
         },
       ],
+      ['future', { schemaVersion: 2, ownerToken: 'future', pid: 222 }],
       ['legacy', { ownerId: 'legacy-owner', pid: 222, lastUpdatedAt: 1 }],
       ['pid-reuse', { pid: 222, startedAt: 1 }],
     ] as const) {
@@ -429,7 +408,10 @@ describe('owned file lease', () => {
         { filePath: 'unreadable.lock', invalidStaleMs: 100 },
         { fileSystem },
       ),
-    ).resolves.toBe(false)
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'inspect existing lease metadata',
+    })
     expect(unlink).not.toHaveBeenCalled()
   })
 
@@ -452,7 +434,10 @@ describe('owned file lease', () => {
         { filePath: 'inaccessible.lock', invalidStaleMs: 100 },
         { fileSystem },
       ),
-    ).resolves.toBe(false)
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'inspect existing lease metadata',
+    })
   })
 
   it('applies the invalid-file grace period at its exact boundary', async () => {
@@ -547,7 +532,10 @@ describe('owned file lease', () => {
         { filePath: 'lease.lock', invalidStaleMs: 100 },
         { fileSystem },
       ),
-    ).resolves.toBeUndefined()
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'write ownership metadata',
+    })
     expect(close).toHaveBeenCalledOnce()
     expect(unlink).toHaveBeenCalledWith('lease.lock')
   })
@@ -573,7 +561,10 @@ describe('owned file lease', () => {
         { filePath: 'lease.lock', invalidStaleMs: 100 },
         { fileSystem },
       ),
-    ).resolves.toBeUndefined()
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'write ownership metadata',
+    })
     expect(close).toHaveBeenCalledOnce()
     expect(unlink).not.toHaveBeenCalled()
   })
@@ -595,7 +586,10 @@ describe('owned file lease', () => {
         { filePath: 'lease.lock', invalidStaleMs: 100 },
         { fileSystem: statFailureFileSystem },
       ),
-    ).resolves.toBeUndefined()
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'inspect the exclusive lease candidate',
+    })
     expect(close).toHaveBeenCalledOnce()
 
     const openError = Object.assign(new Error('permission denied'), {
@@ -613,7 +607,182 @@ describe('owned file lease', () => {
           },
         },
       ),
-    ).rejects.toBe(openError)
+    ).rejects.toMatchObject({
+      cause: openError,
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'open an exclusive candidate',
+    })
+  })
+
+  it('bounds a perpetual create/reclaim race to two exclusive opens', async () => {
+    const openExclusive = vi.fn(async () => {
+      throw Object.assign(new Error('exists'), { code: 'EEXIST' })
+    })
+    const missing = async (): Promise<never> => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+    }
+    await expect(
+      tryAcquireOwnedFileLease(
+        { filePath: 'race.lock', invalidStaleMs: 100 },
+        {
+          fileSystem: {
+            ...nodeFileSystem,
+            openExclusive,
+            readText: missing,
+            stat: missing,
+          },
+        },
+      ),
+    ).resolves.toBeUndefined()
+    expect(openExclusive).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['write', 'post-write-stat'] as const)(
+    'closes and cleans an unchanged candidate after %s failure',
+    async (phase) => {
+      const failure = Object.assign(new Error('storage failure'), {
+        code: 'EIO',
+      })
+      const close = vi.fn(async () => {})
+      const unlink = vi.fn(async () => {})
+      const stat = vi.fn(async () => ({ dev: 1, ino: 1, mtimeMs: 1, size: 0 }))
+      if (phase === 'post-write-stat') {
+        stat.mockResolvedValueOnce({ dev: 1, ino: 1, mtimeMs: 1, size: 0 })
+        stat.mockRejectedValueOnce(failure)
+      }
+      const fileHandle = {
+        close,
+        stat,
+        truncate: async () => {},
+        write: async (_buffer: Buffer, _offset: number, length: number) => {
+          if (phase === 'write') {
+            throw failure
+          }
+          return { bytesWritten: length }
+        },
+      }
+      await expect(
+        tryAcquireOwnedFileLease(
+          { filePath: 'lease.lock', invalidStaleMs: 100 },
+          {
+            fileSystem: {
+              ...nodeFileSystem,
+              openExclusive: async () => fileHandle as never,
+              stat: async () => ({ dev: 1, ino: 1, mtimeMs: 2, size: 100 }),
+              unlink,
+            },
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: 'OwnedFileLeaseOperationalError',
+        cause: failure,
+      })
+      expect(close).toHaveBeenCalledOnce()
+      expect(unlink).toHaveBeenCalledWith('lease.lock')
+    },
+  )
+
+  it('keeps ordinary live-owner contention to a single exclusive open', async () => {
+    const leasePath = await createLeasePath(tempDirs)
+    await fs.writeFile(leasePath, JSON.stringify({ pid: process.pid }))
+    const openExclusive = vi.fn(nodeFileSystem.openExclusive)
+    await expect(
+      tryAcquireOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 0 },
+        { fileSystem: { ...nodeFileSystem, openExclusive } },
+      ),
+    ).resolves.toBeUndefined()
+    expect(openExclusive).toHaveBeenCalledOnce()
+  })
+
+  it('releases a newly written candidate when its ownership read fails', async () => {
+    const leasePath = await createLeasePath(tempDirs)
+    const failure = Object.assign(new Error('transient read error'), {
+      code: 'EIO',
+    })
+    const readText = vi
+      .fn(nodeFileSystem.readText)
+      .mockRejectedValueOnce(failure)
+    await expect(
+      tryAcquireOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 100 },
+        { fileSystem: { ...nodeFileSystem, readText } },
+      ),
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      cause: failure,
+    })
+    await expect(fs.stat(leasePath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('propagates a reclaim unlink failure and preserves the dead-owner file', async () => {
+    const leasePath = await createLeasePath(tempDirs)
+    await fs.writeFile(leasePath, JSON.stringify({ pid: 222 }))
+    const failure = Object.assign(new Error('unlink denied'), {
+      code: 'EACCES',
+    })
+    await expect(
+      cleanupStaleOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 100 },
+        {
+          process: createProcess(333, () => false),
+          fileSystem: {
+            ...nodeFileSystem,
+            unlink: async () => {
+              throw failure
+            },
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'remove a reclaimable lease',
+      cause: failure,
+    })
+    expect(readJson(await fs.readFile(leasePath, 'utf8'))).toEqual({ pid: 222 })
+  })
+
+  it.each([1, 2])(
+    'closes without deleting when release ownership check %i cannot read metadata',
+    async (failedCheck) => {
+      const leasePath = await createLeasePath(tempDirs)
+      const readText = vi.fn(nodeFileSystem.readText)
+      const lease = await tryAcquireOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 100 },
+        { fileSystem: { ...nodeFileSystem, readText } },
+      )
+      if (failedCheck === 2) {
+        readText.mockImplementationOnce(nodeFileSystem.readText)
+      }
+      readText.mockRejectedValueOnce(
+        Object.assign(new Error('read denied'), { code: 'EACCES' }),
+      )
+      await expect(lease?.release()).resolves.toBe(false)
+      await expect(lease?.isOwner()).resolves.toBe(false)
+      await expect(fs.readFile(leasePath, 'utf8')).resolves.toContain(
+        lease?.ownerToken,
+      )
+    },
+  )
+
+  it('yields when a reclaimable file disappears during the final recheck', async () => {
+    const leasePath = await createLeasePath(tempDirs)
+    await fs.writeFile(leasePath, JSON.stringify({ pid: 222 }))
+    const readText = vi.fn(nodeFileSystem.readText)
+    readText.mockImplementationOnce(async (filePath) => {
+      const contents = await nodeFileSystem.readText(filePath)
+      await fs.unlink(filePath)
+      return contents
+    })
+    await expect(
+      cleanupStaleOwnedFileLease(
+        { filePath: leasePath, invalidStaleMs: 100 },
+        {
+          process: createProcess(333, () => false),
+          fileSystem: { ...nodeFileSystem, readText },
+        },
+      ),
+    ).resolves.toBe(true)
   })
 
   it('does not publish an acquisition whose ownership changed after writing', async () => {
@@ -669,14 +838,12 @@ describe('owned file lease', () => {
       },
     }
     const lease = new OwnedFileLease({
-      clock: createClock(),
       createdAt: 1,
       fileHandle: { close: async () => {} } as never,
       fileIdentity: { dev: 1, ino: 1, mtimeMs: 1, size: 1 },
       filePath: 'lease.lock',
       fileSystem,
       ownerToken: 'owner-token',
-      payload: undefined,
       pid: 12345,
     })
 
@@ -716,12 +883,20 @@ describe('owned file lease', () => {
           updatedAt: 2,
         }),
       ),
-    ).toBeUndefined()
+    ).toMatchObject({ format: 'future', ownerToken: 'owner', pid: 12 })
     expect(parseOwnedFileLeaseMetadata(JSON.stringify([]))).toBeUndefined()
     expect(
       parseOwnedFileLeaseMetadata(JSON.stringify({ pid: 0 })),
     ).toBeUndefined()
     expect(parseOwnedFileLeaseMetadata('{')).toBeUndefined()
+    expect(
+      parseOwnedFileLeaseMetadata(JSON.stringify({ schemaVersion: 2, pid: 0 })),
+    ).toBeUndefined()
+    expect(
+      parseOwnedFileLeaseMetadata(
+        JSON.stringify({ schemaVersion: 1, pid: 12 }),
+      ),
+    ).toBeUndefined()
   })
 
   it('coordinates processes and recovers a lease after its owner is killed', async () => {

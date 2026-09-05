@@ -30,9 +30,10 @@ interface ManifestWorkerContextEnvelope {
 
 export const createManifestRunContext = async (
   outputDir: string,
+  runId: string = randomUUID(),
 ): Promise<ManifestRunContext> => {
   const context: ManifestRunContext = {
-    runId: randomUUID(),
+    runId,
     outputDir: path.resolve(outputDir),
     startedAt: new Date().toISOString(),
     tools: {

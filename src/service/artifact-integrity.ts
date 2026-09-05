@@ -11,8 +11,22 @@ import {
 } from './owned-file-lease.js'
 
 const RESERVATION_SUFFIX = '.wdio-reserve'
-const ARTIFACT_RESERVATION_HEARTBEAT_MS = 1_000
 const ignoreFileError = (): undefined => undefined
+export const ARTIFACT_PATH_CANDIDATE_LIMIT = 1_000
+
+export class ArtifactPathExhaustedError extends Error {
+  readonly candidateLimit: number
+  readonly desiredPath: string
+
+  constructor(desiredPath: string) {
+    super(
+      `[WdioPuppeteerVideoService] Could not reserve an artifact path after ${ARTIFACT_PATH_CANDIDATE_LIMIT.toString()} candidates: ${desiredPath}`,
+    )
+    this.name = 'ArtifactPathExhaustedError'
+    this.candidateLimit = ARTIFACT_PATH_CANDIDATE_LIMIT
+    this.desiredPath = desiredPath
+  }
+}
 
 interface ArtifactLeasePayload {
   outputPath: string
@@ -20,7 +34,7 @@ interface ArtifactLeasePayload {
 }
 
 interface ArtifactReservation {
-  lease: OwnedFileLease<ArtifactLeasePayload>
+  lease: OwnedFileLease
   outputPath: string
   temporaryPath: string
 }
@@ -37,7 +51,11 @@ export const reserveArtifactPath = async (
   desiredPath: string,
 ): Promise<string> => {
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
-  for (let collisionIndex = 1; ; collisionIndex += 1) {
+  for (
+    let collisionIndex = 1;
+    collisionIndex <= ARTIFACT_PATH_CANDIDATE_LIMIT;
+    collisionIndex += 1
+  ) {
     const candidatePath = getCollisionPath(desiredPath, collisionIndex)
     if (await pathExists(candidatePath)) {
       continue
@@ -63,6 +81,7 @@ export const reserveArtifactPath = async (
       await lease.release()
     }
   }
+  throw new ArtifactPathExhaustedError(desiredPath)
 }
 
 export const publishAtomicArtifact = async (
@@ -143,7 +162,11 @@ const acquireArtifactReservation = async (
   processBoundary: ProcessBoundary,
 ): Promise<ArtifactReservation> => {
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
-  for (let collisionIndex = 1; ; collisionIndex += 1) {
+  for (
+    let collisionIndex = 1;
+    collisionIndex <= ARTIFACT_PATH_CANDIDATE_LIMIT;
+    collisionIndex += 1
+  ) {
     const outputPath = getCollisionPath(desiredPath, collisionIndex)
     if (await pathExists(outputPath)) {
       continue
@@ -165,13 +188,21 @@ const acquireArtifactReservation = async (
     // The output can appear after the initial existence check but before this
     // reservation is acquired. Recheck while the lease is held so the caller
     // never replaces an artifact published by another worker.
-    if (await pathExists(outputPath)) {
+    let outputExists: boolean
+    try {
+      outputExists = await pathExists(outputPath)
+    } catch (error) {
+      await lease.release()
+      throw error
+    }
+    if (outputExists) {
       await lease.release()
       continue
     }
 
     return { lease, outputPath, temporaryPath }
   }
+  throw new ArtifactPathExhaustedError(desiredPath)
 }
 
 const isTemporaryPathForOutput = (
@@ -202,11 +233,10 @@ const acquireArtifactLease = async (
   reservationPath: string,
   payload: ArtifactLeasePayload,
   processBoundary: ProcessBoundary,
-): Promise<OwnedFileLease<ArtifactLeasePayload> | undefined> => {
+): Promise<OwnedFileLease | undefined> => {
   return tryAcquireOwnedFileLease(
     {
       filePath: reservationPath,
-      heartbeatIntervalMs: ARTIFACT_RESERVATION_HEARTBEAT_MS,
       invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
       onReclaimed: async (metadata) => {
         await cleanupAbandonedArtifact(metadata, payload.outputPath)
@@ -275,8 +305,13 @@ const getCollisionPath = (
 }
 
 const pathExists = async (filePath: string): Promise<boolean> => {
-  return fs
-    .stat(filePath)
-    .then(() => true)
-    .catch(() => false)
+  try {
+    await fs.stat(filePath)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
 }
