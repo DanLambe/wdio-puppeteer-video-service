@@ -363,17 +363,7 @@ export const parseOwnedFileLeaseMetadata = (
 
   if (value.schemaVersion !== undefined) {
     if (value.schemaVersion !== OWNED_FILE_LEASE_SCHEMA_VERSION) {
-      if (!isPositiveInteger(value.pid)) {
-        return undefined
-      }
-      return {
-        format: 'future',
-        ...(isNonEmptyString(value.ownerToken)
-          ? { ownerToken: value.ownerToken }
-          : {}),
-        payload: value,
-        pid: value.pid,
-      }
+      return parseFutureLeaseMetadata(value)
     }
     if (
       !isNonEmptyString(value.ownerToken) ||
@@ -410,6 +400,23 @@ export const parseOwnedFileLeaseMetadata = (
     payload: value,
     pid: value.pid,
     ...(updatedAt === undefined ? {} : { updatedAt }),
+  }
+}
+
+const parseFutureLeaseMetadata = (
+  value: Record<string, unknown>,
+): ParsedOwnedFileLeaseMetadata | undefined => {
+  // Preserve live owners even when this version cannot validate their schema.
+  if (!isPositiveInteger(value.pid)) {
+    return undefined
+  }
+  return {
+    format: 'future',
+    ...(isNonEmptyString(value.ownerToken)
+      ? { ownerToken: value.ownerToken }
+      : {}),
+    payload: value,
+    pid: value.pid,
   }
 }
 
