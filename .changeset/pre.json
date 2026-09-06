@@ -4,5 +4,26 @@
   "initialVersions": {
     "wdio-puppeteer-video-service": "1.0.0-rc.1"
   },
-  "changesets": []
+  "changesets": [
+    "accurate-retained-video-metadata",
+    "bind-release-tag-to-commit",
+    "bootstrap-release-candidate",
+    "calm-videos-rest",
+    "distinct-scenario-report-joins",
+    "document-operational-limits",
+    "document-reservation-wait",
+    "framework-neutral-retry-accounting",
+    "fresh-run-slot-capacity",
+    "hash-report-content-security-policy",
+    "isolate-optional-metadata-failures",
+    "package-release-safety",
+    "patient-healthy-slots",
+    "pin-crop-diagnostic-contract",
+    "quiet-browsers-align",
+    "reach-windows-descendants",
+    "remove-unreachable-service-code",
+    "retry-transient-lock-failures",
+    "safe-configuration-example",
+    "verify-windows-worker-cleanup"
+  ]
 }
