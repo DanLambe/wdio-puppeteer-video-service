@@ -68,7 +68,7 @@ jobs:
         run: corepack npm audit signatures
 
       - name: Rebuild E2E Binary Dependencies
-        run: corepack npm rebuild esbuild ffmpeg-static edgedriver geckodriver
+        run: corepack npm rebuild esbuild ffmpeg-static edgedriver
 
       - name: Run E2E Tests
         run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced

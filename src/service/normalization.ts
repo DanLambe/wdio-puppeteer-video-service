@@ -1,13 +1,7 @@
 import path from 'node:path'
 import type {
-  ArtifactNameOverflowStrategy,
-  ArtifactNameStyle,
-  Mp4Mode,
-  OutputFormat,
   ProcessingMergeOptions,
   ProcessingTranscodeOptions,
-  RecordingStartMode,
-  ServiceProfile,
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
@@ -39,27 +33,6 @@ export const normalizeOptionalDir = (
   return trimmed
 }
 
-export const normalizePositiveInt = (
-  value: number | undefined,
-  fallback: number,
-): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return fallback
-  }
-  return Math.floor(value)
-}
-
-export const normalizeNonNegativeInt = (
-  value: number | undefined,
-  fallback: number,
-): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return fallback
-  }
-
-  return Math.floor(value)
-}
-
 export const normalizeBoolean = (
   value: boolean | undefined,
   fallback = false,
@@ -69,16 +42,6 @@ export const normalizeBoolean = (
   }
 
   return value
-}
-
-export const normalizeOutputFormat = (
-  format: OutputFormat | undefined,
-): OutputFormat => {
-  if (format === 'mp4') {
-    return 'mp4'
-  }
-
-  return 'webm'
 }
 
 export const normalizeTranscodeOptions = (
@@ -163,61 +126,6 @@ export const toNonEmptyString = (value: unknown): string | undefined => {
   }
 
   return trimmed
-}
-
-export const normalizeFileNameOverflowStrategy = (
-  strategy: ArtifactNameOverflowStrategy | undefined,
-): ArtifactNameOverflowStrategy => {
-  if (strategy === 'session') {
-    return 'session'
-  }
-  return 'truncate'
-}
-
-export const normalizeFileNameStyle = (
-  style: ArtifactNameStyle | undefined,
-): ArtifactNameStyle => {
-  if (style === 'test-full') {
-    return 'test-full'
-  }
-  if (style === 'session') {
-    return 'session'
-  }
-  if (style === 'session-full') {
-    return 'session-full'
-  }
-  return 'test'
-}
-
-export const normalizeMp4Mode = (mode: Mp4Mode | undefined): Mp4Mode => {
-  if (mode === 'direct') {
-    return 'direct'
-  }
-  if (mode === 'transcode') {
-    return 'transcode'
-  }
-  return 'auto'
-}
-
-export const normalizePerformanceProfile = (
-  profile: ServiceProfile | undefined,
-): ServiceProfile => {
-  if (profile === 'ci') {
-    return 'ci'
-  }
-  if (profile === 'parallel') {
-    return 'parallel'
-  }
-  return 'default'
-}
-
-export const normalizeRecordingStartMode = (
-  mode: RecordingStartMode | undefined,
-): RecordingStartMode => {
-  if (mode === 'fast-fail') {
-    return 'fast-fail'
-  }
-  return 'blocking'
 }
 
 export const isBenignStreamWriteError = (

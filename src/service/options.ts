@@ -57,10 +57,7 @@ export const resolveServiceConfiguration = (
   const transcode = normalization.normalizeTranscodeOptions(
     processing.transcode,
   )
-  const mergeSegments = resolveMergeOptions(
-    processing.merge,
-    profile !== 'default',
-  )
+  const mergeSegments = resolveMergeOptions(processing.merge)
   const globalRecordingLockDir = normalization.normalizeOptionalDir(
     concurrency.lockDir,
   )
@@ -199,16 +196,13 @@ const resolveAllureOptions = (
   }
 }
 
+// Merging is opt-in for every profile, so no profile can change this result.
 const resolveMergeOptions = (
   options: ProcessingMergeOptions | undefined,
-  disableByProfile: boolean,
 ): ResolvedProcessingMergeOptions => {
   const normalized = normalization.normalizeMergeOptions(options)
   return {
-    enabled:
-      disableByProfile && options?.enabled === undefined
-        ? false
-        : (normalized.enabled ?? false),
+    enabled: normalized.enabled ?? false,
     deleteSegments: normalized.deleteSegments ?? true,
   }
 }

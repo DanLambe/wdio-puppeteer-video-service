@@ -495,7 +495,7 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 - Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
 - `npm run test:coverage`: runs the deterministic unit/integration suite with
-  95% statements, lines, and functions plus a 90% branch gate.
+  96% statements and lines, 95% functions, and a 93% branch gate.
 - `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.
 - `npm run release:check`: combines lint, typecheck, coverage, package, and validated CycloneDX SBOM gates.
 

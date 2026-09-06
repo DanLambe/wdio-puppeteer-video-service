@@ -36,22 +36,6 @@ export interface NormalizedFilterEntity {
   readonly tags: readonly string[]
 }
 
-export const shouldRecordForFilters = (
-  options: RecordingFilterConfiguration,
-  test: Frameworks.Test,
-  context: unknown,
-  wildcardPatternRegexCache: Map<string, RegExp>,
-): boolean => {
-  return shouldRecordNormalizedEntity(
-    options,
-    {
-      specPath: resolveEntitySpecPath(test, context),
-      tags: extractEntityTagTokens(test, context),
-    },
-    wildcardPatternRegexCache,
-  )
-}
-
 export const shouldRecordNormalizedEntity = (
   options: RecordingFilterConfiguration,
   entity: NormalizedFilterEntity,

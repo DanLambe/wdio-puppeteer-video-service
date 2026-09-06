@@ -1,12 +1,13 @@
 import type { Frameworks } from '@wdio/types'
 import { describe, expect, it } from 'vitest'
+import type { RecordingFilterConfiguration } from '../../src/service/filtering.js'
 import {
   collectTagStrings,
   extractEntityTagTokens,
   matchesAnyPattern,
   matchesPattern,
   resolveEntitySpecPath,
-  shouldRecordForFilters,
+  shouldRecordNormalizedEntity,
 } from '../../src/service/filtering.js'
 
 const createTest = (metadata: Record<string, unknown> = {}): Frameworks.Test =>
@@ -20,6 +21,22 @@ const createTest = (metadata: Record<string, unknown> = {}): Frameworks.Test =>
     type: 'test',
     ...metadata,
   }) as Frameworks.Test
+
+/** Mirrors `createRecordingEntity`, which is how production reaches filtering. */
+const shouldRecord = (
+  options: RecordingFilterConfiguration,
+  test: Frameworks.Test,
+  context: unknown,
+  wildcardPatternRegexCache: Map<string, RegExp>,
+): boolean =>
+  shouldRecordNormalizedEntity(
+    options,
+    {
+      specPath: resolveEntitySpecPath(test, context),
+      tags: extractEntityTagTokens(test, context),
+    },
+    wildcardPatternRegexCache,
+  )
 
 describe('recording filters', () => {
   it('resolves spec paths through every supported metadata fallback', () => {
@@ -126,18 +143,18 @@ describe('recording filters', () => {
     const cache = new Map<string, RegExp>()
     const test = createTest({ file: 'specs/checkout.spec.ts' })
 
-    expect(shouldRecordForFilters({}, test, {}, cache)).toBe(true)
+    expect(shouldRecord({}, test, {}, cache)).toBe(true)
+    expect(shouldRecord({ includeSpecs: ['*account*'] }, test, {}, cache)).toBe(
+      false,
+    )
     expect(
-      shouldRecordForFilters({ includeSpecs: ['*account*'] }, test, {}, cache),
-    ).toBe(false)
-    expect(
-      shouldRecordForFilters({ includeSpecs: ['*checkout*'] }, test, {}, cache),
+      shouldRecord({ includeSpecs: ['*checkout*'] }, test, {}, cache),
     ).toBe(true)
     expect(
-      shouldRecordForFilters({ excludeSpecs: ['*checkout*'] }, test, {}, cache),
+      shouldRecord({ excludeSpecs: ['*checkout*'] }, test, {}, cache),
     ).toBe(false)
     expect(
-      shouldRecordForFilters(
+      shouldRecord(
         { includeTags: ['@smoke'] },
         test,
         { tags: ['@regression'] },
@@ -145,7 +162,7 @@ describe('recording filters', () => {
       ),
     ).toBe(false)
     expect(
-      shouldRecordForFilters(
+      shouldRecord(
         { includeTags: ['@smoke'] },
         test,
         { tags: ['@smoke'] },
@@ -153,7 +170,7 @@ describe('recording filters', () => {
       ),
     ).toBe(true)
     expect(
-      shouldRecordForFilters(
+      shouldRecord(
         { excludeTags: ['@skip'] },
         test,
         { tags: ['@skip'] },
@@ -161,7 +178,7 @@ describe('recording filters', () => {
       ),
     ).toBe(false)
     expect(
-      shouldRecordForFilters(
+      shouldRecord(
         { excludeTags: ['@skip'] },
         test,
         { tags: ['@smoke'] },

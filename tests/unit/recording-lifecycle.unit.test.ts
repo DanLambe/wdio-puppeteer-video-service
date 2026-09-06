@@ -67,7 +67,6 @@ describe('RecordingLifecycle', () => {
 
     expect(first).toBe(second)
     expect(lifecycle.state).toBe('preparing')
-    expect(lifecycle.isBusy).toBe(true)
     deferred.resolve(true)
 
     await expect(first).resolves.toBe(true)
@@ -137,11 +136,12 @@ describe('RecordingLifecycle', () => {
       stopCapture: async () => {},
       processCapture: async () => {},
     })
-    await expect(lifecycle.start(async () => true)).resolves.toBe(true)
+    expect(lifecycle.state).toBe('completed')
 
-    lifecycle.fail()
+    await expect(lifecycle.start(async () => false)).resolves.toBe(false)
     expect(lifecycle.state).toBe('failed')
     await expect(lifecycle.start(async () => true)).resolves.toBe(true)
+    expect(lifecycle.state).toBe('recording')
   })
 
   it('moves failed and throwing starts to failed', async () => {
@@ -334,7 +334,8 @@ describe('RecordingLifecycle', () => {
 
   it('deduplicates resets and returns to idle even when cleanup fails', async () => {
     const lifecycle = new RecordingLifecycle()
-    lifecycle.fail()
+    await expect(lifecycle.start(async () => false)).resolves.toBe(false)
+    expect(lifecycle.state).toBe('failed')
     const deferred = createDeferred<void>()
     const resetOperation = vi.fn(() => deferred.promise)
 
@@ -346,6 +347,5 @@ describe('RecordingLifecycle', () => {
     await expect(first).rejects.toThrow('release failed')
     expect(resetOperation).toHaveBeenCalledOnce()
     expect(lifecycle.state).toBe('idle')
-    expect(lifecycle.isBusy).toBe(false)
   })
 })
