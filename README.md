@@ -74,71 +74,24 @@ export const config = {
         outputDir: 'videos',
         recording: {
           scope: 'test',
-          attempts: 'all',
           retain: 'failures',
-          windowChanges: 'segment',
-          filters: {
-            includeSpecs: ['*critical*'],
-            excludeTags: ['@no-video'],
-          },
         },
         capture: {
-          viewport: 'current',
-          fps: 30,
-          quality: 30,
-          scale: 1,
-          speed: 1,
-          crop: { x: 0, y: 0, width: 1200, height: 700 },
-          framePriming: true,
-          connectionTimeoutMs: 10000,
+          fps: 24,
         },
-        processing: {
-          format: 'webm',
-          mp4Mode: 'auto',
-          timing: 'after-test',
-          ffmpeg: {
-            path: '/usr/bin/ffmpeg',
-            timeoutMs: 0,
-          },
-          transcode: {
-            enabled: false,
-            deleteOriginal: true,
-          },
-          merge: {
-            enabled: false,
-            deleteSegments: true,
-          },
-        },
-        concurrency: {
-          maxRecordingsPerProcess: 0,
-          maxRecordingsGlobal: 0,
-          startMode: 'blocking',
-          startTimeoutMs: 2500,
-          maxPostProcessesPerProcess: 1,
-          maxPostProcessesGlobal: 0,
-          postProcessStartMode: 'blocking',
-          postProcessStartTimeoutMs: 2500,
-        },
-        artifacts: {
-          naming: {
-            style: 'test',
-            overflow: 'truncate',
-          },
-        },
-        integrations: {
-          allure: {
-            attach: 'failures',
-            maxBytes: 25000000,
-          },
-        },
-        profile: 'default',
         logLevel: 'warn',
-        failurePolicy: 'warn',
       },
     ],
   ],
 }
 ```
+
+Every option is optional; this example only shows the shape and a few common
+choices. [Option Reference](#option-reference) documents all of them with their
+defaults. Add options such as `capture.crop`, `recording.filters`,
+`processing.ffmpeg.path`, and `integrations.allure` deliberately rather than by
+copying a full list, because each one changes what is recorded or what has to be
+installed.
 
 Register the service by package name so WDIO v9 can load both its named launcher
 export and its default worker export in the correct processes. Direct imported
