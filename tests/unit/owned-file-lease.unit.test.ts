@@ -12,8 +12,10 @@ import {
 } from '../../src/service/boundaries.js'
 import {
   cleanupStaleOwnedFileLease,
+  isTransientLeaseFileError,
   OWNED_FILE_LEASE_SCHEMA_VERSION,
   OwnedFileLease,
+  OwnedFileLeaseOperationalError,
   parseOwnedFileLeaseMetadata,
   tryAcquireOwnedFileLease,
 } from '../../src/service/owned-file-lease.js'
@@ -62,6 +64,43 @@ describe('owned file lease', () => {
     )
     tempDirs.length = 0
   })
+
+  it.each([
+    { code: 'EBUSY', platform: 'linux', transient: true },
+    { code: 'EAGAIN', platform: 'linux', transient: true },
+    { code: 'EMFILE', platform: 'linux', transient: true },
+    { code: 'ENFILE', platform: 'linux', transient: true },
+    { code: 'EPERM', platform: 'win32', transient: true },
+    { code: 'EPERM', platform: 'linux', transient: false },
+    { code: 'EACCES', platform: 'win32', transient: false },
+    { code: 'ENOSPC', platform: 'win32', transient: false },
+    { code: undefined, platform: 'win32', transient: false },
+  ] as const)(
+    'classifies $code on $platform as transient=$transient',
+    ({ code, platform, transient }) => {
+      const errno = Object.assign(new Error('refused'), { code })
+      expect(isTransientLeaseFileError(errno, platform)).toBe(transient)
+      expect(
+        isTransientLeaseFileError(
+          new OwnedFileLeaseOperationalError('/lease', 'open', errno),
+          platform,
+        ),
+      ).toBe(transient)
+    },
+  )
+
+  it.each([undefined, null, 'EBUSY', { code: 'EBUSY' }])(
+    'treats the non-error cause %j as a real fault',
+    (cause) => {
+      expect(isTransientLeaseFileError(cause, 'win32')).toBe(false)
+      expect(
+        isTransientLeaseFileError(
+          new OwnedFileLeaseOperationalError('/lease', 'open', cause),
+          'win32',
+        ),
+      ).toBe(false)
+    },
+  )
 
   it('writes versioned ownership metadata and releases idempotently', async () => {
     const leasePath = await createLeasePath(tempDirs)

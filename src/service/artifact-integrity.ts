@@ -1,16 +1,23 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { ProcessBoundary } from './boundaries.js'
-import { nodeProcess } from './boundaries.js'
+import {
+  type ClockBoundary,
+  nodeProcess,
+  type ProcessBoundary,
+  systemClock,
+} from './boundaries.js'
 import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from './constants.js'
 import {
+  isTransientLeaseFileError,
   type OwnedFileLease,
   type ParsedOwnedFileLeaseMetadata,
   tryAcquireOwnedFileLease,
 } from './owned-file-lease.js'
 
 const RESERVATION_SUFFIX = '.wdio-reserve'
+const RESERVATION_RETRY_TIMEOUT_MS = 2_000
+const RESERVATION_RETRY_POLL_MS = 25
 const ignoreFileError = (): undefined => undefined
 export const ARTIFACT_PATH_CANDIDATE_LIMIT = 1_000
 
@@ -40,6 +47,7 @@ interface ArtifactReservation {
 }
 
 export interface AtomicArtifactOptions {
+  clock?: ClockBoundary
   desiredPath: string
   produce: (temporaryPath: string) => Promise<boolean>
   process?: ProcessBoundary
@@ -47,9 +55,15 @@ export interface AtomicArtifactOptions {
   warn: (message: string) => void
 }
 
+export interface ArtifactReservationDependencies {
+  readonly clock?: ClockBoundary
+}
+
 export const reserveArtifactPath = async (
   desiredPath: string,
+  dependencies: ArtifactReservationDependencies = {},
 ): Promise<string> => {
+  const clock = dependencies.clock ?? systemClock
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
   for (
     let collisionIndex = 1;
@@ -65,6 +79,7 @@ export const reserveArtifactPath = async (
       `${candidatePath}${RESERVATION_SUFFIX}`,
       { outputPath: candidatePath },
       nodeProcess,
+      clock,
     )
     if (!lease) {
       continue
@@ -91,6 +106,7 @@ export const publishAtomicArtifact = async (
   const reservation = await acquireArtifactReservation(
     options.desiredPath,
     processBoundary,
+    options.clock ?? systemClock,
   ).catch((error: unknown) => {
     options.warn(
       `[WdioPuppeteerVideoService] Failed to reserve artifact ${options.desiredPath}: ${String(error)}`,
@@ -183,6 +199,7 @@ const linkArtifact = async (
 const acquireArtifactReservation = async (
   desiredPath: string,
   processBoundary: ProcessBoundary,
+  clock: ClockBoundary,
 ): Promise<ArtifactReservation> => {
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
   for (
@@ -204,6 +221,7 @@ const acquireArtifactReservation = async (
       reservationPath,
       { outputPath, temporaryPath },
       processBoundary,
+      clock,
     )
     if (!lease) {
       continue
@@ -256,17 +274,37 @@ const acquireArtifactLease = async (
   reservationPath: string,
   payload: ArtifactLeasePayload,
   processBoundary: ProcessBoundary,
+  clock: ClockBoundary,
 ): Promise<OwnedFileLease | undefined> => {
-  return tryAcquireOwnedFileLease(
-    {
-      filePath: reservationPath,
-      invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
-      onReclaimed: async (metadata) => {
-        await cleanupAbandonedArtifact(metadata, payload.outputPath)
-      },
-      payload,
-    },
-    { process: processBoundary },
+  const deadline = clock.now() + RESERVATION_RETRY_TIMEOUT_MS
+  let transientFailure: unknown
+  while (clock.now() < deadline) {
+    try {
+      return await tryAcquireOwnedFileLease(
+        {
+          filePath: reservationPath,
+          invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
+          onReclaimed: async (metadata) => {
+            await cleanupAbandonedArtifact(metadata, payload.outputPath)
+          },
+          payload,
+        },
+        { process: processBoundary },
+      )
+    } catch (error) {
+      // A sharing violation or descriptor shortage is not a name collision, so
+      // another candidate would hit it too. Wait on this one instead of
+      // spending the collision budget, and keep the fault if it never clears.
+      if (!isTransientLeaseFileError(error, processBoundary.platform)) {
+        throw error
+      }
+      transientFailure = error
+    }
+    await clock.delay(RESERVATION_RETRY_POLL_MS)
+  }
+  throw new Error(
+    `Timed out reserving an artifact path after repeated transient filesystem failures: ${reservationPath}`,
+    { cause: transientFailure },
   )
 }
 

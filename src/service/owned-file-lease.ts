@@ -74,6 +74,32 @@ export class OwnedFileLeaseOperationalError extends Error {
   }
 }
 
+/**
+ * Distinguishes a momentary filesystem refusal from a real fault. Antivirus
+ * scanners, indexers, and descriptor shortages hold a lease file open for a
+ * moment; callers that already poll should treat that as contention instead of
+ * failing on the first attempt. Windows reports a sharing violation as `EPERM`,
+ * which is a permanent condition everywhere else.
+ */
+export const isTransientLeaseFileError = (
+  error: unknown,
+  platform: NodeJS.Platform,
+): boolean => {
+  const cause =
+    error instanceof OwnedFileLeaseOperationalError ? error.cause : error
+  if (!(cause instanceof Error)) {
+    return false
+  }
+  const code = (cause as NodeJS.ErrnoException).code
+  return (
+    code === 'EBUSY' ||
+    code === 'EAGAIN' ||
+    code === 'EMFILE' ||
+    code === 'ENFILE' ||
+    (platform === 'win32' && code === 'EPERM')
+  )
+}
+
 export class OwnedFileLease {
   readonly createdAt: number
   readonly filePath: string

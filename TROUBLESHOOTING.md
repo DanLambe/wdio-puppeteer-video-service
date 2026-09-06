@@ -145,6 +145,15 @@ If artifact naming exhausts 1,000 candidates, choose
 a fresh output directory or a more distinctive naming style; existing artifacts
 are not overwritten. Persistent artifact reservations and manifest aggregation
 locks still conservatively respect live PIDs, independently of slot run isolation.
+They also share the transient-error classification above: a momentary refusal
+while opening a lock file is treated as contention rather than a fault. Manifest
+aggregation polls within its existing deadline, and an artifact reservation waits
+briefly on the same candidate path instead of renaming the artifact, because a
+descriptor shortage is not a name collision and another name would meet the same
+refusal. An already-occupied path still advances to the next candidate name, a
+genuine fault such as `EACCES` or `ENOSPC` still fails immediately, and a wait
+that ends without the refusal clearing reports the underlying filesystem error as
+its cause.
 
 ## Allure has no video
 

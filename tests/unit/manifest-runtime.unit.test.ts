@@ -10,7 +10,7 @@ import type {
   VideoManifestV1,
 } from '../../src/manifest.js'
 import { isVideoManifest } from '../../src/manifest.js'
-import { systemClock } from '../../src/service/boundaries.js'
+import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
@@ -833,6 +833,71 @@ describe('manifest runtime', () => {
     const manifest = await aggregateManifestRun(context, 0)
     expect(firstRun(manifest).id).toBe(context.runId)
     expect(delay).toHaveBeenCalledOnce()
+  })
+
+  it.each(['EBUSY', 'EAGAIN', 'EMFILE', 'ENFILE', 'EPERM'])(
+    'polls through a transient %s while opening the manifest lock',
+    async (code) => {
+      if (code === 'EPERM' && process.platform !== 'win32') {
+        // A sharing violation is a Windows condition; EPERM is permanent here.
+        return
+      }
+      const outputDir = await createTempDir()
+      const context = await createManifestRunContext(outputDir)
+      const openExclusive = vi
+        .spyOn(nodeFileSystem, 'openExclusive')
+        .mockRejectedValueOnce(
+          Object.assign(new Error(`${code}: refused`), { code }),
+        )
+
+      const manifest = await aggregateManifestRun(context, 0)
+
+      expect(firstRun(manifest).id).toBe(context.runId)
+      expect(openExclusive.mock.calls.length).toBeGreaterThan(1)
+      await expect(
+        fs.stat(path.join(outputDir, '.wdio-video-manifest.lock')),
+      ).rejects.toThrow()
+    },
+  )
+
+  it.each(['EACCES', 'ENOSPC', 'EROFS'])(
+    'fails closed on a %s manifest lock failure instead of polling',
+    async (code) => {
+      const outputDir = await createTempDir()
+      const context = await createManifestRunContext(outputDir)
+      const failure = Object.assign(new Error(`${code}: refused`), { code })
+      vi.spyOn(nodeFileSystem, 'openExclusive').mockRejectedValue(failure)
+      const delay = vi.spyOn(systemClock, 'delay')
+
+      await expect(aggregateManifestRun(context, 0)).rejects.toMatchObject({
+        cause: failure,
+      })
+      expect(delay).not.toHaveBeenCalled()
+      await expect(
+        fs.stat(path.join(outputDir, 'manifest.json')),
+      ).rejects.toThrow()
+    },
+  )
+
+  it('reports the last transient failure when the lock deadline expires', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const failure = Object.assign(new Error('EBUSY: refused'), {
+      code: 'EBUSY',
+    })
+    vi.spyOn(nodeFileSystem, 'openExclusive').mockRejectedValue(failure)
+    let elapsed = 0
+    vi.spyOn(systemClock, 'now').mockImplementation(() => elapsed)
+    vi.spyOn(systemClock, 'delay').mockImplementation(async () => {
+      elapsed += 30_000
+    })
+
+    await expect(aggregateManifestRun(context, 0)).rejects.toMatchObject({
+      cause: { cause: failure },
+      message: expect.stringContaining(
+        'repeated transient filesystem failures',
+      ),
+    })
   })
 
   it('recovers a stale lock and refuses to overwrite an invalid manifest', async () => {

@@ -18,6 +18,7 @@ import { resolveGlobalSlotRunDirectories } from './global-slot-directory.js'
 import { createLauncherRegistrationError } from './launcher-context.js'
 import type { ServiceLogger } from './logging.js'
 import {
+  isTransientLeaseFileError,
   type OwnedFileLease,
   OwnedFileLeaseOperationalError,
   tryAcquireOwnedFileLease,
@@ -63,25 +64,6 @@ interface GlobalSlotAttempt {
   readonly acquired: boolean
   readonly canRetry: boolean
   readonly failures: unknown[]
-}
-
-const isRetryableSlotError = (
-  error: unknown,
-  platform: NodeJS.Platform,
-): boolean => {
-  const cause =
-    error instanceof OwnedFileLeaseOperationalError ? error.cause : error
-  if (!(cause instanceof Error)) {
-    return false
-  }
-  const code = (cause as NodeJS.ErrnoException).code
-  return (
-    code === 'EBUSY' ||
-    code === 'EAGAIN' ||
-    code === 'EMFILE' ||
-    code === 'ENFILE' ||
-    (platform === 'win32' && code === 'EPERM')
-  )
 }
 
 export class RecordingSlotScheduler {
@@ -256,7 +238,7 @@ export class RecordingSlotScheduler {
         canRetry = true
       } catch (error) {
         failures.push(error)
-        canRetry ||= isRetryableSlotError(error, this.process.platform)
+        canRetry ||= isTransientLeaseFileError(error, this.process.platform)
       }
     }
 
