@@ -46,6 +46,8 @@ describe('Video Recording Service E2E Verification - Windows', () => {
 
     await browser.switchToWindow(targetHandle)
     await expect($('h3')).toHaveText('Self-closing Window')
+    // Give this segment a recording lifetime before destroying its target.
+    await pauseForRecording()
     await $('#close-window').click()
     await browser.waitUntil(
       async () => (await browser.getWindowHandles()).length === 1,
