@@ -38,6 +38,14 @@ separate personal access token.
 5. Before preparing stable `1.0.0`, run `npm exec changeset pre exit`, version
    packages, review the removal of the prerelease suffix, and commit the
    resulting release changes separately.
+6. A stable release also has to correct the README, which npm renders on the
+   package page. Two passages describe the opt-in candidate and stop being true
+   the moment `latest` moves off `0.8.0`: the **1.0 release candidate** callout
+   below the badges, and the install section that documents the `next` channel
+   and says an unqualified install still resolves to `0.8.0`. Update both in the
+   release pull request, not afterwards. `SUPPORT.md`'s description of the `next`
+   tag stays correct, because it describes the process rather than the current
+   state.
 
 `1.0.0-rc.1` is a one-time bootstrap exception: its version and changelog were
 prepared before Changesets was enabled, so its empty bootstrap changeset does

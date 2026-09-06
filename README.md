@@ -234,8 +234,11 @@ files and published only after validation through an atomic hard-link operation
 that never replaces an existing artifact. The output filesystem must support
 hard links. A failed, timed-out, or unsupported publication keeps its source
 recordings and removes unpublished partial output. Artifact naming tries at most
-1,000 candidates before reporting exhaustion. Storage failures are not classified
-as busy capacity. A faulty slot does not cancel the wait for other healthy-but-busy
+1,000 candidates before reporting exhaustion; a transient refusal while reserving
+one is waited out briefly on that same path instead of consuming candidates,
+because a descriptor shortage is not a name collision, and a reservation that
+never clears reports the underlying filesystem error. Storage failures are not
+classified as busy capacity. A faulty slot does not cancel the wait for other healthy-but-busy
 slots. Transient slot faults (`EBUSY`, `EAGAIN`, `EMFILE`, `ENFILE`, and Windows
 `EPERM`) are retried within the existing acquisition deadline; if every slot has
 a non-retryable error, acquisition fails immediately. Errors remaining at the
