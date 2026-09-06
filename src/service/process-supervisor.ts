@@ -60,10 +60,14 @@ export const terminateFfmpegProcessTree = async (
       force,
       dependencies,
     )
-    if (terminated) {
-      return
+    // Windows has no graceful per-process signal: killing the child here is an
+    // abrupt single-process terminate that also destroys the parent identity a
+    // later `taskkill /T` needs to reach descendants. Leave a failed graceful
+    // attempt intact so the caller can still escalate to the whole tree, and
+    // signal the child only as the forced pass's last resort.
+    if (!terminated && force) {
+      killChildBestEffort(ffmpegProcess, signal)
     }
-    killChildBestEffort(ffmpegProcess, signal)
     return
   }
 

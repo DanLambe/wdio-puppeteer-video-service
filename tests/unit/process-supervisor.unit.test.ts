@@ -128,7 +128,7 @@ describe('FFmpeg process supervisor', () => {
     expect(process.kill).not.toHaveBeenCalled()
   })
 
-  it('bounds a hung Windows helper and falls back to the child', async () => {
+  it('bounds a hung Windows helper without killing the child', async () => {
     vi.useFakeTimers()
     const process = new FakeProcess()
     process.pid = 4321
@@ -142,10 +142,10 @@ describe('FFmpeg process supervisor', () => {
 
     await expect(termination).resolves.toBeUndefined()
     expect(helper.kill).toHaveBeenCalledWith('SIGKILL')
-    expect(process.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(process.kill).not.toHaveBeenCalled()
   })
 
-  it('falls back when the Windows helper errors or exits unsuccessfully', async () => {
+  it('keeps the tree intact when the graceful Windows helper fails', async () => {
     const erroredProcess = new FakeProcess()
     erroredProcess.pid = 1001
     const erroredHelper = new FakeTerminationHelper()
@@ -163,15 +163,31 @@ describe('FFmpeg process supervisor', () => {
     const failedProcess = new FakeProcess()
     failedProcess.pid = 1002
     const failedHelper = new FakeTerminationHelper()
-    const failedTermination = terminateFfmpegProcessTree(failedProcess, true, {
+    const failedTermination = terminateFfmpegProcessTree(failedProcess, false, {
       platform: 'win32',
       spawnTerminationHelper: () => failedHelper,
     })
     failedHelper.emit('close', 1)
 
     await Promise.all([erroredTermination, failedTermination])
-    expect(erroredProcess.kill).toHaveBeenCalledWith('SIGTERM')
-    expect(failedProcess.kill).toHaveBeenCalledWith('SIGKILL')
+    // Killing the parent would settle the run and strand its descendants,
+    // because `taskkill /T` cannot enumerate the children of a dead process.
+    expect(erroredProcess.kill).not.toHaveBeenCalled()
+    expect(failedProcess.kill).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the child when the forced Windows helper fails', async () => {
+    const process = new FakeProcess()
+    process.pid = 1003
+    const helper = new FakeTerminationHelper()
+    const termination = terminateFfmpegProcessTree(process, true, {
+      platform: 'win32',
+      spawnTerminationHelper: () => helper,
+    })
+    helper.emit('close', 1)
+
+    await expect(termination).resolves.toBeUndefined()
+    expect(process.kill).toHaveBeenCalledWith('SIGKILL')
   })
 
   it('falls back when spawning the Windows helper throws', async () => {
