@@ -55,6 +55,14 @@ const assertDiscardedRetentionEntry = async (
 const requestedMode = process.argv[2] || 'all'
 
 const resolveModeOrder = (mode: string): AdvancedMode[] => {
+  if (mode === 'windows') {
+    return [
+      'deferred-merge',
+      'global-concurrency',
+      'ffmpeg-failure',
+      'retention',
+    ]
+  }
   if (mode === 'all') {
     return [
       'retry',
@@ -101,7 +109,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
   )
   process.exit(1)
 }

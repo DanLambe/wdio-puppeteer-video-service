@@ -134,7 +134,7 @@ export const publishAtomicArtifact = async (
       return undefined
     }
 
-    await fs.link(reservation.temporaryPath, reservation.outputPath)
+    await linkArtifact(reservation.temporaryPath, reservation.outputPath)
     published = true
     await fs.unlink(reservation.temporaryPath).catch((error: unknown) => {
       options.warn(
@@ -154,6 +154,29 @@ export const publishAtomicArtifact = async (
       })
     }
     await reservation.lease.release()
+  }
+}
+
+const linkArtifact = async (
+  temporaryPath: string,
+  outputPath: string,
+): Promise<void> => {
+  try {
+    await fs.link(temporaryPath, outputPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    if (
+      code &&
+      ['EPERM', 'EACCES', 'EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes(
+        code,
+      )
+    ) {
+      throw new Error(
+        `Hard-link publication failed (${code}). Use a writable outputDir on a filesystem that supports hard links; no overwrite fallback is used. ${String(error)}`,
+        { cause: error },
+      )
+    }
+    throw error
   }
 }
 

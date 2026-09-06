@@ -10,6 +10,7 @@ import type {
   VideoManifestV1,
 } from '../../src/manifest.js'
 import { isVideoManifest } from '../../src/manifest.js'
+import { systemClock } from '../../src/service/boundaries.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
@@ -818,15 +819,20 @@ describe('manifest runtime', () => {
       }),
       'utf8',
     )
-    const releaseTimer = setTimeout(() => {
-      void fs.unlink(lockPath)
-    }, 50)
-    try {
-      const manifest = await aggregateManifestRun(context, 0)
-      expect(firstRun(manifest).id).toBe(context.runId)
-    } finally {
-      clearTimeout(releaseTimer)
-    }
+    // Release between acquisition attempts, not concurrently with Windows I/O.
+    // Await the release so failures belong to this test, not an unhandled timer.
+    const delay = vi
+      .spyOn(systemClock, 'delay')
+      .mockImplementationOnce(async () => {
+        const owner = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+          pid: number
+        }
+        expect(owner.pid).toBe(process.pid)
+        await fs.unlink(lockPath)
+      })
+    const manifest = await aggregateManifestRun(context, 0)
+    expect(firstRun(manifest).id).toBe(context.runId)
+    expect(delay).toHaveBeenCalledOnce()
   })
 
   it('recovers a stale lock and refuses to overwrite an invalid manifest', async () => {

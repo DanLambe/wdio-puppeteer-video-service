@@ -206,9 +206,17 @@ jobs:
         run: corepack npm run ${{ matrix.command }}
 
   advanced:
-    name: Advanced recording and artifact behavior
-    runs-on: ubuntu-latest
+    name: Advanced recording and artifact behavior (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: test:e2e:advanced
+          - os: windows-latest
+            command: test:e2e:advanced:windows
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -226,7 +234,11 @@ jobs:
         run: corepack npm rebuild esbuild ffmpeg-static
 
       - name: Run Advanced Recording Tests
-        run: corepack npm run test:e2e:advanced
+        run: corepack npm run ${{ matrix.command }}
+
+      - name: Verify Real Windows Process Tree Termination
+        if: matrix.os == 'windows-latest'
+        run: corepack npm run test:integration:windows-process
 
   edge:
     name: Edge smoke (Windows)

@@ -52,6 +52,12 @@ non-empty consumer-facing changeset and follows the release-PR flow above.
 2. Require both independent runs to pass on Ubuntu and Windows, including the
    minimum/latest peer checks, Chrome BiDi/classic capture, Edge smoke, all
    three WDIO frameworks, package validation, coverage, and SBOM generation.
+   Advanced behavior runs fully on Linux and as a bounded Windows subset:
+   deferred merge, global concurrency, FFmpeg failure/source preservation, and
+   retention discard. The Windows job also verifies real process-tree termination
+   using two short-lived test-owned Node processes. PR checks run the same subset
+   plus targeted ownership/publication/worker tests; this adds one Windows job,
+   not another dependency/browser matrix.
 3. Dispatch `Publish To npm` from `master`, select `prerelease` or `stable`, and
    provide both successful run IDs. The workflow rejects a stable version on
    the prerelease channel, a prerelease version on the stable channel, duplicate

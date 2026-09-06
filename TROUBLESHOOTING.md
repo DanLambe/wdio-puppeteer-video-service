@@ -95,6 +95,11 @@ overwrite an existing artifact. FAT/exFAT, some network shares, container bind
 mounts, or restricted filesystems may reject hard links. Move `outputDir` to a
 local hard-link-capable filesystem when diagnostics report an unsupported link
 operation. The service preserves the source recording in this case.
+The publication warning includes the filesystem error code (for example `EPERM`,
+`EXDEV`, or `ENOTSUP`) and `outputDir` guidance. Permission errors can also mean
+the directory is not writable or security software is blocking the operation;
+they do not by themselves prove the filesystem lacks hard-link support. No
+rename fallback is attempted, because it could overwrite another worker's file.
 
 ## Recording capacity is exhausted
 
