@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import type { ProcessBoundary } from '../../src/service/boundaries.js'
 import type {
@@ -6,7 +8,11 @@ import type {
   readFfmpegVersion,
   resolveAvailableFfmpegPath,
 } from '../../src/service/ffmpeg.js'
-import { FfmpegProcessRegistry } from '../../src/service/ffmpeg-runner.js'
+import {
+  FfmpegProcessRegistry,
+  runFfmpeg as runSupervisedFfmpeg,
+  type SpawnFfmpegProcess,
+} from '../../src/service/ffmpeg-runner.js'
 import {
   type FfmpegRunner,
   FfmpegRuntime,
@@ -97,6 +103,102 @@ const createHarness = (
 }
 
 describe('FfmpegRuntime', () => {
+  it.each(['throw', 'event'] as const)(
+    'isolates metadata spawn %s failures from later probes, transcodes, and merges',
+    async (failureMode) => {
+      const harness = createHarness()
+      const failure = Object.assign(new Error('transient spawn denied'), {
+        code: 'EPERM',
+      })
+      const spawnProcess = vi.fn<SpawnFfmpegProcess>(() => {
+        const child = Object.assign(new EventEmitter(), {
+          stderr: new PassThrough(),
+          kill: () => true,
+        })
+        queueMicrotask(() => {
+          child.stderr.write('Stream #0:0: Video: vp9, 800x600')
+          child.emit('close', 0)
+        })
+        return child
+      })
+      spawnProcess.mockImplementationOnce(() => {
+        if (failureMode === 'throw') {
+          throw failure
+        }
+        const child = Object.assign(new EventEmitter(), { kill: () => true })
+        queueMicrotask(() => {
+          child.emit('error', failure)
+          child.emit('close', 1)
+        })
+        return child
+      })
+      harness.runFfmpeg.mockImplementation((options, processRegistry) =>
+        runSupervisedFfmpeg(options, { processRegistry, spawnProcess }),
+      )
+
+      await expect(
+        harness.runtime.readMediaDimensions('/first.webm'),
+      ).resolves.toBeUndefined()
+      expect(harness.scheduler.release).toHaveBeenCalledOnce()
+      expect(harness.processRegistry.size).toBe(0)
+      await expect(harness.runtime.ensureReady()).resolves.toBe(true)
+      await expect(
+        harness.runtime.readMediaDimensions('/second.webm'),
+      ).resolves.toEqual({ width: 800, height: 600 })
+      await expect(harness.runtime.run([], 'transcode')).resolves.toBe(true)
+      await expect(harness.runtime.run([], 'merge')).resolves.toBe(true)
+      expect(spawnProcess).toHaveBeenCalledTimes(4)
+      expect(harness.scheduler.release).toHaveBeenCalledTimes(2)
+      expect(harness.processRegistry.size).toBe(0)
+      expect(harness.resolveAvailablePath).toHaveBeenCalledOnce()
+      expect(harness.log).toHaveBeenCalledWith(
+        'warn',
+        expect.stringContaining('Failed to spawn ffmpeg for metadata probe'),
+      )
+      expect(
+        harness.log.mock.calls.some(([, message]) =>
+          message.includes('Install FFmpeg'),
+        ),
+      ).toBe(false)
+
+      // Essential processing failures retain their existing availability policy.
+      spawnProcess.mockImplementationOnce(() => {
+        throw failure
+      })
+      await expect(harness.runtime.run([], 'transcode')).resolves.toBe(false)
+      await expect(harness.runtime.ensureReady()).resolves.toBe(false)
+      expect(harness.log).toHaveBeenCalledWith(
+        'warn',
+        expect.stringContaining('Install FFmpeg'),
+      )
+      expect(harness.processRegistry.size).toBe(0)
+    },
+  )
+
+  it('warns once per session when metadata is skipped for unavailable FFmpeg', async () => {
+    const harness = createHarness()
+    harness.resolveAvailablePath.mockResolvedValue(undefined)
+    const metadataWarnings = () =>
+      harness.log.mock.calls.filter(([, message]) =>
+        message.includes('Skipping retained-video metadata'),
+      )
+
+    await harness.runtime.ensureReady()
+    harness.log.mockClear()
+    await harness.runtime.readMediaDimensions('/first.webm')
+    await harness.runtime.readMediaDimensions('/second.webm')
+    expect(metadataWarnings()).toHaveLength(1)
+    expect(metadataWarnings()[0]?.[1]).toContain(
+      'preserving media and omitting optional manifest dimensions',
+    )
+    expect(harness.scheduler.acquire).not.toHaveBeenCalled()
+    expect(harness.runFfmpeg).not.toHaveBeenCalled()
+
+    harness.runtime.resetForSession()
+    await harness.runtime.readMediaDimensions('/next-session.webm')
+    expect(metadataWarnings()).toHaveLength(2)
+  })
+
   it.each([
     [0, 5_000],
     [250, 250],

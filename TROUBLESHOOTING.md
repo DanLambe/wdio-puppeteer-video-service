@@ -64,6 +64,19 @@ has a 5-second execution limit (or a shorter positive
 `processing.ffmpeg.timeoutMs`). Setting that option to `0` does not disable the
 metadata limit. Optional metadata failures warn even under the error policy.
 
+A probe's spawn or inspection failure does not disable subsequent recording or
+essential FFmpeg processing and does not imply that FFmpeg needs reinstalling.
+If the runtime is already unavailable, the metadata-specific omission warning
+is emitted once per session. The existing essential-processing failure policy
+is unchanged.
+
+The execution limit excludes slot acquisition. Probes honor both per-process
+and configured global post-processing limits for the current invocation. The
+default blocking global wait can last up to 120 seconds;
+`concurrency.postProcessStartTimeoutMs` controls fast-fail acquisition. Busy
+capacity can therefore delay metadata or leave dimensions absent. Do not
+interpret optional missing dimensions alone as a corrupt video.
+
 ## FFmpeg is unavailable
 
 Set `processing.ffmpeg.path` or `FFMPEG_PATH`, or put `ffmpeg` on `PATH`.

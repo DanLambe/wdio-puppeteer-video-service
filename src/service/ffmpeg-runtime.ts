@@ -68,6 +68,7 @@ export class FfmpegRuntime {
   private initializationCompleted = false
   private warnedAboutMp4AutoFallback = false
   private warnedAboutMissingFfmpeg = false
+  private warnedAboutUnavailableMetadata = false
   private forceMp4Transcode = false
   private acceptingWork = true
 
@@ -94,6 +95,7 @@ export class FfmpegRuntime {
     this.candidates = []
     this.initializationTask = undefined
     this.initializationCompleted = false
+    this.warnedAboutUnavailableMetadata = false
   }
 
   async ensureReady(): Promise<boolean> {
@@ -141,7 +143,12 @@ export class FfmpegRuntime {
   async run(
     args: string[],
     operation: string,
-    overrides: Partial<Pick<RunFfmpegOptions, 'onStderr' | 'timeoutMs'>> = {},
+    overrides: Partial<
+      Pick<
+        RunFfmpegOptions,
+        'onStderr' | 'timeoutMs' | 'markUnavailable' | 'warnMissing'
+      >
+    > = {},
   ): Promise<boolean> {
     if (!this.acceptingWork) {
       return false
@@ -171,6 +178,7 @@ export class FfmpegRuntime {
   ): Promise<MediaDimensions | undefined> {
     try {
       if (!(await this.ensureReady())) {
+        this.warnUnavailableMetadata()
         return undefined
       }
       return await this.withPostProcessSlot('metadata probe', async () => {
@@ -180,6 +188,10 @@ export class FfmpegRuntime {
           buildMediaMetadataArgs(inputPath),
           'metadata probe',
           {
+            // Optional inspection failures must not disable later media processing.
+            markUnavailable: () => undefined,
+            // The runner reports spawn details; installation guidance is not appropriate here.
+            warnMissing: () => undefined,
             timeoutMs:
               configuredTimeout > 0
                 ? Math.min(configuredTimeout, 5_000)
@@ -273,6 +285,17 @@ export class FfmpegRuntime {
       return
     }
     await slotScheduler.release()
+  }
+
+  private warnUnavailableMetadata(): void {
+    if (this.warnedAboutUnavailableMetadata) {
+      return
+    }
+    this.warnedAboutUnavailableMetadata = true
+    this.log(
+      'warn',
+      '[WdioPuppeteerVideoService] Skipping retained-video metadata because the FFmpeg runtime is unavailable; preserving media and omitting optional manifest dimensions.',
+    )
   }
 
   private async initialize(): Promise<boolean> {

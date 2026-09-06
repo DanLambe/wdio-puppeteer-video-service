@@ -378,6 +378,15 @@ deferred outputs are measured after processing. If inspection is unavailable,
 the service logs a warning and omits these optional fields while preserving
 the video, including with `failurePolicy: 'error'`.
 
+An optional metadata-probe failure does not mark FFmpeg unavailable for later
+recordings, transcodes, or merges. If the FFmpeg runtime is already unavailable,
+metadata is skipped with a warning once per session. Probes still honor the
+shared post-processing limits: their 5-second execution cap starts after slot
+acquisition, not before it. Blocking global acquisition can wait up to 120
+seconds; `postProcessStartTimeoutMs` applies in fast-fail mode. Under capacity
+pressure, optional dimensions may be absent without making retained media
+invalid. These limits also apply under the CI profile.
+
 The dependency-free types and validator are available from the manifest export:
 
 ```typescript
