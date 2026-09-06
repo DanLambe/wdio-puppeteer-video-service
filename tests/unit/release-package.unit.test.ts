@@ -204,6 +204,19 @@ describe('release package validation', () => {
     )
   })
 
+  it('binds the release tag to the validated commit', async () => {
+    const workflow = await fs.readFile('.github/workflows/publish.yaml', 'utf8')
+
+    // Left unset, the create-release API tags the default branch's current tip,
+    // which can move past the validated commit while the publish job waits for
+    // its protected-environment approval.
+    expect(workflow).toMatch(/target_commitish:\s*\$\{\{\s*github\.sha\s*\}\}/u)
+    // An existing tag makes that target inert, so it must already match.
+    expect(workflow).toContain('Require A Matching Release Tag')
+    expect(workflow).toContain('git/ref/tags/$tag')
+    expect(workflow).toContain('not the validated commit $GITHUB_SHA')
+  })
+
   it('builds the release SBOM through npm with an explicit artifact path', async () => {
     const [workflow, packageJsonText] = await Promise.all([
       fs.readFile('.github/workflows/publish.yaml', 'utf8'),

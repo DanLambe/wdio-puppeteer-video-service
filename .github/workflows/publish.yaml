@@ -117,6 +117,32 @@ jobs:
             exit 1
           fi
 
+      # A create-release request ignores its target when the tag already exists,
+      # so an existing tag has to point at this validated commit already. Never
+      # move or delete one; a mismatch is a release the owner must resolve.
+      - name: Require A Matching Release Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.package_meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$PACKAGE_VERSION"
+          reference="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null || true)"
+          if [[ -z "$reference" ]]; then
+            echo "Tag $tag does not exist yet; it will be created at $GITHUB_SHA."
+            exit 0
+          fi
+          object_type="$(echo "$reference" | jq -r '.object.type')"
+          object_sha="$(echo "$reference" | jq -r '.object.sha')"
+          if [[ "$object_type" == 'tag' ]]; then
+            object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.sha')"
+          fi
+          if [[ "$object_sha" != "$GITHUB_SHA" ]]; then
+            echo "Tag $tag already points at $object_sha, not the validated commit $GITHUB_SHA." >&2
+            exit 1
+          fi
+
       - name: Build Release Artifacts
         shell: bash
         run: |
@@ -180,10 +206,16 @@ jobs:
           name: release-artifacts
           path: release-artifacts
 
+      # Without an explicit target the create-release API tags the default
+      # branch's current tip, which can have moved past the validated commit
+      # while this workflow waited for its protected-environment approval. The
+      # tag has to describe the same commit as the published tarball and its
+      # provenance.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.verify-and-pack.outputs.package_version }}
+          target_commitish: ${{ github.sha }}
           name: v${{ needs.verify-and-pack.outputs.package_version }}
           body_path: release-artifacts/release-notes.md
           files: |
