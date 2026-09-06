@@ -128,20 +128,49 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$PACKAGE_VERSION"
-          reference="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null || true)"
-          if [[ -z "$reference" ]]; then
+
+          json_field() {
+            node -e 'const [body, field] = process.argv.slice(1); let value; try { value = JSON.parse(body) } catch { process.exit(0) } for (const key of field.split(".")) { value = value?.[key] } if (typeof value === "string") { process.stdout.write(value) }' "$1" "$2"
+          }
+
+          lookup_status=0
+          reference="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null)" || lookup_status=$?
+
+          if [[ "$lookup_status" -ne 0 ]]; then
+            # `gh` writes the response body to stdout and exits non-zero for every
+            # HTTP error, so a non-empty body does not mean the tag exists and an
+            # empty one does not mean it is absent. Only a confirmed 404 may
+            # continue; authentication, rate-limit, server, and transport failures
+            # have to stop the release rather than be read as absence.
+            if [[ "$(json_field "$reference" status)" != '404' ]]; then
+              echo "Could not determine whether tag $tag exists: ${reference:-no response}" >&2
+              exit 1
+            fi
             echo "Tag $tag does not exist yet; it will be created at $GITHUB_SHA."
             exit 0
           fi
-          object_type="$(echo "$reference" | jq -r '.object.type')"
-          object_sha="$(echo "$reference" | jq -r '.object.sha')"
-          if [[ "$object_type" == 'tag' ]]; then
-            object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.sha')"
+
+          object_sha="$(json_field "$reference" object.sha)"
+          if [[ -z "$object_sha" ]]; then
+            echo "Unexpected reference payload for tag $tag: ${reference:-no response}" >&2
+            exit 1
           fi
+
+          if [[ "$(json_field "$reference" object.type)" == 'tag' ]]; then
+            annotated_status=0
+            annotated="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" 2>/dev/null)" || annotated_status=$?
+            object_sha="$(json_field "$annotated" object.sha)"
+            if [[ "$annotated_status" -ne 0 || -z "$object_sha" ]]; then
+              echo "Could not resolve annotated tag $tag to a commit." >&2
+              exit 1
+            fi
+          fi
+
           if [[ "$object_sha" != "$GITHUB_SHA" ]]; then
             echo "Tag $tag already points at $object_sha, not the validated commit $GITHUB_SHA." >&2
             exit 1
           fi
+          echo "Tag $tag already points at the validated commit $GITHUB_SHA."
 
       - name: Build Release Artifacts
         shell: bash
