@@ -32,6 +32,18 @@ runs:
           tests/results/**/*.html
           tests/results/**/*.txt
           tests/results/**/*.log
-        # Never turn a diagnosable failure into a confusing upload error.
+        # Missing optional diagnostics should not add a second failure.
+        if-no-files-found: ignore
+        retention-days: 7
+
+    # Keep hidden-file access separate from the general diagnostic patterns:
+    # these generated journals are useful even when final aggregation failed.
+    - name: Upload Worker Journals
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}-journals
+        path: |
+          tests/results/**/.wdio-video-manifest/*/journals/*.jsonl
+        include-hidden-files: true
         if-no-files-found: ignore
         retention-days: 7

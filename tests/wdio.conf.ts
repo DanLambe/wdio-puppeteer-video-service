@@ -83,6 +83,8 @@ export const config: WebdriverIO.Config = {
       videoServiceModulePath,
       {
         outputDir: resultsDir,
+        // Keep capture/processing warnings visible without WDIO command noise.
+        logLevel: 'warn',
         recording: {
           retain: 'all',
         },
