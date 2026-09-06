@@ -434,7 +434,12 @@ customize the HTML basename. Directory segments are rejected.
 The generated report copies no media and uses encoded relative links to the
 existing artifacts. It includes all CSS and JavaScript locally, escapes
 test-controlled content, and applies a restrictive Content Security Policy, so
-it can be archived or opened offline without a CDN. Report timestamps come from
+it can be archived or opened offline without a CDN. The policy allows the
+report's own style and script blocks by SHA-256 hash: the digests are computed
+from the exact emitted text, so an edited or tampered block no longer matches
+and the browser refuses to run it. The policy is delivered in a `<meta>`
+element, which cannot carry `frame-ancestors`; when hosting reports over HTTP,
+restrict embedding with a response header instead. Report timestamps come from
 the completed run or worker fragments, and unchanged inputs produce
 byte-identical HTML for reproducible artifacts.
 

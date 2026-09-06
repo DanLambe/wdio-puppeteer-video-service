@@ -1072,7 +1072,7 @@ describe('static report generation', () => {
 })
 
 const assertOfflineFilterScript = (html: string): void => {
-  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/u.exec(html)?.[1]
+  const script = /<script>([\s\S]*?)<\/script>/u.exec(html)?.[1]
   expect(script).toBeDefined()
   const listeners = new Map<string, () => void>()
   const createFilter = (id: string) => ({

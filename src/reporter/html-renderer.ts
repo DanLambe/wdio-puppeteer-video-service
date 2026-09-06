@@ -7,7 +7,6 @@ import type {
 } from './types.js'
 
 export const renderStaticVideoReport = (model: ReportModel): string => {
-  const nonce = createReportNonce(model)
   const statuses: ReporterTestStatus[] = [
     'passed',
     'failed',
@@ -31,9 +30,9 @@ export const renderStaticVideoReport = (model: ReportModel): string => {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; media-src 'self' data: blob:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; media-src 'self' data: blob:; style-src '${REPORT_STYLE_HASH}'; script-src '${REPORT_SCRIPT_HASH}'">
   <title>WebdriverIO Video Report</title>
-  <style nonce="${nonce}">${REPORT_STYLES}</style>
+  <style>${REPORT_STYLES}</style>
 </head>
 <body>
   <header>
@@ -50,23 +49,10 @@ export const renderStaticVideoReport = (model: ReportModel): string => {
   </section>
   <main id="results">${cards || '<p class="empty">No test outcomes were captured.</p>'}</main>
   <p id="empty-filter" class="empty" hidden>No outcomes match the selected filters.</p>
-  <script nonce="${nonce}">${REPORT_SCRIPT}</script>
+  <script>${REPORT_SCRIPT}</script>
 </body>
 </html>
 `
-}
-
-const createReportNonce = (model: ReportModel): string => {
-  return createHash('sha256')
-    .update(model.runId)
-    .update('\0')
-    .update(model.generatedAt)
-    .update('\0')
-    .update(JSON.stringify(model.items))
-    .update('\0')
-    .update(JSON.stringify(model.diagnostics))
-    .digest('hex')
-    .slice(0, 32)
 }
 
 const renderReportItem = (item: ReportItem): string => {
@@ -180,3 +166,16 @@ const REPORT_STYLES = `
 const REPORT_SCRIPT = `
 const filters={status:document.querySelector('#status-filter'),spec:document.querySelector('#spec-filter'),browser:document.querySelector('#browser-filter'),retry:document.querySelector('#retry-filter')};const cards=[...document.querySelectorAll('.result-card')];const empty=document.querySelector('#empty-filter');const apply=()=>{let visible=0;for(const card of cards){const retryValue=card.dataset.retried==='true'?'retried':'first attempt';const show=(filters.status.value==='all'||card.dataset.status===filters.status.value)&&(filters.spec.value==='all'||card.dataset.spec===filters.spec.value)&&(filters.browser.value==='all'||card.dataset.browser===filters.browser.value)&&(filters.retry.value==='all'||retryValue===filters.retry.value);card.hidden=!show;if(show)visible+=1}empty.hidden=visible!==0};for(const filter of Object.values(filters)){filter.addEventListener('change',apply)}apply();
 `
+
+// A nonce is only worth anything when it is unpredictable, and a static report
+// generated once and read from disk has no per-request secret to derive one
+// from. Hash the exact emitted text instead: the digest is reproducible, so the
+// report stays byte-identical between runs, and it stops matching if either
+// block is ever altered. Digests are computed from the constants above rather
+// than copied in, so they cannot drift from what is rendered.
+const createContentHash = (content: string): string => {
+  return `sha256-${createHash('sha256').update(content, 'utf8').digest('base64')}`
+}
+
+const REPORT_STYLE_HASH = createContentHash(REPORT_STYLES)
+const REPORT_SCRIPT_HASH = createContentHash(REPORT_SCRIPT)
