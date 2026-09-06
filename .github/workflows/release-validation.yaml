@@ -78,7 +78,11 @@ jobs:
       - name: Verify Supported Peer Versions
         shell: bash
         run: |
-          installed() { node -p "require('$1/package.json').version"; }
+          # Read the manifest directly: these packages do not expose
+          # `./package.json` through their exports map.
+          installed() {
+            node -p "JSON.parse(require('node:fs').readFileSync('node_modules/$1/package.json','utf8')).version"
+          }
           wdio="$(installed webdriverio)"
           puppeteer="$(installed puppeteer-core)"
           echo "webdriverio=${wdio} puppeteer-core=${puppeteer}"
