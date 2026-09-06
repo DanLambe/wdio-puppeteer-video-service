@@ -1,0 +1,37 @@
+name: Collect Browser Diagnostics
+description: >-
+  Upload the evidence needed to diagnose a failed browser or media suite. Run
+  only on failure; it is a debugging aid, never a release gate.
+
+inputs:
+  name:
+    description: Artifact name, unique within the workflow run.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # This repository is public, so every uploaded artifact is world-readable.
+    # Recorded video is therefore deliberately excluded: the listing below
+    # answers the usual question — which artifacts existed, and how large they
+    # were — without publishing the recordings themselves.
+    - name: Inventory Generated Artifacts
+      shell: bash
+      run: |
+        set -uo pipefail
+        node -e 'const fs = require("node:fs"); const path = require("node:path"); const walk = (dir) => { const found = []; for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const target = path.join(dir, entry.name); if (entry.isDirectory()) { found.push(...walk(target)) } else { found.push(`${String(fs.statSync(target).size).padStart(12)}  ${target.split(path.sep).join("/")}`) } } return found }; try { process.stdout.write(`${walk("tests/results").sort().join("\n")}\n`) } catch (error) { process.stdout.write(`no generated artifacts: ${error.message}\n`) }' > browser-diagnostics-listing.txt
+        echo "Collected $(wc -l < browser-diagnostics-listing.txt) generated artifact entries."
+
+    - name: Upload Browser Diagnostics
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: |
+          browser-diagnostics-listing.txt
+          tests/results/**/*.json
+          tests/results/**/*.html
+          tests/results/**/*.txt
+          tests/results/**/*.log
+        # Never turn a diagnosable failure into a confusing upload error.
+        if-no-files-found: ignore
+        retention-days: 7

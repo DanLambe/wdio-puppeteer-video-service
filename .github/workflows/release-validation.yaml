@@ -154,6 +154,12 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-chrome-${{ matrix.protocol }}-${{ matrix.os }}
+
   support-floor:
     name: Minimum WDIO And Puppeteer E2E
     runs-on: ubuntu-latest
@@ -184,6 +190,12 @@ jobs:
 
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-support-floor
 
   frameworks:
     name: ${{ matrix.framework }} framework
@@ -231,6 +243,12 @@ jobs:
       - name: Run Framework Tests
         run: corepack npm run ${{ matrix.command }}
 
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-framework-${{ strategy.job-index }}
+
   advanced:
     name: Advanced recording and artifact behavior (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -266,6 +284,12 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: corepack npm run test:integration:windows-process
 
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-advanced-${{ matrix.os }}
+
   edge:
     name: Edge smoke (Windows)
     runs-on: windows-latest
@@ -295,3 +319,9 @@ jobs:
 
       - name: Run Edge Capture Smoke Test
         run: corepack npm run test:e2e:capture:edge
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-edge-windows

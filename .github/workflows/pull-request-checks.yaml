@@ -76,6 +76,12 @@ jobs:
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-pr-e2e
+
   windows-advanced:
     runs-on: windows-latest
     timeout-minutes: 20
@@ -114,3 +120,9 @@ jobs:
 
       - name: Run Bounded Windows Advanced Tests
         run: corepack npm run test:e2e:advanced:windows
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-pr-windows-advanced
