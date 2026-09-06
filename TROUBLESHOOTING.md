@@ -77,6 +77,17 @@ default blocking global wait can last up to 120 seconds;
 capacity can therefore delay metadata or leave dimensions absent. Do not
 interpret optional missing dimensions alone as a corrupt video.
 
+## A retained recording is extremely short
+
+A recording that starts moments before its target window closes can end with a
+single frame and a reported duration of zero. The service keeps it: the file is
+not empty, its dimensions probe normally, and it appears in the manifest and the
+static report. A clip like this may not play normally in a browser, which
+expects a positive duration, and this repository's own media assertions require
+a positive duration and at least two frames. That is a test contract rather than
+proof that the file is corrupt — the recording really is that short. Keep the
+window under test open longer if a clip of usable length is expected.
+
 ## FFmpeg is unavailable
 
 Set `processing.ffmpeg.path` or `FFMPEG_PATH`, or put `ffmpeg` on `PATH`.
@@ -154,6 +165,24 @@ refusal. An already-occupied path still advances to the next candidate name, a
 genuine fault such as `EACCES` or `ENOSPC` still fails immediately, and a wait
 that ends without the refusal clearing reports the underlying filesystem error as
 its cause.
+
+To remove abandoned slot directories by hand, first confirm that no WDIO
+invocation is using that lock base. Check every invocation configured against
+it, not just one output directory: a custom `concurrency.lockDir` is used
+exactly as configured and can be shared by several invocations.
+
+Delete a whole base only when it is the default
+`<outputDir>/.wdio-video-global-slots` directory, which this service creates and
+owns entirely, and only after verifying that the path you are about to remove is
+that directory. A configured `concurrency.lockDir` may point anywhere, including
+a directory that also holds videos, manifests, reports, or unrelated files, so
+never delete a custom base itself. Under a custom base, remove only the run
+subdirectories the service created there: each is named for a run identifier and
+contains `slot-N.lock` files, a `post-process/` directory, or both.
+
+Do not delete individual run subdirectories while any invocation using that base
+is active. An idle launcher between specs legitimately holds no slot files, so
+an empty-looking directory is not evidence that its run has ended.
 
 ## Allure has no video
 

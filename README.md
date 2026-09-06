@@ -252,7 +252,7 @@ timeout. Directory-creation failures fail immediately with the path and cause.
 
 - Presence enables lazy loading of the optional `@wdio/allure-reporter` peer.
 - `attach` (`'failures' | 'retained'`, default `'failures'`) attaches failed-test media only or every retained recording.
-- `maxBytes` optionally skips an individual attachment exceeding the configured byte size.
+- `maxBytes` optionally skips an individual attachment exceeding the configured byte size. There is no default cap, so every eligible recording is attached. Each attachment is read into memory whole, because the Allure reporter accepts attachment content as a buffer rather than a stream, so on CI set `maxBytes` to a size the runner can hold — the example above uses `25000000`. An oversize attachment is skipped with a warning; its recording is still retained on disk and still listed in the manifest and the static report.
 - Requires `recording.scope: 'test'` and `processing.timing: 'after-test'`. Spec-scoped and after-worker configurations are rejected before browser startup because the final media would not be available while the correct Allure test is active.
 - Attachment errors warn by default. `failurePolicy: 'error'` raises them only after recording cleanup finishes.
 - Attachments use `video/webm` or `video/mp4` according to the retained file. The normal Allure reporter must also be present in WDIO's `reporters` list.
