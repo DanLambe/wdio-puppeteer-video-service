@@ -8,9 +8,9 @@
 A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
 > **1.0 release candidate**
-> `1.0.0-rc.1` is the polished release-candidate surface. Install the `next`
-> tag to opt in while it is evaluated before stable promotion. The `latest`
-> tag remains on the stable `0.8.0` line until `1.0.0` is explicitly released.
+> Install the `next` tag to opt in while the 1.0 release candidate is evaluated
+> before stable promotion. The `latest` tag remains on the stable `0.8.0` line
+> until `1.0.0` is explicitly released.
 
 Features:
 
@@ -29,7 +29,7 @@ flowchart LR
   launcher["WDIO launcher process"] --> context["Versioned run and retry context"]
   context --> workers["WDIO worker services"]
   workers --> coordinator["Recording entity coordinator"]
-  coordinator --> capture["Puppeteer 25 capture controller"]
+  coordinator --> capture["Puppeteer screencast controller"]
   capture --> media["FFmpeg media pipeline"]
   workers --> journals["Crash-tolerant worker journals"]
   media --> journals
@@ -48,7 +48,7 @@ This guide documents the `1.0.0` release-candidate API. Install it explicitly
 from the opt-in `next` channel:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@next
+npm install --save-dev wdio-puppeteer-video-service@next puppeteer-core@^24.11.2
 ```
 
 An unqualified install continues to resolve to the stable `0.8.0` release,
@@ -74,71 +74,24 @@ export const config = {
         outputDir: 'videos',
         recording: {
           scope: 'test',
-          attempts: 'all',
           retain: 'failures',
-          windowChanges: 'segment',
-          filters: {
-            includeSpecs: ['*critical*'],
-            excludeTags: ['@no-video'],
-          },
         },
         capture: {
-          viewport: 'current',
-          fps: 30,
-          quality: 30,
-          scale: 1,
-          speed: 1,
-          crop: { x: 0, y: 0, width: 1200, height: 700 },
-          framePriming: true,
-          connectionTimeoutMs: 10000,
+          fps: 24,
         },
-        processing: {
-          format: 'webm',
-          mp4Mode: 'auto',
-          timing: 'after-test',
-          ffmpeg: {
-            path: '/usr/bin/ffmpeg',
-            timeoutMs: 0,
-          },
-          transcode: {
-            enabled: false,
-            deleteOriginal: true,
-          },
-          merge: {
-            enabled: false,
-            deleteSegments: true,
-          },
-        },
-        concurrency: {
-          maxRecordingsPerProcess: 0,
-          maxRecordingsGlobal: 0,
-          startMode: 'blocking',
-          startTimeoutMs: 2500,
-          maxPostProcessesPerProcess: 1,
-          maxPostProcessesGlobal: 0,
-          postProcessStartMode: 'blocking',
-          postProcessStartTimeoutMs: 2500,
-        },
-        artifacts: {
-          naming: {
-            style: 'test',
-            overflow: 'truncate',
-          },
-        },
-        integrations: {
-          allure: {
-            attach: 'failures',
-            maxBytes: 25000000,
-          },
-        },
-        profile: 'default',
         logLevel: 'warn',
-        failurePolicy: 'warn',
       },
     ],
   ],
 }
 ```
+
+Every option is optional; this example only shows the shape and a few common
+choices. [Option Reference](#option-reference) documents all of them with their
+defaults. Add options such as `capture.crop`, `recording.filters`,
+`processing.ffmpeg.path`, and `integrations.allure` deliberately rather than by
+copying a full list, because each one changes what is recorded or what has to be
+installed.
 
 Register the service by package name so WDIO v9 can load both its named launcher
 export and its default worker export in the correct processes. Direct imported
@@ -150,7 +103,7 @@ keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
 - Node.js 24+
 - WebdriverIO `>=9.29.1 <10` using `runner: 'local'`
-- Puppeteer Core `>=25.3.0 <26`
+- Puppeteer Core `>=24.11.2 <25`
 - A Chromium-based browser session (Chrome or Edge)
 - FFmpeg supplied by the environment
 
@@ -184,11 +137,11 @@ Top-level options:
 
 `capture`:
 
-- `viewport` (default `'current'`): preserves the browser's current viewport. Use `{ width, height }` to temporarily size capture initialization; the original Puppeteer viewport mode is restored immediately after `page.screencast()` starts.
+- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while Puppeteer establishes the recorder canvas, then the original viewport mode is restored immediately after `page.screencast()` starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
 - `fps` (default `30`; `24` for the `parallel` and `ci` profiles).
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
-- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer 25.
-- `crop`: optional `{ x, y, width, height }` rectangle. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces `400x200` media.
+- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer.
+- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or Puppeteer rejects the recording. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by Puppeteer and FFmpeg.
 - `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
 
@@ -197,7 +150,7 @@ Top-level options:
 - `format` (`'webm' | 'mp4'`, default `'webm'`).
 - `mp4Mode` (`'auto' | 'direct' | 'transcode'`, default `'auto'`).
 - `timing` (`'after-test' | 'after-worker'`, default `'after-test'`).
-- `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the timeout).
+- `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the processing timeout). Retained-video metadata inspection is always bounded to 5 seconds, or this timeout when it is shorter and positive.
 - `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`.
 - `merge.enabled` (default `false`) and `deleteSegments` (default `true`).
 
@@ -218,13 +171,32 @@ Top-level options:
 Recording and post-processing use separate in-process and cross-worker slot
 pools. Each FFmpeg operation acquires its own post-processing lease, including
 operations started concurrently by the deferred queue. A merge followed by a
-transcode remains one ordered job chain. Global slots carry heartbeats, but a
-lease owned by a live process is never reclaimed solely because its heartbeat
-expired. Dead owners are reclaimed immediately; malformed lock files are
-reclaimed only after an invalid-file grace period. Capture paths are exclusively
+transcode remains one ordered job chain. Global limits apply to local workers
+within **one WDIO invocation**, not to independent invocations or machines.
+`lockDir` is a shared base directory (default: `<outputDir>/.wdio-video-global-slots`);
+each launcher creates a unique run subdirectory containing separate recording
+and post-processing pools. This remains true if manifest initialization fails
+under the warning policy. The launcher removes only its run directory after
+workers finish. An abandoned directory cannot consume capacity in a later run.
+
+Lease metadata is immutable after acquisition. A lease owned by a live PID is
+never reclaimed solely because it is old; dead owners are reclaimed immediately,
+and malformed lock files only after an invalid-file grace period. Capture paths are exclusively
 reserved, while merge and transcode outputs are decoded from unique temporary
-files and atomically published only after validation. A failed or timed-out
-operation keeps its source recordings and removes partial output.
+files and published only after validation through an atomic hard-link operation
+that never replaces an existing artifact. The output filesystem must support
+hard links. A failed, timed-out, or unsupported publication keeps its source
+recordings and removes unpublished partial output. Artifact naming tries at most
+1,000 candidates before reporting exhaustion; a transient refusal while reserving
+one is waited out briefly on that same path instead of consuming candidates,
+because a descriptor shortage is not a name collision, and a reservation that
+never clears reports the underlying filesystem error. Storage failures are not
+classified as busy capacity. A faulty slot does not cancel the wait for other healthy-but-busy
+slots. Transient slot faults (`EBUSY`, `EAGAIN`, `EMFILE`, `ENFILE`, and Windows
+`EPERM`) are retried within the existing acquisition deadline; if every slot has
+a non-retryable error, acquisition fails immediately. Errors remaining at the
+deadline are reported with their causes; pure contention remains a capacity
+timeout. Directory-creation failures fail immediately with the path and cause.
 
 `artifacts.naming`:
 
@@ -236,7 +208,7 @@ operation keeps its source recordings and removes partial output.
 
 - Presence enables lazy loading of the optional `@wdio/allure-reporter` peer.
 - `attach` (`'failures' | 'retained'`, default `'failures'`) attaches failed-test media only or every retained recording.
-- `maxBytes` optionally skips an individual attachment exceeding the configured byte size.
+- `maxBytes` optionally skips an individual attachment exceeding the configured byte size. There is no default cap, so every eligible recording is attached. Each attachment is read into memory whole, because the Allure reporter accepts attachment content as a buffer rather than a stream, so on CI set `maxBytes` to a size the runner can hold — the example above uses `25000000`. An oversize attachment is skipped with a warning; its recording is still retained on disk and still listed in the manifest and the static report.
 - Requires `recording.scope: 'test'` and `processing.timing: 'after-test'`. Spec-scoped and after-worker configurations are rejected before browser startup because the final media would not be available while the correct Allure test is active.
 - Attachment errors warn by default. `failurePolicy: 'error'` raises them only after recording cleanup finishes.
 - Attachments use `video/webm` or `video/mp4` according to the retained file. The normal Allure reporter must also be present in WDIO's `reporters` list.
@@ -256,6 +228,9 @@ Unknown integrations are rejected instead of being silently ignored.
 - `attempts: 'retries'` skips first-attempt capture.
 - `retain: 'retries'` keeps retry-attempt artifacts, including a retry that passes.
 - `retain: 'all'` keeps every captured artifact.
+- A discarded entity's final raw capture is deleted before optional transcode or
+  merge work. A segment closed earlier by a window change is processed normally
+  because the entity's final result is not yet known.
 - Retry context is passed from the launcher to each worker through WDIO's
   configuration boundary; no retry-state files are written to the artifact
   directory.
@@ -345,7 +320,28 @@ JSONL journals and `onComplete` atomically aggregates them into
 decision, retry and result, normalized spec and media paths, hashed session
 identity, browser/protocol details, timings, dimensions, tool versions, and
 post-processing outcomes. Concurrent launchers contribute separate run records
-without mixing worker journals.
+without mixing worker journals. Existing valid run records are retained whenever
+the manifest is aggregated; the service does not prune old runs, so archive or
+remove `manifest.json` when a long-lived `outputDir` should start a new history.
+
+Optional artifact `width` and `height` describe the encoded retained file, not
+an estimate of the page's CSS viewport. A lightweight FFmpeg inspection reads
+each finalized artifact without decoding the full video; this accounts for
+device pixel ratio, crop/scale rounding, H264 padding, custom filters, and
+segments with different sizes. Inspections use the existing post-processing
+capacity limits. Discarded videos and pending deferred inputs are not inspected;
+deferred outputs are measured after processing. If inspection is unavailable,
+the service logs a warning and omits these optional fields while preserving
+the video, including with `failurePolicy: 'error'`.
+
+An optional metadata-probe failure does not mark FFmpeg unavailable for later
+recordings, transcodes, or merges. If the FFmpeg runtime is already unavailable,
+metadata is skipped with a warning once per session. Probes still honor the
+shared post-processing limits: their 5-second execution cap starts after slot
+acquisition, not before it. Blocking global acquisition can wait up to 120
+seconds; `postProcessStartTimeoutMs` applies in fast-fail mode. Under capacity
+pressure, optional dimensions may be absent without making retained media
+invalid. These limits also apply under the CI profile.
 
 The dependency-free types and validator are available from the manifest export:
 
@@ -394,7 +390,12 @@ customize the HTML basename. Directory segments are rejected.
 The generated report copies no media and uses encoded relative links to the
 existing artifacts. It includes all CSS and JavaScript locally, escapes
 test-controlled content, and applies a restrictive Content Security Policy, so
-it can be archived or opened offline without a CDN. Report timestamps come from
+it can be archived or opened offline without a CDN. The policy allows the
+report's own style and script blocks by SHA-256 hash: the digests are computed
+from the exact emitted text, so an edited or tampered block no longer matches
+and the browser refuses to run it. The policy is delivered in a `<meta>`
+element, which cannot carry `frame-ancestors`; when hosting reports over HTTP,
+restrict embedding with a response header instead. Report timestamps come from
 the completed run or worker fragments, and unchanged inputs produce
 byte-identical HTML for reproducible artifacts.
 
@@ -416,7 +417,7 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
-- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, disables merging unless explicit, and pins service logging to `warn` unless explicit.
+- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
 
 ## WDIO Protocol Compatibility
 
@@ -449,11 +450,13 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
 - `npm run test:e2e:both`: multipart and merged Mocha runs.
 - `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
-- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, and Edge smoke.
+- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, Edge smoke, and retained-file metadata checks.
+- `npm run test:e2e:capture:metadata`: high-DPI, odd-size fractional scaling, H264 padding, and custom-filter dimensions compared with Manifest v1.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
+- Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
 - `npm run test:coverage`: runs the deterministic unit/integration suite with
-  95% statements, lines, and functions plus a 90% branch gate.
+  96% statements and lines, 95% functions, and a 93% branch gate.
 - `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.
 - `npm run release:check`: combines lint, typecheck, coverage, package, and validated CycloneDX SBOM gates.
 
@@ -467,5 +470,5 @@ is unavailable. A local browser-only run may explicitly opt out with
 - [0.8 to 1.0 migration](./MIGRATION.md)
 - [Support policy](./SUPPORT.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
-- [Maintainer release procedure](./RELEASING.md)
+- [Maintainer release procedure](https://github.com/DanLambe/wdio-puppeteer-video-service/blob/master/RELEASING.md)
 - [Changelog](./CHANGELOG.md)

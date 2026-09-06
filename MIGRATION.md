@@ -72,14 +72,29 @@ Equivalent retry-only configuration:
 - `failurePolicy` is new in 1.0 and consistently applies `'warn'` or `'error'`
   behavior only after recording, processing, manifest, report, or integration
   cleanup completes.
-- `capture.viewport` defaults to `'current'`; an explicit size is temporary and
-  restored after capture initialization.
+- `capture.viewport` defaults to `'current'`; an explicit size temporarily
+  establishes the recorder canvas and is restored after capture initialization.
+  The canvas remains pinned to that start-time size while the test page returns
+  to its original viewport mode.
+- Optional manifest media dimensions are now read from finalized retained files,
+  so they can differ from earlier CSS-based estimates. Pending or unreadable
+  artifacts omit dimensions; no Manifest v1 schema change is required.
 - `processing.timing: 'after-worker'` defers FFmpeg work and is incompatible
   with Allure attachment integration.
 - `concurrency.maxPostProcessesPerProcess` now defaults to `1` and must be a
   positive integer. For after-worker processing, it is the number of deferred
   jobs that can run concurrently in one worker; every FFmpeg operation still
   observes `maxPostProcessesGlobal`.
+- Global recording and post-processing limits now coordinate local workers of
+  one WDIO invocation. `concurrency.lockDir` is the shared base; each launcher
+  creates and cleans its own run subdirectory. Independent invocations no longer
+  throttle each other, even when they share `lockDir`. Use CI job limits if those
+  invocations must share a host-wide resource budget. Old run directories do not
+  consume a new run's capacity.
+- Artifact collision resolution stops after 1,000 candidates. Storage failures
+  are distinct from occupied slots: healthy-but-busy slots and retryable slot
+  errors retain their bounded wait, while all-non-retryable failures abort
+  acquisition immediately. The configured failure policy applies after cleanup.
 - Allure requires test scope because the media must be attached while the
   corresponding reporter test remains active.
 - The package is ESM-only and requires Node.js 24. Use NodeNext module

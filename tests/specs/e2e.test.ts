@@ -38,6 +38,7 @@ describe('Video Recording Service E2E Verification - Core Navigation', () => {
 
   it('should handle a cross-origin iframe', async () => {
     await browser.url('/cross-origin-iframe')
+    const originalHandle = await browser.getWindowHandle()
 
     const crossOriginFrame = await $('#cross-origin-frame').getElement()
     await browser.switchFrame(crossOriginFrame)
@@ -45,7 +46,12 @@ describe('Video Recording Service E2E Verification - Core Navigation', () => {
       'Cross-origin fixture content',
     )
 
-    await browser.switchFrame(null)
+    // U-02: start the next recording segment directly from an iframe context.
+    await browser.newWindow(new URL('/static', await browser.getUrl()).href)
+    await expect(browser).toHaveTitle('Static Video Fixture')
+    await pauseForRecording()
+    await browser.closeWindow()
+    await browser.switchToWindow(originalHandle)
     await expect($('h1')).toHaveText('Cross-origin Iframe Fixture')
     await pauseForRecording()
   })

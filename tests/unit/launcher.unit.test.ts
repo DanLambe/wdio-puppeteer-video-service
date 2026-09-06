@@ -5,6 +5,8 @@ import { initializeLauncherService } from '@wdio/utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { writeReporterFragment } from '../../src/reporter/fragments.js'
+import type { LauncherCompositionOverrides } from '../../src/service/composition.js'
+import { resolveGlobalSlotRunDirectories } from '../../src/service/global-slot-directory.js'
 import {
   assignLauncherWorkerContext,
   inspectLauncherWorkerContext,
@@ -35,6 +37,120 @@ afterEach(async () => {
 })
 
 describe('WdioPuppeteerVideoLauncher', () => {
+  it.each(['success', 'initialization', 'aggregation', 'report'] as const)(
+    'cleans its run namespace after %s while preserving sibling runs',
+    async (failurePhase) => {
+      const outputDir = await createTempDir()
+      const lockDir = path.join(outputDir, 'shared-locks')
+      const failure = new Error(`${failurePhase} failure`)
+      const fail = async (): Promise<never> => {
+        throw failure
+      }
+      const overrides: LauncherCompositionOverrides = {
+        uuid: () => 'current-run',
+        ...(failurePhase === 'initialization'
+          ? { createManifestRunContext: fail }
+          : {}),
+        ...(failurePhase === 'aggregation'
+          ? { aggregateManifestRun: fail }
+          : {}),
+        ...(failurePhase === 'report'
+          ? { generateVideoReportForRun: fail }
+          : {}),
+      }
+      const launcher = new WdioPuppeteerVideoLauncher(
+        {
+          outputDir,
+          concurrency: { lockDir },
+          logLevel: 'silent',
+          failurePolicy: failurePhase === 'initialization' ? 'warn' : 'error',
+        },
+        undefined,
+        undefined,
+        overrides,
+      )
+      await launcher.onPrepare()
+      const args = {}
+      launcher.onWorkerStart(
+        '0-0',
+        { browserName: 'chrome' },
+        ['spec.ts'],
+        args,
+      )
+      expect(inspectLauncherWorkerContext(args)).toMatchObject({
+        status: 'valid',
+        context: { runId: 'current-run', version: 2 },
+      })
+      if (failurePhase !== 'initialization') {
+        expect(readManifestRunContext(args)?.runId).toBe('current-run')
+      }
+      const current = resolveGlobalSlotRunDirectories({
+        lockDir,
+        runId: 'current-run',
+      })
+      await fs.mkdir(current.postProcess, { recursive: true })
+      await fs.writeFile(
+        path.join(current.postProcess, 'slot-1.lock'),
+        'abandoned',
+      )
+      await fs.mkdir(path.join(lockDir, 'other-run'))
+      const completion = launcher.onComplete()
+      if (failurePhase === 'aggregation' || failurePhase === 'report') {
+        await expect(completion).rejects.toBe(failure)
+      } else {
+        await expect(completion).resolves.toBeUndefined()
+      }
+      expect(await fs.readdir(lockDir)).toEqual(['other-run'])
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+    },
+  )
+
+  it('warns on run cleanup failure without masking the completion error', async () => {
+    const outputDir = await createTempDir()
+    const failure = new Error('aggregation failed')
+    const writeLog = vi.fn()
+    const launcher = new WdioPuppeteerVideoLauncher(
+      { outputDir, failurePolicy: 'error' },
+      undefined,
+      undefined,
+      {
+        aggregateManifestRun: async () => {
+          throw failure
+        },
+        cleanupGlobalSlotRunDirectory: async () => {
+          throw new Error('cleanup failed')
+        },
+        writeLog,
+      },
+    )
+    await launcher.onPrepare()
+    await expect(launcher.onComplete()).rejects.toBe(failure)
+    expect(
+      writeLog.mock.calls.some((call) =>
+        call[2].includes('Later runs remain isolated'),
+      ),
+    ).toBe(true)
+  })
+
+  it('mints a fresh run identity each time a launcher is prepared', async () => {
+    const launcher = new WdioPuppeteerVideoLauncher({
+      outputDir: await createTempDir(),
+    })
+    const identities: unknown[] = []
+    for (let index = 0; index < 2; index += 1) {
+      await launcher.onPrepare()
+      const args = {}
+      launcher.onWorkerStart('0-0', {}, ['spec.ts'], args)
+      const context = inspectLauncherWorkerContext(args)
+      expect(context.status).toBe('valid')
+      identities.push(
+        context.status === 'valid' ? context.context.runId : undefined,
+      )
+      await launcher.onComplete()
+    }
+    expect(new Set(identities).size).toBe(2)
+  })
+
   it('passes versioned run and policy-independent retry contexts to workers', async () => {
     const outputDir = await createTempDir()
     const launcher = new WdioPuppeteerVideoLauncher({
@@ -138,13 +254,13 @@ describe('WdioPuppeteerVideoLauncher', () => {
     ).toThrow('malformed or from an unsupported version')
 
     const missingRetryContext: Record<string, unknown> = {}
-    assignLauncherWorkerContext(missingRetryContext, false)
+    assignLauncherWorkerContext(missingRetryContext, false, 'test-run')
     expect(
       () => new WdioPuppeteerVideoService({}, {}, missingRetryContext),
     ).toThrow('launcher context is malformed')
 
     const missingManifestContext: Record<string, unknown> = {}
-    assignLauncherWorkerContext(missingManifestContext, true)
+    assignLauncherWorkerContext(missingManifestContext, true, 'test-run')
     assignManifestWorkerContext(missingManifestContext, '0-0', {
       specFileRetryAttempt: 0,
     })
@@ -155,15 +271,37 @@ describe('WdioPuppeteerVideoLauncher', () => {
 
   it('accepts a launcher-authorized worker when manifest setup is unavailable', () => {
     const config: Record<string, unknown> = {}
-    assignLauncherWorkerContext(config, false)
+    assignLauncherWorkerContext(config, false, 'test-run')
     assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
 
     expect(() => new WdioPuppeteerVideoService({}, {}, config)).not.toThrow()
   })
 
+  it('rejects unsafe run identities and mismatched manifest/slot run contexts', async () => {
+    expect(() => assignLauncherWorkerContext({}, false, '../unsafe')).toThrow(
+      'malformed',
+    )
+    const launcher = new WdioPuppeteerVideoLauncher({
+      outputDir: await createTempDir(),
+    })
+    await launcher.onPrepare()
+    const config = {}
+    launcher.onWorkerStart(
+      '0-0',
+      { browserName: 'chrome' },
+      ['spec.ts'],
+      config,
+    )
+    assignLauncherWorkerContext(config, true, 'different-run')
+    expect(() => new WdioPuppeteerVideoService({}, {}, config)).toThrow(
+      'malformed',
+    )
+    await launcher.onComplete()
+  })
+
   it('rejects a worker context that does not contain its CID', async () => {
     const config: Record<string, unknown> = {}
-    assignLauncherWorkerContext(config, false)
+    assignLauncherWorkerContext(config, false, 'test-run')
     assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
     const worker = new WdioPuppeteerVideoService()
 

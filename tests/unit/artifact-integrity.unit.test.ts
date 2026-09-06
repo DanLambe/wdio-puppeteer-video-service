@@ -5,10 +5,34 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  ARTIFACT_PATH_CANDIDATE_LIMIT,
+  ArtifactPathExhaustedError,
   publishAtomicArtifact,
   reserveArtifactPath,
 } from '../../src/service/artifact-integrity.js'
-import type { ProcessBoundary } from '../../src/service/boundaries.js'
+import {
+  type ClockBoundary,
+  nodeFileSystem,
+  type ProcessBoundary,
+} from '../../src/service/boundaries.js'
+
+const createClock = (): { clock: ClockBoundary; delays: number[] } => {
+  let now = 0
+  const delays: number[] = []
+  const clock: ClockBoundary = {
+    clearInterval: () => {},
+    clearTimeout: () => {},
+    delay: async (milliseconds) => {
+      delays.push(milliseconds)
+      now += milliseconds
+    },
+    now: () => now,
+    queueMicrotask,
+    setInterval: () => ({}) as NodeJS.Timeout,
+    setTimeout: () => ({}) as NodeJS.Timeout,
+  }
+  return { clock, delays }
+}
 
 describe('artifact integrity', () => {
   const tempDirs: string[] = []
@@ -34,6 +58,113 @@ describe('artifact integrity', () => {
     await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
       'existing-media',
     )
+  })
+
+  it.each(['existing-output', 'occupied-reservation'] as const)(
+    'bounds candidate search for %s and never starts production',
+    async (mode) => {
+      const tempDir = await createTempDir(tempDirs)
+      const desiredPath = path.join(tempDir, 'bounded.webm')
+      const stats = await fs.stat(tempDir)
+      const missing = Object.assign(new Error('missing'), { code: 'ENOENT' })
+      const stat = vi.spyOn(fs, 'stat').mockImplementation(async (filePath) => {
+        if (
+          mode === 'existing-output' ||
+          String(filePath).endsWith('.wdio-reserve')
+        ) {
+          return stats
+        }
+        throw missing
+      })
+      const open = vi
+        .spyOn(fs, 'open')
+        .mockRejectedValue(
+          Object.assign(new Error('occupied'), { code: 'EEXIST' }),
+        )
+      vi.spyOn(fs, 'readFile').mockResolvedValue(
+        JSON.stringify({ pid: process.pid }),
+      )
+      await expect(reserveArtifactPath(desiredPath)).rejects.toBeInstanceOf(
+        ArtifactPathExhaustedError,
+      )
+      expect(stat).toHaveBeenCalledTimes(
+        ARTIFACT_PATH_CANDIDATE_LIMIT * (mode === 'existing-output' ? 1 : 2),
+      )
+      expect(open).toHaveBeenCalledTimes(
+        mode === 'existing-output' ? 0 : ARTIFACT_PATH_CANDIDATE_LIMIT,
+      )
+      const produce = vi.fn(async () => true)
+      const validate = vi.fn(async () => true)
+      const warn = vi.fn()
+      await expect(
+        publishAtomicArtifact({ desiredPath, produce, validate, warn }),
+      ).resolves.toBeUndefined()
+      expect(produce).not.toHaveBeenCalled()
+      expect(validate).not.toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('ArtifactPathExhaustedError'),
+      )
+    },
+  )
+
+  it('surfaces permission failures without treating the desired path as absent', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const failure = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    })
+    const stat = vi.spyOn(fs, 'stat').mockRejectedValue(failure)
+    const open = vi.spyOn(fs, 'open')
+    await expect(
+      reserveArtifactPath(path.join(tempDir, 'unreadable.webm')),
+    ).rejects.toBe(failure)
+    expect(stat).toHaveBeenCalledOnce()
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('aborts on a metadata write failure and removes the exclusive candidate', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'storage.webm')
+    const openFile = fs.open.bind(fs)
+    const open = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (filePath, flags, mode) => {
+        const handle = await openFile(filePath, flags, mode)
+        vi.spyOn(handle, 'write').mockRejectedValue(
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        )
+        return handle
+      })
+    await expect(reserveArtifactPath(desiredPath)).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      cause: { code: 'ENOSPC' },
+    })
+    expect(open).toHaveBeenCalledOnce()
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('releases its reservation when the final existence recheck fails', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'recheck.webm')
+    const originalStat = fs.stat.bind(fs)
+    let outputStatCalls = 0
+    vi.spyOn(fs, 'stat').mockImplementation(async (filePath) => {
+      if (filePath === desiredPath && ++outputStatCalls > 1) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalStat(filePath)
+    })
+    const produce = vi.fn(async () => true)
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        produce,
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBeUndefined()
+    expect(produce).not.toHaveBeenCalled()
+    expect(await fs.readdir(tempDir)).toEqual([])
   })
 
   it('publishes only after production and validation complete', async () => {
@@ -214,6 +345,90 @@ describe('artifact integrity', () => {
     await expect(
       reserveArtifactPath(path.join(blockedDirectory, 'final.webm')),
     ).rejects.toMatchObject({ code: expect.stringMatching(/ENOTDIR|EEXIST/u) })
+  })
+
+  it('waits out a transient reservation failure instead of renaming the artifact', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'transient.webm')
+    const openExclusive = vi.spyOn(nodeFileSystem, 'openExclusive')
+    for (const code of ['EBUSY', 'EMFILE', 'ENFILE']) {
+      openExclusive.mockRejectedValueOnce(
+        Object.assign(new Error(`${code}: refused`), { code }),
+      )
+    }
+    const { clock, delays } = createClock()
+
+    // Renaming cannot clear a descriptor shortage, so the recording must keep
+    // the name its manifest and report entries already refer to.
+    await expect(reserveArtifactPath(desiredPath, { clock })).resolves.toBe(
+      desiredPath,
+    )
+    expect(openExclusive).toHaveBeenCalledTimes(4)
+    expect(delays).toEqual([25, 25, 25])
+  })
+
+  it('bounds transient reservation retries and keeps the underlying fault', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const shortage = Object.assign(new Error('EMFILE: too many open files'), {
+      code: 'EMFILE',
+    })
+    const openExclusive = vi
+      .spyOn(nodeFileSystem, 'openExclusive')
+      .mockRejectedValue(shortage)
+    const { clock, delays } = createClock()
+
+    await expect(
+      reserveArtifactPath(path.join(tempDir, 'shortage.webm'), { clock }),
+    ).rejects.toMatchObject({
+      cause: { cause: shortage },
+      message: expect.stringContaining('transient filesystem failures'),
+    })
+    // A bounded wait on one candidate, not a thousand renames of a name that
+    // was never occupied.
+    expect(openExclusive).toHaveBeenCalledTimes(80)
+    expect(delays).toHaveLength(80)
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('reports a bounded transient publication failure and keeps the source', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'published.webm')
+    vi.spyOn(nodeFileSystem, 'openExclusive').mockRejectedValue(
+      Object.assign(new Error('EBUSY: refused'), { code: 'EBUSY' }),
+    )
+    const { clock } = createClock()
+    const produce = vi.fn(async () => true)
+    const warn = vi.fn()
+
+    await expect(
+      publishAtomicArtifact({
+        clock,
+        desiredPath,
+        produce,
+        validate: async () => true,
+        warn,
+      }),
+    ).resolves.toBeUndefined()
+    expect(produce).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('transient filesystem failures'),
+    )
+    expect(await fs.readdir(tempDir)).toEqual([])
+  })
+
+  it('surfaces a permanent reservation failure instead of renaming the artifact', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const failure = Object.assign(new Error('EACCES: refused'), {
+      code: 'EACCES',
+    })
+    const openExclusive = vi
+      .spyOn(nodeFileSystem, 'openExclusive')
+      .mockRejectedValue(failure)
+
+    await expect(
+      reserveArtifactPath(path.join(tempDir, 'permanent.webm')),
+    ).rejects.toMatchObject({ cause: failure })
+    expect(openExclusive).toHaveBeenCalledOnce()
   })
 
   it('uses the next output name when completed media already exists', async () => {

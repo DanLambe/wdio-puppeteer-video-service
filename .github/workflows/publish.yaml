@@ -3,6 +3,14 @@ name: Publish To npm
 on:
   workflow_dispatch:
     inputs:
+      release_channel:
+        description: npm release channel permitted for this version
+        required: true
+        default: prerelease
+        type: choice
+        options:
+          - prerelease
+          - stable
       validation_run_1:
         description: First successful Release Candidate Validation run ID
         required: true
@@ -26,6 +34,7 @@ jobs:
     outputs:
       package_name: ${{ steps.package_meta.outputs.name }}
       package_version: ${{ steps.package_meta.outputs.version }}
+      release_dist_tag: ${{ steps.release_channel.outputs.dist_tag }}
     steps:
       - name: Require master
         if: github.ref != 'refs/heads/master'
@@ -87,6 +96,17 @@ jobs:
           echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Validate Release Channel
+        id: release_channel
+        env:
+          PACKAGE_VERSION: ${{ steps.package_meta.outputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist_tag="$(./node_modules/.bin/tsx scripts/resolve-release-channel.ts "$PACKAGE_VERSION" "$RELEASE_CHANNEL")"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+
       - name: Require An Unpublished Version
         shell: bash
         run: |
@@ -96,6 +116,61 @@ jobs:
             echo "$package_name@$package_version is already published." >&2
             exit 1
           fi
+
+      # A create-release request ignores its target when the tag already exists,
+      # so an existing tag has to point at this validated commit already. Never
+      # move or delete one; a mismatch is a release the owner must resolve.
+      - name: Require A Matching Release Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.package_meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$PACKAGE_VERSION"
+
+          json_field() {
+            node -e 'const [body, field] = process.argv.slice(1); let value; try { value = JSON.parse(body) } catch { process.exit(0) } for (const key of field.split(".")) { value = value?.[key] } if (typeof value === "string") { process.stdout.write(value) }' "$1" "$2"
+          }
+
+          lookup_status=0
+          reference="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>/dev/null)" || lookup_status=$?
+
+          if [[ "$lookup_status" -ne 0 ]]; then
+            # `gh` writes the response body to stdout and exits non-zero for every
+            # HTTP error, so a non-empty body does not mean the tag exists and an
+            # empty one does not mean it is absent. Only a confirmed 404 may
+            # continue; authentication, rate-limit, server, and transport failures
+            # have to stop the release rather than be read as absence.
+            if [[ "$(json_field "$reference" status)" != '404' ]]; then
+              echo "Could not determine whether tag $tag exists: ${reference:-no response}" >&2
+              exit 1
+            fi
+            echo "Tag $tag does not exist yet; it will be created at $GITHUB_SHA."
+            exit 0
+          fi
+
+          object_sha="$(json_field "$reference" object.sha)"
+          if [[ -z "$object_sha" ]]; then
+            echo "Unexpected reference payload for tag $tag: ${reference:-no response}" >&2
+            exit 1
+          fi
+
+          if [[ "$(json_field "$reference" object.type)" == 'tag' ]]; then
+            annotated_status=0
+            annotated="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" 2>/dev/null)" || annotated_status=$?
+            object_sha="$(json_field "$annotated" object.sha)"
+            if [[ "$annotated_status" -ne 0 || -z "$object_sha" ]]; then
+              echo "Could not resolve annotated tag $tag to a commit." >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "$object_sha" != "$GITHUB_SHA" ]]; then
+            echo "Tag $tag already points at $object_sha, not the validated commit $GITHUB_SHA." >&2
+            exit 1
+          fi
+          echo "Tag $tag already points at the validated commit $GITHUB_SHA."
 
       - name: Build Release Artifacts
         shell: bash
@@ -140,11 +215,7 @@ jobs:
       - name: Publish With Provenance
         shell: bash
         run: |
-          version='${{ needs.verify-and-pack.outputs.package_version }}'
-          dist_tag='latest'
-          if [[ "$version" == *-* ]]; then
-            dist_tag='next'
-          fi
+          dist_tag='${{ needs.verify-and-pack.outputs.release_dist_tag }}'
           corepack npm publish ./release-artifacts/*.tgz --allow-file=all --access public --provenance --tag "$dist_tag"
 
   github-release:
@@ -164,13 +235,19 @@ jobs:
           name: release-artifacts
           path: release-artifacts
 
+      # Without an explicit target the create-release API tags the default
+      # branch's current tip, which can have moved past the validated commit
+      # while this workflow waited for its protected-environment approval. The
+      # tag has to describe the same commit as the published tarball and its
+      # provenance.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.verify-and-pack.outputs.package_version }}
+          target_commitish: ${{ github.sha }}
           name: v${{ needs.verify-and-pack.outputs.package_version }}
           body_path: release-artifacts/release-notes.md
           files: |
             release-artifacts/*.tgz
             release-artifacts/sbom.cdx.json
-          prerelease: ${{ contains(needs.verify-and-pack.outputs.package_version, '-') }}
+          prerelease: ${{ needs.verify-and-pack.outputs.release_dist_tag == 'next' }}

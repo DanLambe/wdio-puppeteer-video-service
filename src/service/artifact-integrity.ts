@@ -1,18 +1,39 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { ProcessBoundary } from './boundaries.js'
-import { nodeProcess } from './boundaries.js'
+import {
+  type ClockBoundary,
+  nodeProcess,
+  type ProcessBoundary,
+  systemClock,
+} from './boundaries.js'
 import { GLOBAL_RECORDING_SLOT_INVALID_STALE_MS } from './constants.js'
 import {
+  isTransientLeaseFileError,
   type OwnedFileLease,
   type ParsedOwnedFileLeaseMetadata,
   tryAcquireOwnedFileLease,
 } from './owned-file-lease.js'
 
 const RESERVATION_SUFFIX = '.wdio-reserve'
-const ARTIFACT_RESERVATION_HEARTBEAT_MS = 1_000
+const RESERVATION_RETRY_TIMEOUT_MS = 2_000
+const RESERVATION_RETRY_POLL_MS = 25
 const ignoreFileError = (): undefined => undefined
+export const ARTIFACT_PATH_CANDIDATE_LIMIT = 1_000
+
+export class ArtifactPathExhaustedError extends Error {
+  readonly candidateLimit: number
+  readonly desiredPath: string
+
+  constructor(desiredPath: string) {
+    super(
+      `[WdioPuppeteerVideoService] Could not reserve an artifact path after ${ARTIFACT_PATH_CANDIDATE_LIMIT.toString()} candidates: ${desiredPath}`,
+    )
+    this.name = 'ArtifactPathExhaustedError'
+    this.candidateLimit = ARTIFACT_PATH_CANDIDATE_LIMIT
+    this.desiredPath = desiredPath
+  }
+}
 
 interface ArtifactLeasePayload {
   outputPath: string
@@ -20,12 +41,13 @@ interface ArtifactLeasePayload {
 }
 
 interface ArtifactReservation {
-  lease: OwnedFileLease<ArtifactLeasePayload>
+  lease: OwnedFileLease
   outputPath: string
   temporaryPath: string
 }
 
 export interface AtomicArtifactOptions {
+  clock?: ClockBoundary
   desiredPath: string
   produce: (temporaryPath: string) => Promise<boolean>
   process?: ProcessBoundary
@@ -33,11 +55,21 @@ export interface AtomicArtifactOptions {
   warn: (message: string) => void
 }
 
+export interface ArtifactReservationDependencies {
+  readonly clock?: ClockBoundary
+}
+
 export const reserveArtifactPath = async (
   desiredPath: string,
+  dependencies: ArtifactReservationDependencies = {},
 ): Promise<string> => {
+  const clock = dependencies.clock ?? systemClock
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
-  for (let collisionIndex = 1; ; collisionIndex += 1) {
+  for (
+    let collisionIndex = 1;
+    collisionIndex <= ARTIFACT_PATH_CANDIDATE_LIMIT;
+    collisionIndex += 1
+  ) {
     const candidatePath = getCollisionPath(desiredPath, collisionIndex)
     if (await pathExists(candidatePath)) {
       continue
@@ -47,6 +79,7 @@ export const reserveArtifactPath = async (
       `${candidatePath}${RESERVATION_SUFFIX}`,
       { outputPath: candidatePath },
       nodeProcess,
+      clock,
     )
     if (!lease) {
       continue
@@ -63,6 +96,7 @@ export const reserveArtifactPath = async (
       await lease.release()
     }
   }
+  throw new ArtifactPathExhaustedError(desiredPath)
 }
 
 export const publishAtomicArtifact = async (
@@ -72,6 +106,7 @@ export const publishAtomicArtifact = async (
   const reservation = await acquireArtifactReservation(
     options.desiredPath,
     processBoundary,
+    options.clock ?? systemClock,
   ).catch((error: unknown) => {
     options.warn(
       `[WdioPuppeteerVideoService] Failed to reserve artifact ${options.desiredPath}: ${String(error)}`,
@@ -115,7 +150,7 @@ export const publishAtomicArtifact = async (
       return undefined
     }
 
-    await fs.link(reservation.temporaryPath, reservation.outputPath)
+    await linkArtifact(reservation.temporaryPath, reservation.outputPath)
     published = true
     await fs.unlink(reservation.temporaryPath).catch((error: unknown) => {
       options.warn(
@@ -138,12 +173,40 @@ export const publishAtomicArtifact = async (
   }
 }
 
+const linkArtifact = async (
+  temporaryPath: string,
+  outputPath: string,
+): Promise<void> => {
+  try {
+    await fs.link(temporaryPath, outputPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    if (
+      code &&
+      ['EPERM', 'EACCES', 'EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes(
+        code,
+      )
+    ) {
+      throw new Error(
+        `Hard-link publication failed (${code}). Use a writable outputDir on a filesystem that supports hard links; no overwrite fallback is used. ${String(error)}`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
+}
+
 const acquireArtifactReservation = async (
   desiredPath: string,
   processBoundary: ProcessBoundary,
+  clock: ClockBoundary,
 ): Promise<ArtifactReservation> => {
   await fs.mkdir(path.dirname(desiredPath), { recursive: true })
-  for (let collisionIndex = 1; ; collisionIndex += 1) {
+  for (
+    let collisionIndex = 1;
+    collisionIndex <= ARTIFACT_PATH_CANDIDATE_LIMIT;
+    collisionIndex += 1
+  ) {
     const outputPath = getCollisionPath(desiredPath, collisionIndex)
     if (await pathExists(outputPath)) {
       continue
@@ -158,6 +221,7 @@ const acquireArtifactReservation = async (
       reservationPath,
       { outputPath, temporaryPath },
       processBoundary,
+      clock,
     )
     if (!lease) {
       continue
@@ -165,13 +229,21 @@ const acquireArtifactReservation = async (
     // The output can appear after the initial existence check but before this
     // reservation is acquired. Recheck while the lease is held so the caller
     // never replaces an artifact published by another worker.
-    if (await pathExists(outputPath)) {
+    let outputExists: boolean
+    try {
+      outputExists = await pathExists(outputPath)
+    } catch (error) {
+      await lease.release()
+      throw error
+    }
+    if (outputExists) {
       await lease.release()
       continue
     }
 
     return { lease, outputPath, temporaryPath }
   }
+  throw new ArtifactPathExhaustedError(desiredPath)
 }
 
 const isTemporaryPathForOutput = (
@@ -202,18 +274,37 @@ const acquireArtifactLease = async (
   reservationPath: string,
   payload: ArtifactLeasePayload,
   processBoundary: ProcessBoundary,
-): Promise<OwnedFileLease<ArtifactLeasePayload> | undefined> => {
-  return tryAcquireOwnedFileLease(
-    {
-      filePath: reservationPath,
-      heartbeatIntervalMs: ARTIFACT_RESERVATION_HEARTBEAT_MS,
-      invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
-      onReclaimed: async (metadata) => {
-        await cleanupAbandonedArtifact(metadata, payload.outputPath)
-      },
-      payload,
-    },
-    { process: processBoundary },
+  clock: ClockBoundary,
+): Promise<OwnedFileLease | undefined> => {
+  const deadline = clock.now() + RESERVATION_RETRY_TIMEOUT_MS
+  let transientFailure: unknown
+  while (clock.now() < deadline) {
+    try {
+      return await tryAcquireOwnedFileLease(
+        {
+          filePath: reservationPath,
+          invalidStaleMs: GLOBAL_RECORDING_SLOT_INVALID_STALE_MS,
+          onReclaimed: async (metadata) => {
+            await cleanupAbandonedArtifact(metadata, payload.outputPath)
+          },
+          payload,
+        },
+        { process: processBoundary },
+      )
+    } catch (error) {
+      // A sharing violation or descriptor shortage is not a name collision, so
+      // another candidate would hit it too. Wait on this one instead of
+      // spending the collision budget, and keep the fault if it never clears.
+      if (!isTransientLeaseFileError(error, processBoundary.platform)) {
+        throw error
+      }
+      transientFailure = error
+    }
+    await clock.delay(RESERVATION_RETRY_POLL_MS)
+  }
+  throw new Error(
+    `Timed out reserving an artifact path after repeated transient filesystem failures: ${reservationPath}`,
+    { cause: transientFailure },
   )
 }
 
@@ -275,8 +366,13 @@ const getCollisionPath = (
 }
 
 const pathExists = async (filePath: string): Promise<boolean> => {
-  return fs
-    .stat(filePath)
-    .then(() => true)
-    .catch(() => false)
+  try {
+    await fs.stat(filePath)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
 }

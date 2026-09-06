@@ -14,6 +14,11 @@ import type {
   RunFfmpegOptions,
 } from './ffmpeg-runner.js'
 import type { ServiceLogger } from './logging.js'
+import {
+  buildMediaMetadataArgs,
+  type MediaDimensions,
+  parseMediaDimensions,
+} from './media-metadata.js'
 import type { PostProcessSlotScheduler } from './recording-slots.js'
 
 export type FfmpegRunner = (
@@ -63,6 +68,7 @@ export class FfmpegRuntime {
   private initializationCompleted = false
   private warnedAboutMp4AutoFallback = false
   private warnedAboutMissingFfmpeg = false
+  private warnedAboutUnavailableMetadata = false
   private forceMp4Transcode = false
   private acceptingWork = true
 
@@ -89,6 +95,7 @@ export class FfmpegRuntime {
     this.candidates = []
     this.initializationTask = undefined
     this.initializationCompleted = false
+    this.warnedAboutUnavailableMetadata = false
   }
 
   async ensureReady(): Promise<boolean> {
@@ -133,7 +140,16 @@ export class FfmpegRuntime {
     return mode === 'transcode' || (mode === 'auto' && this.forceMp4Transcode)
   }
 
-  async run(args: string[], operation: string): Promise<boolean> {
+  async run(
+    args: string[],
+    operation: string,
+    overrides: Partial<
+      Pick<
+        RunFfmpegOptions,
+        'onStderr' | 'timeoutMs' | 'markUnavailable' | 'warnMissing'
+      >
+    > = {},
+  ): Promise<boolean> {
     if (!this.acceptingWork) {
       return false
     }
@@ -151,9 +167,57 @@ export class FfmpegRuntime {
         warnMissing: (reason) => {
           this.warnMissingFfmpeg(reason)
         },
+        ...overrides,
       },
       this.processRegistry,
     )
+  }
+
+  async readMediaDimensions(
+    inputPath: string,
+  ): Promise<MediaDimensions | undefined> {
+    try {
+      if (!(await this.ensureReady())) {
+        this.warnUnavailableMetadata()
+        return undefined
+      }
+      return await this.withPostProcessSlot('metadata probe', async () => {
+        let dimensions: MediaDimensions | undefined
+        const configuredTimeout = this.options.processing.ffmpeg.timeoutMs
+        const success = await this.run(
+          buildMediaMetadataArgs(inputPath),
+          'metadata probe',
+          {
+            // Optional inspection failures must not disable later media processing.
+            markUnavailable: () => undefined,
+            // The runner reports spawn details; installation guidance is not appropriate here.
+            warnMissing: () => undefined,
+            timeoutMs:
+              configuredTimeout > 0
+                ? Math.min(configuredTimeout, 5_000)
+                : 5_000,
+            onStderr: (output) => {
+              dimensions = parseMediaDimensions(output)
+            },
+          },
+        )
+        if (!success || !dimensions) {
+          this.log(
+            'warn',
+            `[WdioPuppeteerVideoService] Video dimensions unavailable for ${inputPath}; preserving media and omitting optional manifest dimensions.`,
+          )
+          return undefined
+        }
+        return dimensions
+      })
+    } catch (error) {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to read video dimensions for ${inputPath}; preserving media.`,
+        error,
+      )
+      return undefined
+    }
   }
 
   async withPostProcessSlot<T>(
@@ -164,7 +228,19 @@ export class FfmpegRuntime {
       return undefined
     }
     const slotScheduler = this.createPostProcessSlotScheduler()
-    const acquired = await slotScheduler.acquire()
+    const acquired = await slotScheduler.acquire().catch((error: unknown) => {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
+        error,
+      )
+      return undefined
+    })
+    if (acquired === undefined) {
+      // Let the media coordinator preserve sources and record the failed outcome
+      // before applying failurePolicy, just as it does for FFmpeg failures.
+      return undefined
+    }
     if (!acquired) {
       const timeout = this.options.concurrency.postProcessStartTimeoutMs
       this.log(
@@ -209,6 +285,17 @@ export class FfmpegRuntime {
       return
     }
     await slotScheduler.release()
+  }
+
+  private warnUnavailableMetadata(): void {
+    if (this.warnedAboutUnavailableMetadata) {
+      return
+    }
+    this.warnedAboutUnavailableMetadata = true
+    this.log(
+      'warn',
+      '[WdioPuppeteerVideoService] Skipping retained-video metadata because the FFmpeg runtime is unavailable; preserving media and omitting optional manifest dimensions.',
+    )
   }
 
   private async initialize(): Promise<boolean> {

@@ -10,6 +10,22 @@ concurrency:
 permissions:
   contents: read
 
+# Every WDIO package pins its siblings exactly, so a partial downgrade cannot
+# resolve: one unpinned `@wdio/*` still on a newer release drags that release's
+# `@wdio/globals` back in and conflicts with the minimum `expect-webdriverio`.
+# The whole supported floor is therefore declared once and used by every job
+# that installs it, so the lists cannot drift apart again.
+env:
+  MINIMUM_SUPPORTED_PEERS: >-
+    webdriverio@9.29.1 puppeteer-core@24.11.2
+    @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
+    @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
+    @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
+    @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
+    @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
+    @wdio/types@9.29.1
+    expect-webdriverio@5.7.0
+
 jobs:
   core:
     name: Core (${{ matrix.os }}, ${{ matrix.dependencies }})
@@ -36,30 +52,47 @@ jobs:
       - name: Install Dependencies Without Scripts
         run: corepack npm ci --ignore-scripts
 
+      # `--no-package-lock` is what makes the downgrade resolvable: without it
+      # npm seeds the ideal tree from the development lockfile and refuses to
+      # move the pinned newer `@wdio/*` cluster off it.
       - name: Install Minimum Supported Peers
         if: matrix.dependencies == 'minimum'
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9.29.1 puppeteer-core@25.3.0
-          @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
-          @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
-          @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
-          @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
-          @wdio/spec-reporter@9.29.1 @wdio/types@9.29.1
+          corepack npm install --no-save --ignore-scripts --no-package-lock
+          --min-release-age=0 ${{ env.MINIMUM_SUPPORTED_PEERS }}
 
       - name: Install Latest Supported Peers
         if: matrix.dependencies == 'latest'
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25
+          webdriverio@9 puppeteer-core@24
           @wdio/allure-reporter@9 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
           @wdio/jasmine-framework@9 @wdio/local-runner@9
           @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
+      # A minimum run deliberately installs below the development ranges, so
+      # `npm ls` reports those packages as invalid and exits non-zero. Assert
+      # the versions this leg asked for instead of the development ranges.
       - name: Verify Supported Peer Versions
-        run: corepack npm ls webdriverio puppeteer-core
+        shell: bash
+        run: |
+          # Read the manifest directly: these packages do not expose
+          # `./package.json` through their exports map.
+          installed() {
+            node -p "JSON.parse(require('node:fs').readFileSync('node_modules/$1/package.json','utf8')).version"
+          }
+          wdio="$(installed webdriverio)"
+          puppeteer="$(installed puppeteer-core)"
+          echo "webdriverio=${wdio} puppeteer-core=${puppeteer}"
+          if [ "${{ matrix.dependencies }}" = 'minimum' ]; then
+            [ "${wdio}" = '9.29.1' ] || { echo 'expected webdriverio 9.29.1'; exit 1; }
+            [ "${puppeteer}" = '24.11.2' ] || { echo 'expected puppeteer-core 24.11.2'; exit 1; }
+          else
+            case "${wdio}" in 9.*) ;; *) echo 'expected webdriverio 9.x'; exit 1;; esac
+            case "${puppeteer}" in 24.*) ;; *) echo 'expected puppeteer-core 24.x'; exit 1;; esac
+          fi
 
       - name: Rebuild Required Binary Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -107,15 +140,25 @@ jobs:
       - name: Install Latest Supported Browser Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
 
       - name: Run Chrome Protocol Tests
         run: corepack npm run test:e2e:capture:${{ matrix.protocol }}
+
+      - name: Verify Retained Media Dimensions
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:metadata
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-chrome-${{ matrix.protocol }}-${{ matrix.os }}
 
   support-floor:
     name: Minimum WDIO And Puppeteer E2E
@@ -136,18 +179,23 @@ jobs:
 
       - name: Install Minimum Supported Stack
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9.29.1 puppeteer-core@25.3.0
-          @wdio/cli@9.29.1 @wdio/globals@9.29.1
-          @wdio/local-runner@9.29.1 @wdio/mocha-framework@9.29.1
-          @wdio/reporter@9.29.1 @wdio/spec-reporter@9.29.1
-          @wdio/types@9.29.1
+          corepack npm install --no-save --ignore-scripts --no-package-lock
+          --min-release-age=0 ${{ env.MINIMUM_SUPPORTED_PEERS }}
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
 
       - name: Run Classic Chrome Capture
         run: corepack npm run test:e2e:capture:classic
+
+      - name: Verify Retained Media Dimensions
+        run: corepack npm run test:e2e:capture:metadata
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-support-floor
 
   frameworks:
     name: ${{ matrix.framework }} framework
@@ -163,6 +211,10 @@ jobs:
             command: test:e2e:jasmine
           - framework: cucumber
             command: test:e2e:cucumber
+          - framework: cucumber retry
+            command: test:e2e:cucumber:retry
+          - framework: cucumber duplicate names
+            command: test:e2e:cucumber:duplicate-names
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -179,11 +231,11 @@ jobs:
       - name: Install Latest Supported Framework Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
           @wdio/jasmine-framework@9 @wdio/local-runner@9
           @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -191,10 +243,24 @@ jobs:
       - name: Run Framework Tests
         run: corepack npm run ${{ matrix.command }}
 
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-framework-${{ strategy.job-index }}
+
   advanced:
-    name: Advanced recording and artifact behavior
-    runs-on: ubuntu-latest
+    name: Advanced recording and artifact behavior (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: test:e2e:advanced
+          - os: windows-latest
+            command: test:e2e:advanced:windows
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -212,7 +278,17 @@ jobs:
         run: corepack npm rebuild esbuild ffmpeg-static
 
       - name: Run Advanced Recording Tests
-        run: corepack npm run test:e2e:advanced
+        run: corepack npm run ${{ matrix.command }}
+
+      - name: Verify Real Windows Process Tree Termination
+        if: matrix.os == 'windows-latest'
+        run: corepack npm run test:integration:windows-process
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-advanced-${{ matrix.os }}
 
   edge:
     name: Edge smoke (Windows)
@@ -234,12 +310,18 @@ jobs:
       - name: Install Latest Supported Edge Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --min-release-age=0
-          webdriverio@9 puppeteer-core@25 @wdio/cli@9 @wdio/globals@9
+          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Edge Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static edgedriver
 
       - name: Run Edge Capture Smoke Test
         run: corepack npm run test:e2e:capture:edge
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-edge-windows

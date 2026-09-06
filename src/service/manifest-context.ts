@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import type { ManifestToolVersions } from '../manifest.js'
+import { isSafeGlobalSlotRunId } from './global-slot-directory.js'
 import { getManifestJournalDirectory } from './manifest-journal.js'
 
 const require = createRequire(import.meta.url)
@@ -30,9 +31,15 @@ interface ManifestWorkerContextEnvelope {
 
 export const createManifestRunContext = async (
   outputDir: string,
+  runId: string = randomUUID(),
 ): Promise<ManifestRunContext> => {
+  if (!isSafeGlobalSlotRunId(runId)) {
+    throw new TypeError(
+      '[WdioPuppeteerVideoService] The launcher run ID is unsafe for manifest path construction.',
+    )
+  }
   const context: ManifestRunContext = {
-    runId: randomUUID(),
+    runId,
     outputDir: path.resolve(outputDir),
     startedAt: new Date().toISOString(),
     tools: {

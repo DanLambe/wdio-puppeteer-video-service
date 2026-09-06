@@ -35,19 +35,6 @@ export class RecordingLifecycle {
     return this.currentState
   }
 
-  get isBusy(): boolean {
-    return (
-      this.startTask !== undefined ||
-      this.stopTask !== undefined ||
-      this.finalizeTask !== undefined ||
-      this.resetTask !== undefined ||
-      this.currentState === 'preparing' ||
-      this.currentState === 'recording' ||
-      this.currentState === 'stopping' ||
-      this.currentState === 'processing'
-    )
-  }
-
   start(operation: () => Promise<boolean>): Promise<boolean> {
     if (this.startTask) {
       return this.startTask
@@ -125,10 +112,6 @@ export class RecordingLifecycle {
       })
     this.resetTask = task
     return task
-  }
-
-  fail(): void {
-    this.currentState = 'failed'
   }
 
   private async runStop(operations: RecordingStopOperations): Promise<void> {

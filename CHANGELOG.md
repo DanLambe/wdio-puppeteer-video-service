@@ -14,10 +14,10 @@ versioning and release notes.
 - Added an idempotent recording lifecycle with crash-safe cleanup and separate
   recording/post-processing capacity limits, including recovery after partial
   startup and teardown failures.
-- Added Puppeteer 25 viewport, frame-rate, quality, scale, speed, crop, priming,
+- Added Puppeteer screencast viewport, frame-rate, quality, scale, speed, crop, priming,
   and connection-timeout controls.
 - Added WDIO v9 Chrome BiDi/classic CDP classification and Edge smoke support.
-- Added exclusive artifact reservation, atomic merge/transcode publication,
+- Added exclusive artifact reservation, ownership-safe no-clobber merge/transcode publication,
   source-media preservation, ownership-safe lock recovery, and bounded UTF-8
   FFmpeg diagnostics.
 - Added bounded deferred post-processing with a positive per-worker limit,

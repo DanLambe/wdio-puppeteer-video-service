@@ -16,6 +16,7 @@ import { FfmpegRuntime } from './ffmpeg-runtime.js'
 import {
   createLauncherRegistrationError,
   inspectLauncherWorkerContext,
+  type LauncherWorkerContext,
 } from './launcher-context.js'
 import * as logging from './logging.js'
 import {
@@ -40,7 +41,9 @@ import {
 import { RecordingMediaCoordinator } from './recording-media-coordinator.js'
 import type { WorkerRecordingCoordinatorPort } from './worker-recording-coordinator.js'
 
-const validateLauncherWorkerConfiguration = (config: unknown): void => {
+const validateLauncherWorkerConfiguration = (
+  config: unknown,
+): LauncherWorkerContext => {
   const launcherContext = inspectLauncherWorkerContext(config)
   if (launcherContext.status !== 'valid') {
     throw createLauncherRegistrationError(launcherContext.status)
@@ -50,10 +53,11 @@ const validateLauncherWorkerConfiguration = (config: unknown): void => {
   }
   if (
     launcherContext.context.manifestContextAvailable &&
-    !readManifestRunContext(config)
+    readManifestRunContext(config)?.runId !== launcherContext.context.runId
   ) {
     throw createLauncherRegistrationError('malformed')
   }
+  return launcherContext.context
 }
 
 /**
@@ -84,9 +88,10 @@ export class WdioPuppeteerVideoWorkerRuntime
     config?: unknown,
     compositionOverrides?: WorkerCompositionOverrides,
   ) {
-    if (config !== undefined) {
-      validateLauncherWorkerConfiguration(config)
-    }
+    const launcherContext =
+      config === undefined
+        ? undefined
+        : validateLauncherWorkerConfiguration(config)
     const resolvedConfiguration = resolveServiceConfiguration(options)
     this._hasExplicitLogLevel = resolvedConfiguration.hasExplicitLogLevel
     this._logLevel = resolvedConfiguration.logLevel
@@ -126,6 +131,7 @@ export class WdioPuppeteerVideoWorkerRuntime
       (level, message, details) => {
         this._log(level, message, details)
       },
+      launcherContext?.runId,
     )
     const ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
     this._ffmpegRuntime = new FfmpegRuntime({
@@ -135,6 +141,7 @@ export class WdioPuppeteerVideoWorkerRuntime
           (level, message, details) => {
             this._log(level, message, details)
           },
+          launcherContext?.runId,
         ),
       log: (level, message, details) => {
         this._log(level, message, details)
@@ -225,6 +232,8 @@ export class WdioPuppeteerVideoWorkerRuntime
           cid,
           framework,
           failurePolicy: this._options.failurePolicy,
+          readDimensions: (filePath) =>
+            this._ffmpegRuntime.readMediaDimensions(filePath),
           onJournalError: (operation, error) => {
             this._log(
               'warn',

@@ -1,11 +1,14 @@
+import { isSafeGlobalSlotRunId } from './global-slot-directory.js'
+
 export const LAUNCHER_WORKER_CONFIG_KEY =
   'wdioPuppeteerVideoServiceLauncherWorker' as const
 
-const LAUNCHER_WORKER_CONTEXT_VERSION = 1 as const
+const LAUNCHER_WORKER_CONTEXT_VERSION = 2 as const
 
 export interface LauncherWorkerContext {
   initialized: true
   manifestContextAvailable: boolean
+  runId: string
   version: typeof LAUNCHER_WORKER_CONTEXT_VERSION
 }
 
@@ -16,11 +19,16 @@ export type LauncherWorkerContextResult =
 export const assignLauncherWorkerContext = (
   config: object,
   manifestContextAvailable: boolean,
+  runId: string,
 ): void => {
+  if (!isSafeGlobalSlotRunId(runId)) {
+    throw createLauncherRegistrationError('malformed')
+  }
   Object.assign(config, {
     [LAUNCHER_WORKER_CONFIG_KEY]: {
       initialized: true,
       manifestContextAvailable,
+      runId,
       version: LAUNCHER_WORKER_CONTEXT_VERSION,
     } satisfies LauncherWorkerContext,
   })
@@ -45,6 +53,8 @@ export const inspectLauncherWorkerContext = (
   if (
     context.initialized !== true ||
     typeof context.manifestContextAvailable !== 'boolean' ||
+    typeof context.runId !== 'string' ||
+    !isSafeGlobalSlotRunId(context.runId) ||
     context.version !== LAUNCHER_WORKER_CONTEXT_VERSION
   ) {
     return { status: 'malformed' }

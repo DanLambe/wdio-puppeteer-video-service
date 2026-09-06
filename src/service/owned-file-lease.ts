@@ -23,7 +23,7 @@ export interface OwnedFileLeaseMetadata<TPayload = unknown> {
 
 export interface ParsedOwnedFileLeaseMetadata {
   readonly createdAt?: number
-  readonly format: 'v1' | 'legacy'
+  readonly format: 'future' | 'v1' | 'legacy'
   readonly ownerToken?: string
   readonly payload?: unknown
   readonly pid: number
@@ -39,7 +39,6 @@ export interface OwnedFileLeaseDependencies {
 
 export interface TryAcquireOwnedFileLeaseOptions<TPayload> {
   readonly filePath: string
-  readonly heartbeatIntervalMs?: number
   readonly invalidStaleMs: number
   readonly onReclaimed?: (
     metadata: ParsedOwnedFileLeaseMetadata | undefined,
@@ -59,84 +58,79 @@ const ignoreFileError = (): undefined => undefined
 const isMissingFileError = (error: unknown): boolean => {
   return (error as NodeJS.ErrnoException).code === 'ENOENT'
 }
-const RETRY_LEASE_CANDIDATE = Symbol('retry-lease-candidate')
 
-export class OwnedFileLease<TPayload = unknown> {
+export class OwnedFileLeaseOperationalError extends Error {
+  readonly filePath: string
+  readonly operation: string
+
+  constructor(filePath: string, operation: string, cause?: unknown) {
+    super(
+      `[WdioPuppeteerVideoService] Failed to ${operation} for owned-file lease ${filePath}.`,
+      cause === undefined ? undefined : { cause },
+    )
+    this.name = 'OwnedFileLeaseOperationalError'
+    this.filePath = filePath
+    this.operation = operation
+  }
+}
+
+/**
+ * Distinguishes a momentary filesystem refusal from a real fault. Antivirus
+ * scanners, indexers, and descriptor shortages hold a lease file open for a
+ * moment; callers that already poll should treat that as contention instead of
+ * failing on the first attempt. Windows reports a sharing violation as `EPERM`,
+ * which is a permanent condition everywhere else.
+ */
+export const isTransientLeaseFileError = (
+  error: unknown,
+  platform: NodeJS.Platform,
+): boolean => {
+  const cause =
+    error instanceof OwnedFileLeaseOperationalError ? error.cause : error
+  if (!(cause instanceof Error)) {
+    return false
+  }
+  const code = (cause as NodeJS.ErrnoException).code
+  return (
+    code === 'EBUSY' ||
+    code === 'EAGAIN' ||
+    code === 'EMFILE' ||
+    code === 'ENFILE' ||
+    (platform === 'win32' && code === 'EPERM')
+  )
+}
+
+export class OwnedFileLease {
   readonly createdAt: number
   readonly filePath: string
   readonly ownerToken: string
   readonly pid: number
-  private readonly clock: ClockBoundary
   private readonly fileHandle: FileHandle
   private readonly fileIdentity: FileIdentity
   private readonly fileSystem: FileSystemBoundary
-  private readonly payload: TPayload | undefined
-  private heartbeatTimer: NodeJS.Timeout | undefined
-  private refreshTask: Promise<boolean> | undefined
   private releaseTask: Promise<boolean> | undefined
   private released = false
 
   constructor(options: {
-    clock: ClockBoundary
     createdAt: number
     fileHandle: FileHandle
     fileIdentity: FileIdentity
     filePath: string
     fileSystem: FileSystemBoundary
     ownerToken: string
-    payload: TPayload | undefined
     pid: number
   }) {
-    this.clock = options.clock
     this.createdAt = options.createdAt
     this.fileHandle = options.fileHandle
     this.fileIdentity = options.fileIdentity
     this.filePath = options.filePath
     this.fileSystem = options.fileSystem
     this.ownerToken = options.ownerToken
-    this.payload = options.payload
     this.pid = options.pid
-  }
-
-  get active(): boolean {
-    return !this.released
-  }
-
-  startHeartbeat(intervalMs: number | undefined): void {
-    if (
-      this.released ||
-      this.heartbeatTimer ||
-      intervalMs === undefined ||
-      intervalMs <= 0
-    ) {
-      return
-    }
-
-    this.heartbeatTimer = this.clock.setInterval(() => {
-      void this.refresh()
-    }, intervalMs)
-    this.heartbeatTimer.unref?.()
   }
 
   async isOwner(): Promise<boolean> {
     return !this.released && (await this.matchesCurrentFile())
-  }
-
-  refresh(): Promise<boolean> {
-    if (this.released) {
-      return Promise.resolve(false)
-    }
-    if (this.refreshTask) {
-      return this.refreshTask
-    }
-
-    const refreshTask = this.refreshNow()
-    this.refreshTask = refreshTask
-    return refreshTask.finally(() => {
-      if (this.refreshTask === refreshTask) {
-        this.refreshTask = undefined
-      }
-    })
   }
 
   release(): Promise<boolean> {
@@ -144,31 +138,14 @@ export class OwnedFileLease<TPayload = unknown> {
     return this.releaseTask
   }
 
-  private async refreshNow(): Promise<boolean> {
-    if (this.released || !(await this.matchesCurrentFile())) {
-      return false
-    }
-
-    const written = await writeLeaseMetadata(
-      this.fileHandle,
-      createLeaseMetadata({
-        createdAt: this.createdAt,
-        ownerToken: this.ownerToken,
-        payload: this.payload,
-        pid: this.pid,
-        updatedAt: this.clock.now(),
-      }),
-    )
-    return written && (await this.matchesCurrentFile())
-  }
-
   private async releaseNow(): Promise<boolean> {
-    this.stopHeartbeat()
-    await this.refreshTask?.catch(() => false)
-    const ownedBeforeClose = await this.matchesCurrentFile()
+    const ownedBeforeClose = await this.matchesCurrentFile().catch(() => false)
     this.released = true
     await this.fileHandle.close().catch(ignoreFileError)
-    if (!ownedBeforeClose || !(await this.matchesCurrentFile())) {
+    if (
+      !ownedBeforeClose ||
+      !(await this.matchesCurrentFile().catch(() => false))
+    ) {
       return false
     }
 
@@ -181,35 +158,24 @@ export class OwnedFileLease<TPayload = unknown> {
   }
 
   private async matchesCurrentFile(): Promise<boolean> {
-    const [contents, stats] = await Promise.all([
-      this.fileSystem.readText(this.filePath).catch(ignoreFileError),
-      this.fileSystem.stat(this.filePath).catch(ignoreFileError),
-    ])
-    if (contents === undefined || !stats) {
+    const snapshot = await readLeaseSnapshot(this.filePath, this.fileSystem)
+    if (!snapshot) {
       return false
     }
 
-    const metadata = parseOwnedFileLeaseMetadata(contents)
+    const metadata = parseOwnedFileLeaseMetadata(snapshot.contents)
     return (
       metadata?.format === 'v1' &&
       metadata.ownerToken === this.ownerToken &&
-      isSameFile(this.fileIdentity, stats)
+      isSameFile(this.fileIdentity, snapshot.stats)
     )
-  }
-
-  private stopHeartbeat(): void {
-    if (!this.heartbeatTimer) {
-      return
-    }
-    this.clock.clearInterval(this.heartbeatTimer)
-    this.heartbeatTimer = undefined
   }
 }
 
 export const tryAcquireOwnedFileLease = async <TPayload>(
   options: TryAcquireOwnedFileLeaseOptions<TPayload>,
   dependencies: OwnedFileLeaseDependencies = {},
-): Promise<OwnedFileLease<TPayload> | undefined> => {
+): Promise<OwnedFileLease | undefined> => {
   const clock = dependencies.clock ?? systemClock
   const fileSystem = dependencies.fileSystem ?? nodeFileSystem
   const processBoundary = dependencies.process ?? nodeProcess
@@ -220,11 +186,16 @@ export const tryAcquireOwnedFileLease = async <TPayload>(
     return undefined
   }
 
-  const candidateIdentity =
-    await readFileHandleIdentity(fileHandle).catch(ignoreFileError)
-  if (!candidateIdentity) {
+  let candidateIdentity: FileIdentity
+  try {
+    candidateIdentity = await readFileHandleIdentity(fileHandle)
+  } catch (error) {
     await fileHandle.close().catch(ignoreFileError)
-    return undefined
+    throw new OwnedFileLeaseOperationalError(
+      options.filePath,
+      'inspect the exclusive lease candidate',
+      error,
+    )
   }
 
   const createdAt = clock.now()
@@ -236,39 +207,59 @@ export const tryAcquireOwnedFileLease = async <TPayload>(
     pid: processBoundary.pid,
     updatedAt: createdAt,
   })
-  if (!(await writeLeaseMetadata(fileHandle, metadata))) {
+  try {
+    await writeLeaseMetadata(fileHandle, metadata)
+  } catch (error) {
     await discardLeaseCandidate(
       options.filePath,
       fileHandle,
       candidateIdentity,
       fileSystem,
     )
-    return undefined
+    throw new OwnedFileLeaseOperationalError(
+      options.filePath,
+      'write ownership metadata',
+      error,
+    )
   }
 
-  const fileIdentity =
-    await readFileHandleIdentity(fileHandle).catch(ignoreFileError)
-  if (!fileIdentity) {
-    await fileHandle.close().catch(ignoreFileError)
-    return undefined
+  let fileIdentity: FileIdentity
+  try {
+    fileIdentity = await readFileHandleIdentity(fileHandle)
+  } catch (error) {
+    await discardLeaseCandidate(
+      options.filePath,
+      fileHandle,
+      candidateIdentity,
+      fileSystem,
+    )
+    throw new OwnedFileLeaseOperationalError(
+      options.filePath,
+      'verify written ownership metadata',
+      error,
+    )
   }
 
-  const lease = new OwnedFileLease<TPayload>({
-    clock,
+  const lease = new OwnedFileLease({
     createdAt,
     fileHandle,
     fileIdentity,
     filePath: options.filePath,
     fileSystem,
     ownerToken,
-    payload: options.payload,
     pid: processBoundary.pid,
   })
-  if (!(await lease.isOwner())) {
+  let owned: boolean
+  try {
+    owned = await lease.isOwner()
+  } catch (error) {
+    await lease.release()
+    throw error
+  }
+  if (!owned) {
     await lease.release()
     return undefined
   }
-  lease.startHeartbeat(options.heartbeatIntervalMs)
   return lease
 }
 
@@ -280,44 +271,56 @@ const openLeaseCandidate = async (
   dependencies: OwnedFileLeaseDependencies,
   fileSystem: FileSystemBoundary,
 ): Promise<FileHandle | undefined> => {
-  for (;;) {
-    const candidate = await openLeaseCandidateOnce(
-      options,
-      dependencies,
-      fileSystem,
-    )
-    if (candidate !== RETRY_LEASE_CANDIDATE) {
-      return candidate
-    }
+  const candidate = await openLeaseCandidateOnce(options.filePath, fileSystem)
+  if (candidate) {
+    return candidate
   }
+  if (!(await cleanupStaleOwnedFileLease(options, dependencies))) {
+    return undefined
+  }
+  // A peer can win after reclamation. Yield to the caller's contention policy.
+  return openLeaseCandidateOnce(options.filePath, fileSystem)
 }
 
 const openLeaseCandidateOnce = async (
-  options: Pick<
-    TryAcquireOwnedFileLeaseOptions<unknown>,
-    'filePath' | 'invalidStaleMs' | 'onReclaimed'
-  >,
-  dependencies: OwnedFileLeaseDependencies,
+  filePath: string,
   fileSystem: FileSystemBoundary,
-): Promise<FileHandle | typeof RETRY_LEASE_CANDIDATE | undefined> => {
+): Promise<FileHandle | undefined> => {
   try {
-    return await fileSystem.openExclusive(options.filePath)
+    return await fileSystem.openExclusive(filePath)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-      throw error
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      return undefined
     }
-    const reclaimed = await cleanupStaleOwnedFileLease(
-      {
-        filePath: options.filePath,
-        invalidStaleMs: options.invalidStaleMs,
-        ...(options.onReclaimed === undefined
-          ? {}
-          : { onReclaimed: options.onReclaimed }),
-      },
-      dependencies,
+    throw new OwnedFileLeaseOperationalError(
+      filePath,
+      'open an exclusive candidate',
+      error,
     )
-    return reclaimed ? RETRY_LEASE_CANDIDATE : undefined
   }
+}
+
+const readLeaseSnapshot = async (
+  filePath: string,
+  fileSystem: FileSystemBoundary,
+): Promise<{ contents: string; stats: FileStatsBoundary } | undefined> => {
+  const [contents, stats] = await Promise.allSettled([
+    fileSystem.readText(filePath),
+    fileSystem.stat(filePath),
+  ])
+  for (const result of [contents, stats]) {
+    if (result.status === 'rejected' && !isMissingFileError(result.reason)) {
+      throw new OwnedFileLeaseOperationalError(
+        filePath,
+        'inspect existing lease metadata',
+        result.reason,
+      )
+    }
+  }
+  if (contents.status === 'rejected' || stats.status === 'rejected') {
+    return undefined
+  }
+  return { contents: contents.value, stats: stats.value }
 }
 
 export const cleanupStaleOwnedFileLease = async (
@@ -333,18 +336,11 @@ export const cleanupStaleOwnedFileLease = async (
   const clock = dependencies.clock ?? systemClock
   const fileSystem = dependencies.fileSystem ?? nodeFileSystem
   const processBoundary = dependencies.process ?? nodeProcess
-  const [contentsResult, statsResult] = await Promise.allSettled([
-    fileSystem.readText(options.filePath),
-    fileSystem.stat(options.filePath),
-  ])
-  if (statsResult.status === 'rejected') {
-    return isMissingFileError(statsResult.reason)
+  const snapshot = await readLeaseSnapshot(options.filePath, fileSystem)
+  if (!snapshot) {
+    return true
   }
-  if (contentsResult.status === 'rejected') {
-    return false
-  }
-  const contents = contentsResult.value
-  const stats = statsResult.value
+  const { contents, stats } = snapshot
 
   const metadata = parseOwnedFileLeaseMetadata(contents)
   if (metadata && processBoundary.isAlive(metadata.pid)) {
@@ -354,15 +350,11 @@ export const cleanupStaleOwnedFileLease = async (
     return false
   }
 
-  const [currentContents, currentStats] = await Promise.all([
-    fileSystem.readText(options.filePath).catch(ignoreFileError),
-    fileSystem.stat(options.filePath).catch(ignoreFileError),
-  ])
-  if (
-    currentContents !== contents ||
-    !currentStats ||
-    !isSameFile(stats, currentStats)
-  ) {
+  const current = await readLeaseSnapshot(options.filePath, fileSystem)
+  if (!current) {
+    return true
+  }
+  if (current.contents !== contents || !isSameFile(stats, current.stats)) {
     return false
   }
 
@@ -372,10 +364,11 @@ export const cleanupStaleOwnedFileLease = async (
     if (isMissingFileError(error)) {
       return true
     }
-    return fileSystem
-      .stat(options.filePath)
-      .then(() => false)
-      .catch(isMissingFileError)
+    throw new OwnedFileLeaseOperationalError(
+      options.filePath,
+      'remove a reclaimable lease',
+      error,
+    )
   }
   await options.onReclaimed?.(metadata)
   return true
@@ -395,8 +388,10 @@ export const parseOwnedFileLeaseMetadata = (
   }
 
   if (value.schemaVersion !== undefined) {
+    if (value.schemaVersion !== OWNED_FILE_LEASE_SCHEMA_VERSION) {
+      return parseFutureLeaseMetadata(value)
+    }
     if (
-      value.schemaVersion !== OWNED_FILE_LEASE_SCHEMA_VERSION ||
       !isNonEmptyString(value.ownerToken) ||
       !isPositiveInteger(value.pid) ||
       !isFiniteTimestamp(value.createdAt) ||
@@ -434,6 +429,23 @@ export const parseOwnedFileLeaseMetadata = (
   }
 }
 
+const parseFutureLeaseMetadata = (
+  value: Record<string, unknown>,
+): ParsedOwnedFileLeaseMetadata | undefined => {
+  // Preserve live owners even when this version cannot validate their schema.
+  if (!isPositiveInteger(value.pid)) {
+    return undefined
+  }
+  return {
+    format: 'future',
+    ...(isNonEmptyString(value.ownerToken)
+      ? { ownerToken: value.ownerToken }
+      : {}),
+    payload: value,
+    pid: value.pid,
+  }
+}
+
 const createLeaseMetadata = <TPayload>(options: {
   createdAt: number
   ownerToken: string
@@ -452,26 +464,21 @@ const createLeaseMetadata = <TPayload>(options: {
 const writeLeaseMetadata = async (
   fileHandle: FileHandle,
   metadata: OwnedFileLeaseMetadata,
-): Promise<boolean> => {
+): Promise<void> => {
   const bytes = Buffer.from(JSON.stringify(metadata), 'utf8')
-  try {
-    await fileHandle.truncate(0)
-    let offset = 0
-    while (offset < bytes.length) {
-      const result = await fileHandle.write(
-        bytes,
-        offset,
-        bytes.length - offset,
-        offset,
-      )
-      if (result.bytesWritten <= 0) {
-        return false
-      }
-      offset += result.bytesWritten
+  await fileHandle.truncate(0)
+  let offset = 0
+  while (offset < bytes.length) {
+    const result = await fileHandle.write(
+      bytes,
+      offset,
+      bytes.length - offset,
+      offset,
+    )
+    if (result.bytesWritten <= 0) {
+      throw new Error('The lease metadata write made no forward progress.')
     }
-    return true
-  } catch {
-    return false
+    offset += result.bytesWritten
   }
 }
 

@@ -60,6 +60,90 @@ const createProcess = (
 })
 
 describe('recording slot scheduler', () => {
+  it('shares capacity within a run and isolates a later run from live-looking old locks', async () => {
+    await withTempDir(async (tempDir) => {
+      const createScheduler = (runId: string) =>
+        new RecordingSlotScheduler(
+          {
+            globalRecordingLockDir: tempDir,
+            maxGlobalRecordings: 1,
+            recordingStartMode: 'fast-fail',
+            recordingStartTimeoutMs: 25,
+            runId,
+          },
+          noopLogger,
+          { clock: createClock() },
+        )
+      const oldRun = createScheduler('old-run')
+      const sameRun = createScheduler('old-run')
+      const nextRun = createScheduler('next-run')
+      try {
+        await expect(oldRun.acquire()).resolves.toBe(true)
+        await expect(sameRun.acquire()).resolves.toBe(false)
+        await expect(nextRun.acquire()).resolves.toBe(true)
+        expect(oldRun.resolveLockDir()).toBe(sameRun.resolveLockDir())
+        expect(nextRun.resolveLockDir()).not.toBe(oldRun.resolveLockDir())
+        await expect(
+          fs.stat(oldRun.ownedGlobalRecordingSlotPath ?? ''),
+        ).resolves.toBeDefined()
+      } finally {
+        await Promise.all([
+          oldRun.release(),
+          sameRun.release(),
+          nextRun.release(),
+        ])
+      }
+    })
+  })
+
+  it('uses later healthy capacity after an unusable candidate', async () => {
+    await withTempDir(async (tempDir) => {
+      const lockDir = path.join(tempDir, 'test-run')
+      await fs.mkdir(lockDir)
+      await fs.mkdir(path.join(lockDir, 'slot-1.lock'))
+      const scheduler = new RecordingSlotScheduler(
+        {
+          globalRecordingLockDir: tempDir,
+          runId: 'test-run',
+          maxGlobalRecordings: 2,
+        },
+        noopLogger,
+      )
+      try {
+        await expect(scheduler.acquire()).resolves.toBe(true)
+        expect(scheduler.ownedGlobalRecordingSlotPath).toBe(
+          path.join(lockDir, 'slot-2.lock'),
+        )
+      } finally {
+        await scheduler.release()
+      }
+    })
+  })
+
+  it('releases local capacity when creating the global directory fails', async () => {
+    const state = createInProcessRecordingSlotState()
+    const failure = new Error('permission denied')
+    const scheduler = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1, maxGlobalRecordings: 1, runId: 'test-run' },
+      noopLogger,
+      {
+        inProcessState: state,
+        fileSystem: {
+          ...nodeFileSystem,
+          mkdir: async () => {
+            throw failure
+          },
+        },
+      },
+    )
+    await expect(scheduler.acquire()).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+      operation: 'create the global slot directory',
+      cause: failure,
+    })
+    expect(state.activeSlots).toBe(0)
+  })
+
   it('keeps post-processing capacity independent from recording capacity', async () => {
     const recordingState = createInProcessRecordingSlotState()
     const postProcessState = createInProcessRecordingSlotState()
@@ -87,7 +171,7 @@ describe('recording slot scheduler', () => {
     await withTempDir(async (tempDir) => {
       const clock = createClock(100)
       const state = createInProcessRecordingSlotState()
-      const lockDir = path.join(tempDir, 'post-process')
+      const lockDir = path.join(tempDir, 'test-run', 'post-process')
       await fs.mkdir(lockDir, { recursive: true })
       await fs.writeFile(
         path.join(lockDir, 'slot-1.lock'),
@@ -96,6 +180,7 @@ describe('recording slot scheduler', () => {
       const scheduler = new PostProcessSlotScheduler(
         {
           globalRecordingLockDir: tempDir,
+          runId: 'test-run',
           maxConcurrentPostProcesses: 1,
           maxGlobalPostProcesses: 1,
           postProcessStartMode: 'fast-fail',
@@ -201,18 +286,19 @@ describe('recording slot scheduler', () => {
     const explicit = new RecordingSlotScheduler(
       {
         globalRecordingLockDir: 'lock-dir',
+        runId: 'test-run',
         outputDir: 'videos-output',
       },
       noopLogger,
     )
     const fallback = new RecordingSlotScheduler(
-      { outputDir: 'videos-output' },
+      { outputDir: 'videos-output', runId: 'test-run' },
       noopLogger,
     )
 
-    expect(explicit.resolveLockDir()).toBe('lock-dir')
+    expect(explicit.resolveLockDir()).toBe(path.join('lock-dir', 'test-run'))
     expect(fallback.resolveLockDir()).toBe(
-      path.join('videos-output', '.wdio-video-global-slots'),
+      path.join('videos-output', '.wdio-video-global-slots', 'test-run'),
     )
   })
 
@@ -220,14 +306,18 @@ describe('recording slot scheduler', () => {
     await withTempDir(async (tempDir) => {
       const clock = createClock(100)
       const scheduler = new RecordingSlotScheduler(
-        { globalRecordingLockDir: tempDir, maxGlobalRecordings: 1 },
+        {
+          globalRecordingLockDir: tempDir,
+          maxGlobalRecordings: 1,
+          runId: 'test-run',
+        },
         noopLogger,
         { clock, process: createProcess() },
       )
 
       await expect(scheduler.acquire()).resolves.toBe(true)
       const slotPath = scheduler.ownedGlobalRecordingSlotPath
-      expect(slotPath).toBe(path.join(tempDir, 'slot-1.lock'))
+      expect(slotPath).toBe(path.join(tempDir, 'test-run', 'slot-1.lock'))
       const metadata = JSON.parse(
         await fs.readFile(slotPath ?? '', 'utf8'),
       ) as Record<string, unknown>
@@ -274,9 +364,11 @@ describe('recording slot scheduler', () => {
       },
     )
 
-    await expect(scheduler.openOwnedGlobalSlot('slot.lock')).resolves.toBe(
-      false,
-    )
+    await expect(
+      scheduler.openOwnedGlobalSlot('slot.lock'),
+    ).rejects.toMatchObject({
+      name: 'OwnedFileLeaseOperationalError',
+    })
     expect(close).toHaveBeenCalledOnce()
     expect(unlink).toHaveBeenCalledWith('slot.lock')
     expect(scheduler.ownsGlobalRecordingSlot).toBe(false)
@@ -313,7 +405,11 @@ describe('recording slot scheduler', () => {
   it('does not remove a replacement lock when an old owner releases', async () => {
     await withTempDir(async (tempDir) => {
       const scheduler = new RecordingSlotScheduler(
-        { globalRecordingLockDir: tempDir, maxGlobalRecordings: 1 },
+        {
+          globalRecordingLockDir: tempDir,
+          maxGlobalRecordings: 1,
+          runId: 'test-run',
+        },
         noopLogger,
         { clock: createClock(100), process: createProcess() },
       )
@@ -359,13 +455,33 @@ describe('recording slot scheduler', () => {
     await expect(scheduler.release()).resolves.toBeUndefined()
   })
 
-  it('falls back from global acquisition and releases its in-process slot', async () => {
+  it('diagnoses missing launcher context separately from unsafe run identities', async () => {
+    const state = createInProcessRecordingSlotState()
+    const scheduler = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1, maxGlobalRecordings: 1 },
+      noopLogger,
+      { inProcessState: state },
+    )
+    await expect(scheduler.acquire()).rejects.toThrow(
+      "services: [['puppeteer-video', options]]",
+    )
+    expect(state.activeSlots).toBe(0)
+    expect(() =>
+      new RecordingSlotScheduler(
+        { runId: '../unsafe' },
+        noopLogger,
+      ).resolveLockDir(),
+    ).toThrow('unsafe')
+  })
+
+  it('surfaces global I/O failure and releases its in-process slot', async () => {
     const state = createInProcessRecordingSlotState()
     const clock = createClock()
     const scheduler = new RecordingSlotScheduler(
       {
         maxConcurrentRecordings: 1,
         maxGlobalRecordings: 1,
+        runId: 'test-run',
         recordingStartMode: 'fast-fail',
         recordingStartTimeoutMs: 0,
       },
@@ -385,7 +501,7 @@ describe('recording slot scheduler', () => {
       },
     )
 
-    await expect(scheduler.acquire()).resolves.toBe(false)
+    await expect(scheduler.acquire()).rejects.toBeInstanceOf(AggregateError)
     expect(state.activeSlots).toBe(0)
     expect(scheduler.ownsRecordingSlot).toBe(false)
   })

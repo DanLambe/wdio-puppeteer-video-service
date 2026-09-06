@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type FileSystemBoundary,
   nodeFileSystem,
@@ -52,6 +52,7 @@ describe('MediaPipeline', () => {
   const tempDirs: string[] = []
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     await Promise.all(
       tempDirs.map((tempDir) =>
         fs.rm(tempDir, { recursive: true, force: true }).catch(() => {
@@ -462,6 +463,70 @@ describe('MediaPipeline', () => {
     await expect(fs.stat(outputPath)).rejects.toThrow()
     await expect(fs.stat(mergedPath)).rejects.toThrow()
   })
+
+  it.each(['EPERM', 'EACCES', 'EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])(
+    'preserves transcode and merge inputs with actionable diagnostics when hard links fail: %s',
+    async (code) => {
+      const tempDir = await createTempDir(tempDirs)
+      const sources = [
+        path.join(tempDir, 'recording ü 1.webm'),
+        path.join(tempDir, 'recording ü 2.webm'),
+      ]
+      await Promise.all(
+        sources.map((source) => fs.writeFile(source, 'source-media')),
+      )
+      const harness = createHarness(tempDir)
+      const link = vi
+        .spyOn(fs, 'link')
+        .mockRejectedValue(Object.assign(new Error('link denied'), { code }))
+      const rename = vi.spyOn(fs, 'rename')
+      harness.runtime.runHandler = async (args, operation) => {
+        if (!operation.endsWith('validation')) {
+          await fs.writeFile(args.at(-1) ?? '', 'processed-media')
+        }
+        return true
+      }
+
+      await expect(
+        harness.pipeline.transcode({
+          inputPath: sources[0] ?? '',
+          outputPath: path.join(tempDir, 'final.mp4'),
+          deleteOriginal: true,
+        }),
+      ).resolves.toBeUndefined()
+      await expect(
+        harness.pipeline.merge(
+          createMergeRequest(sources, path.join(tempDir, 'merged.webm'), true),
+        ),
+      ).resolves.toBeUndefined()
+
+      expect(link).toHaveBeenCalledTimes(2)
+      expect(rename).not.toHaveBeenCalled()
+      expect(
+        harness.runtime.operations.map(({ operation }) => operation),
+      ).toEqual([
+        'transcode',
+        'transcode validation',
+        'segment merge',
+        'segment merge validation',
+      ])
+      for (const source of sources) {
+        await expect(fs.readFile(source, 'utf8')).resolves.toBe('source-media')
+      }
+      expect((await fs.readdir(tempDir)).sort()).toEqual(
+        sources.map((source) => path.basename(source)).sort(),
+      )
+      const warnings = harness.logEntries.filter(({ message }) =>
+        message.includes('Failed to publish artifact'),
+      )
+      expect(warnings).toHaveLength(2)
+      for (const { message } of warnings) {
+        expect(message).toContain(code)
+        expect(message).toContain('hard links')
+        expect(message).toContain('outputDir')
+      }
+    },
+  )
 
   it('warns for warn policy and throws for error policy without duplicate logging', async () => {
     const tempDir = await createTempDir(tempDirs)

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -89,7 +90,7 @@ const createRun = (
     service: '1.0.0-rc.1',
     node: 'v24.0.0',
     webdriverio: '9.29.1',
-    puppeteer: '25.3.0',
+    puppeteer: '24.11.2',
   },
   entries,
 })
@@ -200,6 +201,23 @@ describe('report model and HTML renderer', () => {
     expect(renderStaticVideoReport(model)).toBe(first)
     expect(first).toContain('boom\ntrace-only')
     expect(first).toContain('2.0 MiB')
-    expect(first).toMatch(/nonce-[a-f0-9]{32}/u)
+
+    // The policy has to hash what the report actually ships, so recompute both
+    // digests from the emitted blocks: any drift between the constants and the
+    // markup, or any later edit to either block, stops them from matching and
+    // the browser would refuse to run the report.
+    const script = /<script>([\s\S]*?)<\/script>/u.exec(first)?.[1]
+    const styles = /<style>([\s\S]*?)<\/style>/u.exec(first)?.[1]
+    expect(script).toBeDefined()
+    expect(styles).toBeDefined()
+    expect(first).toContain(`script-src '${digestOf(script as string)}'`)
+    expect(first).toContain(`style-src '${digestOf(styles as string)}'`)
+    // A nonce that is reproducible is not a nonce, and `frame-ancestors` is
+    // ignored in a meta policy, so neither belongs in a static report.
+    expect(first).not.toContain('nonce')
+    expect(first).not.toContain('frame-ancestors')
   })
 })
+
+const digestOf = (content: string): string =>
+  `sha256-${createHash('sha256').update(content, 'utf8').digest('base64')}`

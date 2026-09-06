@@ -447,22 +447,11 @@ const assertGlobalConcurrencyMode = async (
     )
   }
 
-  const lockEntries = await readdir(globalRecordingLockDir).catch(() => [])
+  const lockEntries = await readdir(globalRecordingLockDir, { recursive: true })
   const leakedLocks = lockEntries.filter((entry) => entry.endsWith('.lock'))
   if (leakedLocks.length > 0) {
     throw new Error(
-      `[wdio:e2e:advanced] global-concurrency mode leaked recording locks: ${leakedLocks.join(', ')}`,
-    )
-  }
-  const postProcessLockEntries = await readdir(
-    path.join(globalRecordingLockDir, 'post-process'),
-  ).catch(() => [])
-  const leakedPostProcessLocks = postProcessLockEntries.filter((entry) =>
-    entry.endsWith('.lock'),
-  )
-  if (leakedPostProcessLocks.length > 0) {
-    throw new Error(
-      `[wdio:e2e:advanced] global-concurrency mode leaked post-processing locks: ${leakedPostProcessLocks.join(', ')}`,
+      `[wdio:e2e:advanced] global-concurrency mode leaked worker locks: ${leakedLocks.join(', ')}`,
     )
   }
 }

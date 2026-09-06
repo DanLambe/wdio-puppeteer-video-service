@@ -19,7 +19,7 @@ const createManifest = (): VideoManifestV1 => ({
         service: '1.0.0',
         node: 'v24.15.0',
         webdriverio: '9.29.1',
-        puppeteer: '25.3.0',
+        puppeteer: '24.11.2',
         ffmpeg: '7.1.1',
       },
       entries: [

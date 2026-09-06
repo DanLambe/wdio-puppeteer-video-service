@@ -17,6 +17,12 @@ interface PackageMetadata {
   version?: unknown
 }
 
+interface PackageSourceMap {
+  sourceRoot?: unknown
+  sources?: unknown
+  sourcesContent?: unknown
+}
+
 const EXPECTED_EXPORTS = new Map([
   ['.', ['./build/index.d.ts', './build/index.js']],
   ['./manifest', ['./build/manifest.d.ts', './build/manifest.js']],
@@ -189,7 +195,6 @@ const assertPackedFiles = async (packageRoot: string): Promise<void> => {
     'LICENSE',
     'MIGRATION.md',
     'README.md',
-    'RELEASING.md',
     'SUPPORT.md',
     'TROUBLESHOOTING.md',
   ]) {
@@ -203,6 +208,129 @@ const assertPackedFiles = async (packageRoot: string): Promise<void> => {
   if (rawTypeScript.length > 0) {
     throw new Error(`Packed raw TypeScript files: ${rawTypeScript.join(', ')}`)
   }
+  await assertPackedSourceMaps(packageRoot, sourceFiles)
+}
+
+export const assertPackedSourceMaps = async (
+  packageRoot: string,
+  packageFiles?: readonly string[],
+): Promise<void> => {
+  const files = packageFiles ?? (await listFiles(packageRoot))
+  const declarationMaps = files.filter((fileName) =>
+    fileName.endsWith('.d.ts.map'),
+  )
+  if (declarationMaps.length > 0) {
+    throw new Error(
+      `Packed declaration maps reference unpublished sources: ${declarationMaps.join(', ')}`,
+    )
+  }
+
+  for (const mapPath of files.filter((fileName) => fileName.endsWith('.map'))) {
+    await assertPackedSourceMap(packageRoot, mapPath)
+  }
+}
+
+const assertPackedSourceMap = async (
+  packageRoot: string,
+  mapPath: string,
+): Promise<void> => {
+  const sourceMap = parseSourceMap(await fs.readFile(mapPath, 'utf8'), mapPath)
+  const sourceRoot = readSourceRoot(sourceMap, mapPath)
+  const sources = readMapSources(sourceMap, mapPath)
+  const sourcesContent = readSourcesContent(sourceMap, mapPath)
+  for (const [index, source] of sources.entries()) {
+    if (typeof sourcesContent[index] !== 'string') {
+      await assertSourceIsPackaged(packageRoot, mapPath, sourceRoot, source)
+    }
+  }
+}
+
+const assertSourceIsPackaged = async (
+  packageRoot: string,
+  mapPath: string,
+  sourceRoot: string,
+  source: string,
+): Promise<void> => {
+  const resolvedSource = path.resolve(path.dirname(mapPath), sourceRoot, source)
+  if (isPathInside(packageRoot, resolvedSource)) {
+    try {
+      await fs.access(resolvedSource)
+      return
+    } catch {
+      // Use the shared missing-source diagnostic below.
+    }
+  }
+  throw new Error(
+    `Packed source map source is neither embedded nor packaged: ${source} in ${mapPath}`,
+  )
+}
+
+const parseSourceMap = (
+  contents: string,
+  mapPath: string,
+): PackageSourceMap => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(contents) as unknown
+  } catch (error) {
+    throw new Error(`Packed source map is not valid JSON: ${mapPath}`, {
+      cause: error,
+    })
+  }
+  if (!isRecord(parsed)) {
+    throw new TypeError(`Packed source map must be an object: ${mapPath}`)
+  }
+  return parsed
+}
+
+const readSourceRoot = (
+  sourceMap: PackageSourceMap,
+  mapPath: string,
+): string => {
+  if (sourceMap.sourceRoot === undefined) {
+    return ''
+  }
+  if (typeof sourceMap.sourceRoot !== 'string') {
+    throw new TypeError(`Invalid sourceRoot in packed source map: ${mapPath}`)
+  }
+  return sourceMap.sourceRoot
+}
+
+const readMapSources = (
+  sourceMap: PackageSourceMap,
+  mapPath: string,
+): string[] => {
+  if (
+    !Array.isArray(sourceMap.sources) ||
+    sourceMap.sources.some((source) => typeof source !== 'string')
+  ) {
+    throw new TypeError(`Invalid sources in packed source map: ${mapPath}`)
+  }
+  return sourceMap.sources
+}
+
+const readSourcesContent = (
+  sourceMap: PackageSourceMap,
+  mapPath: string,
+): readonly unknown[] => {
+  if (sourceMap.sourcesContent === undefined) {
+    return []
+  }
+  if (!Array.isArray(sourceMap.sourcesContent)) {
+    throw new TypeError(
+      `Invalid sourcesContent in packed source map: ${mapPath}`,
+    )
+  }
+  return sourceMap.sourcesContent
+}
+
+const isPathInside = (root: string, candidate: string): boolean => {
+  const relative = path.relative(root, candidate)
+  return (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  )
 }
 
 const listFiles = async (directory: string): Promise<string[]> => {

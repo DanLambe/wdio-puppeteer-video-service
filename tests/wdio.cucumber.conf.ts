@@ -8,12 +8,47 @@ import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
+type CucumberRetryMode = 'all' | 'retries'
+const retryMode = process.env.WDIO_CUCUMBER_RETRY_MODE as
+  | CucumberRetryMode
+  | undefined
+const duplicateNameMode = process.env.WDIO_CUCUMBER_DUPLICATE_NAMES === '1'
+const resolveDefaultResultsDirName = (): string => {
+  if (retryMode) {
+    return `cucumber-retry-${retryMode}`
+  }
+  if (duplicateNameMode) {
+    return 'cucumber-duplicate-names'
+  }
+  return 'cucumber'
+}
 const resultsDir = path.resolve(
-  process.env.WDIO_RESULTS_DIR || path.join('tests/results', 'cucumber'),
+  process.env.WDIO_RESULTS_DIR ||
+    path.join('tests/results', resolveDefaultResultsDirName()),
 )
-const expectedScenarioTitles = [
-  'cucumber style should keep scenario name in video filename',
-]
+const resolveExpectedScenarioTitles = (): string[] => {
+  if (retryMode) {
+    return ['cucumber style should record the retried scenario attempt']
+  }
+  if (duplicateNameMode) {
+    return [
+      'cucumber style should record each same-named scenario',
+      'cucumber style should record each outline row',
+    ]
+  }
+  return ['cucumber style should keep scenario name in video filename']
+}
+const expectedScenarioTitles = resolveExpectedScenarioTitles()
+const resolveFeatureFile = (): string => {
+  if (retryMode) {
+    return 'scenario-retry.feature'
+  }
+  if (duplicateNameMode) {
+    return 'duplicate-scenario-names.feature'
+  }
+  return 'video-naming.feature'
+}
+const featureFile = resolveFeatureFile()
 type CucumberFilterMode = 'include-tag' | 'exclude-tag'
 const filterMode = process.env.WDIO_CUCUMBER_FILTER_MODE as
   | CucumberFilterMode
@@ -40,7 +75,7 @@ export const config: WebdriverIO.Config = {
   runner: 'local',
   baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
-  specs: [path.resolve('tests/cucumber/features/**/*.feature')],
+  specs: [path.resolve('tests/cucumber/features', featureFile)],
   maxInstances: 1,
   capabilities: [
     {
@@ -66,7 +101,9 @@ export const config: WebdriverIO.Config = {
       {
         outputDir: resultsDir,
         recording: {
-          retain: 'all',
+          ...(retryMode
+            ? { attempts: retryMode, retain: 'retries' as const }
+            : { retain: 'all' as const }),
           filters: serviceFilterOptions,
         },
         capture: {
@@ -102,6 +139,8 @@ export const config: WebdriverIO.Config = {
   cucumberOpts: {
     require: [path.resolve('tests/cucumber/steps/**/*.ts')],
     timeout: 60000,
+    // Cucumber retries the scenario in-process and reuses its pickle id.
+    ...(retryMode ? { retry: 1 } : {}),
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)
@@ -114,7 +153,9 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos,
       fileNameStyle: 'test',
       expectedCodec: 'h264',
-      runLabel: filterMode ? `advanced-${filterMode}` : 'cucumber',
+      runLabel: filterMode
+        ? `advanced-${filterMode}`
+        : resolveDefaultResultsDirName(),
     })
   },
 }

@@ -7,20 +7,23 @@ import {
   type VideoManifestV1,
   validateVideoManifest,
 } from '../manifest.js'
-import { systemClock } from './boundaries.js'
+import { nodeProcess, systemClock } from './boundaries.js'
 import type { ManifestRunContext } from './manifest-context.js'
 import {
   getManifestRunDirectory,
   MANIFEST_WORK_DIRECTORY,
 } from './manifest-journal.js'
-import { tryAcquireOwnedFileLease } from './owned-file-lease.js'
+import {
+  isTransientLeaseFileError,
+  type OwnedFileLease,
+  tryAcquireOwnedFileLease,
+} from './owned-file-lease.js'
 
 const MANIFEST_FILE_NAME = 'manifest.json'
 const MANIFEST_LOCK_FILE_NAME = '.wdio-video-manifest.lock'
 const MANIFEST_LOCK_TIMEOUT_MS = 30_000
 const MANIFEST_LOCK_STALE_MS = 120_000
 const MANIFEST_LOCK_POLL_MS = 25
-const MANIFEST_LOCK_HEARTBEAT_MS = 1_000
 const ignoreFileError = (): undefined => undefined
 
 export const persistManifestRun = async (
@@ -109,19 +112,38 @@ const acquireManifestLock = async (
   await fs.mkdir(outputDir, { recursive: true })
   const lockPath = path.join(outputDir, MANIFEST_LOCK_FILE_NAME)
   const deadline = systemClock.now() + MANIFEST_LOCK_TIMEOUT_MS
+  let transientFailure: unknown
   while (systemClock.now() < deadline) {
-    const lease = await tryAcquireOwnedFileLease({
-      filePath: lockPath,
-      heartbeatIntervalMs: MANIFEST_LOCK_HEARTBEAT_MS,
-      invalidStaleMs: MANIFEST_LOCK_STALE_MS,
-      payload: { resource: 'manifest-aggregation' },
-    })
+    let lease: OwnedFileLease | undefined
+    try {
+      lease = await tryAcquireOwnedFileLease({
+        filePath: lockPath,
+        invalidStaleMs: MANIFEST_LOCK_STALE_MS,
+        payload: { resource: 'manifest-aggregation' },
+      })
+      transientFailure = undefined
+    } catch (error) {
+      // A sharing violation or descriptor shortage is contention, not a fault.
+      // Losing the whole run's manifest and report to one of them would be a
+      // far worse outcome than waiting out the existing deadline.
+      if (!isTransientLeaseFileError(error, nodeProcess.platform)) {
+        throw error
+      }
+      transientFailure = error
+    }
     if (lease) {
+      const acquired = lease
       return async () => {
-        await lease.release()
+        await acquired.release()
       }
     }
     await systemClock.delay(MANIFEST_LOCK_POLL_MS)
+  }
+  if (transientFailure !== undefined) {
+    throw new Error(
+      `Timed out waiting for manifest lock after repeated transient filesystem failures: ${lockPath}`,
+      { cause: transientFailure },
+    )
   }
   throw new Error(`Timed out waiting for manifest lock: ${lockPath}`)
 }

@@ -1,5 +1,8 @@
+import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
@@ -61,6 +64,21 @@ const runWdio = async (
   await waitForChildProcess(child, (code) => {
     return `[e2e:modes] ${mode} run failed with code ${code}`
   })
+  if (mode === 'multipart') {
+    const manifest: unknown = JSON.parse(
+      await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+    )
+    assert.ok(isVideoManifest(manifest))
+    const frameEntry = manifest.runs
+      .flatMap((run) => run.entries)
+      .find(
+        (entry) => entry.test?.name === 'should handle a cross-origin iframe',
+      )
+    assert.ok(
+      frameEntry && frameEntry.capture.segments.length >= 2,
+      'Expected iframe-to-window recording segments without page-lookup skips',
+    )
+  }
   await assertStaticVideoReport({
     resultsDir,
     expectedTitles: expectedTestTitles,

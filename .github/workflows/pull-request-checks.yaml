@@ -68,7 +68,61 @@ jobs:
         run: corepack npm audit signatures
 
       - name: Rebuild E2E Binary Dependencies
-        run: corepack npm rebuild esbuild ffmpeg-static edgedriver geckodriver
+        run: corepack npm rebuild esbuild ffmpeg-static edgedriver
 
       - name: Run E2E Tests
         run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced
+
+      - name: Verify Retained Media Dimensions
+        run: corepack npm run test:e2e:capture:metadata
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-pr-e2e
+
+  windows-advanced:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Verify npm Signatures
+        run: corepack npm audit signatures
+
+      - name: Rebuild Browser Test Dependencies
+        run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Verify Windows Ownership And Process Cleanup
+        run: >-
+          corepack npm run test:unit -- tests/unit/artifact-integrity.unit.test.ts
+          tests/unit/owned-file-lease.unit.test.ts
+          tests/unit/recording-slot-retry.unit.test.ts
+          tests/unit/media-pipeline.unit.test.ts
+          tests/unit/process-supervisor.unit.test.ts
+          tests/unit/worker-runtime.unit.test.ts
+
+      - name: Verify Real Windows Process Tree Termination
+        run: corepack npm run test:integration:windows-process
+
+      - name: Run Bounded Windows Advanced Tests
+        run: corepack npm run test:e2e:advanced:windows
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-browser-diagnostics
+        with:
+          name: diagnostics-pr-windows-advanced

@@ -10,6 +10,7 @@ import type {
   VideoManifestV1,
 } from '../../src/manifest.js'
 import { isVideoManifest } from '../../src/manifest.js'
+import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
@@ -21,6 +22,7 @@ import {
   normalizeManifestPath,
   readManifestRunContext,
 } from '../../src/service/manifest-runtime.js'
+import type { MediaDimensions } from '../../src/service/media-metadata.js'
 
 const tempDirs: string[] = []
 
@@ -36,14 +38,23 @@ const createRecorder = async (
   framework: 'mocha' | 'jasmine' | 'cucumber' | 'unknown' = 'mocha',
 ) => {
   const context = await createManifestRunContext(outputDir)
-  const recorder = new ManifestWorkerRecorder({ context, cid, framework })
+  const readDimensions = vi.fn(
+    async (_filePath: string): Promise<MediaDimensions | undefined> =>
+      undefined,
+  )
+  const recorder = new ManifestWorkerRecorder({
+    context,
+    cid,
+    framework,
+    readDimensions,
+  })
   recorder.configureSession({
     sessionId: 'raw-private-session-id',
     browserName: 'chrome',
     browserVersion: '140.0.0',
     protocol: 'bidi+cdp',
   })
-  return { context, recorder }
+  return { context, recorder, readDimensions }
 }
 
 const journalDir = (outputDir: string, runId: string): string => {
@@ -84,6 +95,19 @@ afterEach(async () => {
 })
 
 describe('manifest runtime', () => {
+  it.each(['', '..', '../escape', 'nested/run', 'C:\\escape', 'run.'])(
+    'rejects unsafe manifest run ID %j before creating directories',
+    async (runId) => {
+      const outputDir = await createTempDir()
+      const mkdir = vi.spyOn(fs, 'mkdir')
+      await expect(createManifestRunContext(outputDir, runId)).rejects.toThrow(
+        'unsafe',
+      )
+      expect(mkdir).not.toHaveBeenCalled()
+      expect(await fs.readdir(outputDir)).toEqual([])
+    },
+  )
+
   it('warns and recovers when a journal append fails', async () => {
     const outputDir = await createTempDir()
     const context = await createManifestRunContext(outputDir)
@@ -203,7 +227,9 @@ describe('manifest runtime', () => {
     const artifactPath = path.join(outputDir, 'nested', 'recording.webm')
     await fs.mkdir(path.dirname(artifactPath), { recursive: true })
     await fs.writeFile(artifactPath, Buffer.alloc(64))
-    const { context, recorder } = await createRecorder(outputDir)
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    readDimensions.mockResolvedValue({ width: 640, height: 360 })
 
     await recorder.beginEntity({
       test: {
@@ -216,7 +242,7 @@ describe('manifest runtime', () => {
       specPaths: [],
     })
     expect(recorder.currentEntryId).toBeTypeOf('string')
-    recorder.markCaptureStarted({ width: 640, height: 360 })
+    recorder.markCaptureStarted()
     recorder.updateProtocol('classic+cdp')
     await recorder.recordResult('passed')
     await recorder.noteFfmpegVersion('7.1.1')
@@ -232,6 +258,7 @@ describe('manifest runtime', () => {
 
     const manifest = await aggregateManifestRun(context, 0)
     const entry = firstEntry(manifest)
+    expect(readDimensions).toHaveBeenCalledExactlyOnceWith(artifactPath)
     expect(isVideoManifest(manifest)).toBe(true)
     expect(firstRun(manifest).tools.ffmpeg).toBe('7.1.1')
     expect(entry).toMatchObject({
@@ -272,6 +299,113 @@ describe('manifest runtime', () => {
     expect(entry.sessionHash).not.toContain('raw-private-session-id')
     expect(JSON.stringify(manifest)).not.toContain('raw-private-session-id')
     expect(entry.timings.durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('measures distinct retained segments independently and omits unavailable metadata', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    const files = [
+      'first.webm',
+      'second.mp4',
+      'unknown.webm',
+      'empty.webm',
+      'missing.webm',
+    ]
+    await Promise.all(
+      files
+        .slice(0, 4)
+        .map((file) =>
+          fs.writeFile(
+            path.join(outputDir, file),
+            file === 'empty.webm' ? '' : 'media',
+          ),
+        ),
+    )
+    readDimensions.mockImplementation(async (file) => {
+      if (file.endsWith('first.webm')) {
+        return { width: 801, height: 401 }
+      }
+      if (file.endsWith('second.mp4')) {
+        return { width: 402, height: 202 }
+      }
+      return undefined
+    })
+    await recorder.beginEntity({ scope: 'test', specPaths: ['test.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'failed',
+      paths: files,
+    })
+
+    const entry = firstEntry(await aggregateManifestRun(context, 0))
+    expect(readDimensions).toHaveBeenCalledTimes(3)
+    expect(entry.capture.final).toBeUndefined()
+    expect(entry.capture.segments).toEqual([
+      {
+        path: 'first.webm',
+        mimeType: 'video/webm',
+        size: 5,
+        width: 801,
+        height: 401,
+      },
+      {
+        path: 'second.mp4',
+        mimeType: 'video/mp4',
+        size: 5,
+        width: 402,
+        height: 202,
+      },
+      { path: 'unknown.webm', mimeType: 'video/webm', size: 5 },
+      { path: 'empty.webm', mimeType: 'video/webm', size: 0 },
+      { path: 'missing.webm', mimeType: 'video/webm', size: 0 },
+    ])
+  })
+
+  it('probes only finalized deferred media, not pending or discarded recordings', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder, readDimensions } =
+      await createRecorder(outputDir)
+    await fs.writeFile(path.join(outputDir, 'input.webm'), 'source')
+    await fs.writeFile(path.join(outputDir, 'final.mp4'), 'output')
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['deferred.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'failed',
+      paths: ['input.webm'],
+      processingOutcome: 'pending',
+    })
+    expect(readDimensions).not.toHaveBeenCalled()
+    const pending = firstEntry(await aggregateManifestRun(context, 0))
+    expect(pending.capture.segments[0]).not.toHaveProperty('width')
+    expect(pending.capture.final).toBeUndefined()
+
+    readDimensions.mockResolvedValue({ width: 802, height: 402 })
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: ['final.mp4'],
+      processingOutcome: 'completed',
+    })
+    expect(readDimensions).toHaveBeenCalledExactlyOnceWith(
+      path.join(outputDir, 'final.mp4'),
+    )
+    const completed = firstEntry(await aggregateManifestRun(context, 0))
+    expect(completed.capture.final).toMatchObject({
+      path: 'final.mp4',
+      width: 802,
+      height: 402,
+    })
+
+    await recorder.beginEntity({ scope: 'test', specPaths: ['discarded.ts'] })
+    await recorder.completeCurrent({
+      decision: 'discarded',
+      result: 'passed',
+      paths: [],
+    })
+    expect(readDimensions).toHaveBeenCalledOnce()
   })
 
   it('preserves a checkpoint when a worker is killed before finalization', async () => {
@@ -438,7 +572,7 @@ describe('manifest runtime', () => {
       result: 'unknown',
     })
     await recorder.recordResult('passed')
-    recorder.markCaptureStarted({ width: 1, height: 1 })
+    recorder.markCaptureStarted()
     recorder.setCurrentAttempt(4)
     await expect(
       recorder.completeCurrent({ decision: 'failed', result: 'failed' }),
@@ -685,15 +819,85 @@ describe('manifest runtime', () => {
       }),
       'utf8',
     )
-    const releaseTimer = setTimeout(() => {
-      void fs.unlink(lockPath)
-    }, 50)
-    try {
+    // Release between acquisition attempts, not concurrently with Windows I/O.
+    // Await the release so failures belong to this test, not an unhandled timer.
+    const delay = vi
+      .spyOn(systemClock, 'delay')
+      .mockImplementationOnce(async () => {
+        const owner = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+          pid: number
+        }
+        expect(owner.pid).toBe(process.pid)
+        await fs.unlink(lockPath)
+      })
+    const manifest = await aggregateManifestRun(context, 0)
+    expect(firstRun(manifest).id).toBe(context.runId)
+    expect(delay).toHaveBeenCalledOnce()
+  })
+
+  it.each(['EBUSY', 'EAGAIN', 'EMFILE', 'ENFILE', 'EPERM'])(
+    'polls through a transient %s while opening the manifest lock',
+    async (code) => {
+      if (code === 'EPERM' && process.platform !== 'win32') {
+        // A sharing violation is a Windows condition; EPERM is permanent here.
+        return
+      }
+      const outputDir = await createTempDir()
+      const context = await createManifestRunContext(outputDir)
+      const openExclusive = vi
+        .spyOn(nodeFileSystem, 'openExclusive')
+        .mockRejectedValueOnce(
+          Object.assign(new Error(`${code}: refused`), { code }),
+        )
+
       const manifest = await aggregateManifestRun(context, 0)
+
       expect(firstRun(manifest).id).toBe(context.runId)
-    } finally {
-      clearTimeout(releaseTimer)
-    }
+      expect(openExclusive.mock.calls.length).toBeGreaterThan(1)
+      await expect(
+        fs.stat(path.join(outputDir, '.wdio-video-manifest.lock')),
+      ).rejects.toThrow()
+    },
+  )
+
+  it.each(['EACCES', 'ENOSPC', 'EROFS'])(
+    'fails closed on a %s manifest lock failure instead of polling',
+    async (code) => {
+      const outputDir = await createTempDir()
+      const context = await createManifestRunContext(outputDir)
+      const failure = Object.assign(new Error(`${code}: refused`), { code })
+      vi.spyOn(nodeFileSystem, 'openExclusive').mockRejectedValue(failure)
+      const delay = vi.spyOn(systemClock, 'delay')
+
+      await expect(aggregateManifestRun(context, 0)).rejects.toMatchObject({
+        cause: failure,
+      })
+      expect(delay).not.toHaveBeenCalled()
+      await expect(
+        fs.stat(path.join(outputDir, 'manifest.json')),
+      ).rejects.toThrow()
+    },
+  )
+
+  it('reports the last transient failure when the lock deadline expires', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const failure = Object.assign(new Error('EBUSY: refused'), {
+      code: 'EBUSY',
+    })
+    vi.spyOn(nodeFileSystem, 'openExclusive').mockRejectedValue(failure)
+    let elapsed = 0
+    vi.spyOn(systemClock, 'now').mockImplementation(() => elapsed)
+    vi.spyOn(systemClock, 'delay').mockImplementation(async () => {
+      elapsed += 30_000
+    })
+
+    await expect(aggregateManifestRun(context, 0)).rejects.toMatchObject({
+      cause: { cause: failure },
+      message: expect.stringContaining(
+        'repeated transient filesystem failures',
+      ),
+    })
   })
 
   it('recovers a stale lock and refuses to overwrite an invalid manifest', async () => {

@@ -66,6 +66,7 @@ export const createReportModel = async (options: {
     ),
   )
   const matchedEntries = new Set<string>()
+  const scenarioAssignments = new Map<string, string>()
   const entries = options.run?.entries ?? []
   const outcomes = options.fragments.flatMap((fragment) => fragment.outcomes)
   const items = outcomes.map((outcome) =>
@@ -75,6 +76,7 @@ export const createReportModel = async (options: {
       hasManifest: options.run !== undefined,
       matchedEntries,
       outcome,
+      scenarioAssignments,
     }),
   )
   const unmatchedEntries = entries.filter(
@@ -99,11 +101,13 @@ const createOutcomeReportItem = (options: {
   readonly hasManifest: boolean
   readonly matchedEntries: Set<string>
   readonly outcome: ReporterTestOutcome
+  readonly scenarioAssignments: Map<string, string>
 }): ReportItem => {
   const entry = findManifestEntry(
     options.entries,
     options.outcome,
     options.matchedEntries,
+    options.scenarioAssignments,
   )
   if (entry) {
     options.matchedEntries.add(entry.id)
@@ -127,6 +131,7 @@ const findManifestEntry = (
   entries: ManifestEntryV1[],
   outcome: ReporterTestOutcome,
   matchedEntries: ReadonlySet<string>,
+  scenarioAssignments: Map<string, string>,
 ): ManifestEntryV1 | undefined => {
   const candidates = entries.filter((entry) => {
     return (
@@ -146,14 +151,75 @@ const findManifestEntry = (
   })
   const containerName = outcome.test.containerName
   const scenario = containerName
-    ? candidates.find((entry) => {
-        return (
-          entry.scope === 'test' &&
-          containerIdentityMatches(entry, containerName)
-        )
+    ? resolveScenarioEntry({
+        candidates,
+        containerName,
+        matchedEntries,
+        outcome,
+        scenarioAssignments,
       })
     : undefined
   return scenario ?? exact ?? candidates.find((entry) => entry.scope === 'spec')
+}
+
+/**
+ * Cucumber emits one outcome per step, so every step of a scenario must resolve
+ * to the same manifest entry while distinct scenarios that share a title claim
+ * different entries. The first step of a scenario claims the next unmatched
+ * same-titled entry and later steps reuse that assignment; excluding matched
+ * entries alone would push a scenario's later steps onto the next entry.
+ */
+const resolveScenarioEntry = (input: {
+  readonly candidates: ManifestEntryV1[]
+  readonly containerName: string
+  readonly matchedEntries: ReadonlySet<string>
+  readonly outcome: ReporterTestOutcome
+  readonly scenarioAssignments: Map<string, string>
+}): ManifestEntryV1 | undefined => {
+  const assignmentKey = buildScenarioAssignmentKey(
+    input.outcome,
+    input.containerName,
+  )
+  const assignedEntryId = input.scenarioAssignments.get(assignmentKey)
+  if (assignedEntryId !== undefined) {
+    const assigned = input.candidates.find(
+      (entry) => entry.id === assignedEntryId,
+    )
+    if (assigned) {
+      return assigned
+    }
+  }
+
+  const claimed = input.candidates.find((entry) => {
+    return (
+      entry.scope === 'test' &&
+      !input.matchedEntries.has(entry.id) &&
+      containerIdentityMatches(entry, input.containerName)
+    )
+  })
+  if (claimed) {
+    input.scenarioAssignments.set(assignmentKey, claimed.id)
+  }
+  return claimed
+}
+
+/**
+ * Cucumber's step payload carries the scenario's id as `test.parent`, which
+ * stays stable across a scenario's steps and differs between scenarios,
+ * including expanded Scenario Outline rows.
+ */
+const buildScenarioAssignmentKey = (
+  outcome: ReporterTestOutcome,
+  containerName: string,
+): string => {
+  return [
+    outcome.runId,
+    outcome.cid,
+    normalizePathForComparison(outcome.spec),
+    outcome.attempt.toString(),
+    outcome.test.parent ?? '',
+    normalizeIdentity(containerName),
+  ].join('\0')
 }
 
 const testIdentityMatches = (

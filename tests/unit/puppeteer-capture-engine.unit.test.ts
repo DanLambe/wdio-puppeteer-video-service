@@ -287,7 +287,6 @@ describe('Puppeteer capture engine', () => {
     const harness = createHarness()
 
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
-      dimensions: { height: 600, width: 800 },
       started: true,
     })
     harness.recorder.write('recorded-bytes')
@@ -301,7 +300,36 @@ describe('Puppeteer capture engine', () => {
     )
   })
 
-  it('supports unknown dimensions, frame priming, and viewport restore diagnostics', async () => {
+  it('clears and unreferences stream timeouts after clean completion', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const timers: Array<{ unref: ReturnType<typeof vi.fn> }> = []
+    const clearTimeout = vi.fn()
+    const clock: ClockBoundary = {
+      ...systemClock,
+      clearTimeout,
+      setTimeout: vi.fn(() => {
+        const timer = { unref: vi.fn() }
+        timers.push(timer)
+        return timer as unknown as NodeJS.Timeout
+      }),
+    }
+    const harness = createHarness({ clock })
+
+    await startCapture(harness, outputPath)
+    harness.recorder.write('recorded-bytes')
+    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+      streamOk: true,
+    })
+
+    expect(timers).toHaveLength(2)
+    expect(timers.every((timer) => timer.unref.mock.calls.length === 1)).toBe(
+      true,
+    )
+    expect(clearTimeout.mock.calls.map(([timer]) => timer)).toEqual(timers)
+  })
+
+  it('handles unavailable priming viewport and reports viewport restore failures', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness({ framePriming: true })
@@ -314,14 +342,12 @@ describe('Puppeteer capture engine', () => {
     evaluate
       .mockImplementationOnce(evaluateMarker)
       .mockResolvedValueOnce({ height: 0, width: 0 })
-      .mockResolvedValueOnce({ height: 0, width: 0 })
     harness.startScreencast.mockImplementationOnce(async (_page, options) => {
       options.onViewportRestoreError?.(new Error('viewport closed'))
       return harness.recorder as never
     })
 
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
-      dimensions: undefined,
       started: true,
     })
     harness.recorder.end()
@@ -469,7 +495,6 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('write-error')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,
@@ -509,7 +534,6 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,
@@ -523,9 +547,8 @@ describe('Puppeteer capture engine', () => {
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {
-    const harness = createHarness({
-      clock: { ...systemClock, delay: vi.fn(async () => {}) },
-    })
+    vi.useFakeTimers()
+    const harness = createHarness()
     let rejectCompletion: ((error: Error) => void) | undefined
     const writeStreamDone = new Promise<void>((_resolve, reject) => {
       rejectCompletion = reject
@@ -559,13 +582,14 @@ describe('Puppeteer capture engine', () => {
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
     harness.session.attachCapture({
-      dimensions: undefined,
       recorder,
       segment,
       windowHandle: undefined,
     })
 
-    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+    const stopTask = harness.engine.stopCapture()
+    await vi.advanceTimersByTimeAsync(30_000)
+    await expect(stopTask).resolves.toMatchObject({
       segment: {
         outputFormat: 'webm',
         outputPath: 'capture.webm',

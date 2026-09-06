@@ -16,6 +16,7 @@ const chromeArgs = [
   '--disable-gpu',
   '--disable-dev-shm-usage',
   '--window-size=1280,720',
+  `--force-device-scale-factor=${mode === 'hidpi' ? '2' : '1'}`,
 ]
 
 const createCapabilities = (): WebdriverIO.Capabilities => {
@@ -58,6 +59,19 @@ const capture: CaptureOptions =
         connectionTimeoutMs: 10_000,
       }
 
+const expectedDimensions: Record<string, { width: number; height: number }> = {
+  controls: { width: 400, height: 200 },
+  'odd-scale': { width: 400, height: 200 },
+  'padded-mp4': { width: 802, height: 402 },
+  'filtered-mp4': { width: 320, height: 240 },
+}
+if (mode !== 'controls' && expectedDimensions[mode]) {
+  capture.viewport = { width: 960, height: 600 }
+  capture.crop = { x: 10, y: 20, width: 801, height: 401 }
+  capture.scale = mode === 'odd-scale' ? 0.5 : 1
+}
+const format = mode.endsWith('-mp4') ? 'mp4' : 'webm'
+
 export const config: WebdriverIO.Config = {
   runner: 'local',
   baseUrl: requireFixtureBaseUrl(),
@@ -77,7 +91,13 @@ export const config: WebdriverIO.Config = {
         outputDir: resultsDir,
         recording: { retain: 'all' },
         capture,
-        processing: { format: 'webm' },
+        processing: {
+          format,
+          mp4Mode: 'transcode',
+          ...(mode === 'filtered-mp4'
+            ? { transcode: { ffmpegArgs: ['-vf', 'scale=320:240'] } }
+            : {}),
+        },
         logLevel: 'info',
         failurePolicy: 'error',
       },
@@ -111,17 +131,21 @@ export const config: WebdriverIO.Config = {
       ffmpegPath,
       path.join(resultsDir, artifact),
     )
-    if (media.container !== 'webm' || media.frameCount < 2) {
+    if (media.container !== format || media.frameCount < 2) {
       throw new Error(
-        `Expected a decodable, primed WebM for ${mode}; container=${media.container}, frames=${media.frameCount.toString()}`,
+        `Expected a decodable, primed ${format} for ${mode}; container=${media.container}, frames=${media.frameCount.toString()}`,
+      )
+    }
+    const expected = expectedDimensions[mode]
+    if (
+      expected &&
+      (media.width !== expected.width || media.height !== expected.height)
+    ) {
+      throw new Error(
+        `Expected ${mode} dimensions ${expected.width}x${expected.height}, received ${media.width}x${media.height}`,
       )
     }
     if (mode === 'controls') {
-      if (media.width !== 400 || media.height !== 200) {
-        throw new Error(
-          `Expected crop then scale dimensions 400x200, received ${media.width.toString()}x${media.height.toString()}`,
-        )
-      }
       if (media.durationSeconds < 0.4 || media.durationSeconds > 1.3) {
         throw new Error(
           `Expected speed=2 capture duration near half of wall time; received ${media.durationSeconds.toFixed(2)}s`,

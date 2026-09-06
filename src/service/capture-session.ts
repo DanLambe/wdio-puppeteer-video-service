@@ -4,7 +4,6 @@ import type {
 } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { ActiveSegment } from './constants.js'
-import type { ManifestCaptureDimensions } from './manifest-runtime.js'
 import type { SessionProtocol } from './protocol.js'
 
 export type DetachedCapture =
@@ -18,7 +17,6 @@ export type DetachedCapture =
     }>
 
 export interface AttachCaptureOptions {
-  readonly dimensions: ManifestCaptureDimensions | undefined
   readonly recorder: ScreenRecorder
   readonly segment: ActiveSegment
   readonly windowHandle: string | undefined
@@ -33,7 +31,6 @@ export class CaptureSession {
   private recordingSlug = ''
   private readonly retainedPaths = new Set<string>()
   private activeWindowHandle: string | undefined
-  private dimensions: ManifestCaptureDimensions | undefined
   private sessionProtocol: SessionProtocol = 'unsupported'
 
   get browser(): Browser | undefined {
@@ -66,10 +63,6 @@ export class CaptureSession {
 
   get currentWindowHandle(): string | undefined {
     return this.activeWindowHandle
-  }
-
-  get captureDimensions(): ManifestCaptureDimensions | undefined {
-    return this.dimensions
   }
 
   get protocol(): SessionProtocol {
@@ -110,7 +103,6 @@ export class CaptureSession {
     this.recordingSlug = slug
     this.segmentNumber = 1
     this.activeWindowHandle = undefined
-    this.dimensions = undefined
     this.retainedPaths.clear()
   }
 
@@ -124,7 +116,6 @@ export class CaptureSession {
     this.captureRecorder = options.recorder
     this.captureSegment = options.segment
     this.activeWindowHandle = options.windowHandle
-    this.dimensions = options.dimensions
   }
 
   detachCapture(): DetachedCapture {
@@ -167,7 +158,6 @@ export class CaptureSession {
     this.segmentNumber = 0
     this.recordingSlug = ''
     this.activeWindowHandle = undefined
-    this.dimensions = undefined
     this.retainedPaths.clear()
     return detached
   }

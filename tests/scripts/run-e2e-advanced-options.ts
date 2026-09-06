@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process'
+import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
+import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -22,9 +26,43 @@ type AdvancedMode =
   | 'global-concurrency'
   | 'ffmpeg-failure'
 
+const assertDiscardedRetentionEntry = async (
+  resultsDir: string,
+): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] retention mode produced an invalid manifest',
+    )
+  }
+  const discardedEntry = manifestValue.runs
+    .flatMap((run) => run.entries)
+    .find((entry) => entry.test?.name === 'should discard a passing recording')
+  if (
+    discardedEntry?.capture.decision !== 'discarded' ||
+    discardedEntry.capture.segments.length !== 0 ||
+    discardedEntry.capture.final !== undefined ||
+    discardedEntry.processing.outcome !== 'skipped'
+  ) {
+    throw new Error(
+      '[e2e:advanced] passing retention entry should be discarded without published media or post-processing',
+    )
+  }
+}
+
 const requestedMode = process.argv[2] || 'all'
 
 const resolveModeOrder = (mode: string): AdvancedMode[] => {
+  if (mode === 'windows') {
+    return [
+      'deferred-merge',
+      'global-concurrency',
+      'ffmpeg-failure',
+      'retention',
+    ]
+  }
   if (mode === 'all') {
     return [
       'retry',
@@ -71,7 +109,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
   )
   process.exit(1)
 }
@@ -109,6 +147,28 @@ const runMode = async (
     mode === 'retention' ? [1] : [0],
   )
 
+  if (mode === 'retention') {
+    await assertDiscardedRetentionEntry(resultsDir)
+  }
+  if (mode === 'retry' || mode === 'deferred-merge') {
+    await assertManifestMediaDimensions(
+      resultsDir,
+      environment.ffmpegDetection.resolvedPath,
+    )
+  }
+
+  if (mode === 'global-concurrency') {
+    // Config onComplete runs before launcher services, so verify final cleanup here.
+    const remainingRuns = await readdir(
+      path.join(resultsDir, '.global-recording-locks'),
+    )
+    if (remainingRuns.length > 0) {
+      throw new Error(
+        `[e2e:advanced] launcher left global slot run directories: ${remainingRuns.join(', ')}`,
+      )
+    }
+  }
+
   const retryTitle =
     mode === 'retry'
       ? 'should record only when retry attempt executes'
@@ -132,6 +192,10 @@ const runMode = async (
       expectRetryOutcomes: false,
       runLabel: 'advanced-deferred-merge',
     })
+  }
+
+  if (mode === 'retry') {
+    await assertOfflineReportInBrowser(resultsDir)
   }
 
   if (mode === 'retry' || mode === 'spec-file-retry' || mode === 'retention') {

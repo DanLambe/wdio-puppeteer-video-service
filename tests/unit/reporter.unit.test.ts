@@ -165,7 +165,7 @@ const createManifest = (
       service: '0.8.1',
       node: 'v24.0.0',
       webdriverio: '9.29.1',
-      puppeteer: '25.3.0',
+      puppeteer: '24.11.2',
     },
     entries,
   }
@@ -393,6 +393,70 @@ describe('WdioPuppeteerVideoReporter', () => {
         }),
         durationMs: 0,
       }),
+    ])
+  })
+
+  it('counts a Cucumber scenario retry that only the enclosing suite reports', async () => {
+    const outputDir = await createTempDir()
+    const context = await createManifestRunContext(outputDir)
+    const config: Record<string, unknown> = {}
+    assignManifestRunContext(config, context)
+    assignManifestWorkerContext(config, '0-0', { specFileRetryAttempt: 0 })
+    const reporter = new WdioPuppeteerVideoReporter({
+      outputDir,
+      writeStream: { write: () => true },
+    })
+    const runner = {
+      cid: '0-0',
+      config,
+      specs: ['tests/cucumber/features/scenario-retry.feature'],
+      capabilities: { browserName: 'chrome' },
+      start: new Date('2026-07-18T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    const scenarioSuite = {
+      type: 'scenario',
+      title: 'retried scenario',
+      retries: 0,
+    }
+    const step = {
+      uid: 'step-1',
+      title: 'Then I fail only the first scenario attempt',
+      fullTitle: 'Then I fail only the first scenario attempt',
+      state: 'failed',
+      duration: 5,
+      retries: 0,
+    } as unknown as TestStats
+
+    reporter.onRunnerStart(runner)
+    reporter.currentSuites.push(scenarioSuite as never)
+    reporter.onTestFail(step)
+    // Cucumber reports the retry on the scenario suite, never on the step.
+    scenarioSuite.retries = 1
+    reporter.onTestPass({ ...step, state: 'passed' } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+
+    const { fragments } = await readReporterFragments(outputDir, context.runId)
+    expect(
+      fragments[0]?.outcomes.map((outcome) => ({
+        attempt: outcome.attempt,
+        retried: outcome.retried,
+        status: outcome.status,
+        containerName: outcome.test.containerName,
+      })),
+    ).toEqual([
+      {
+        attempt: 1,
+        retried: false,
+        status: 'failed',
+        containerName: 'retried scenario',
+      },
+      {
+        attempt: 2,
+        retried: true,
+        status: 'passed',
+        containerName: 'retried scenario',
+      },
     ])
   })
 
@@ -745,6 +809,92 @@ describe('static report generation', () => {
     expect(await fs.readFile(generated?.path ?? '', 'utf8')).toContain(scenario)
   })
 
+  it('assigns same-named Cucumber scenarios to distinct manifest entries', async () => {
+    const outputDir = await createTempDir()
+    const runId = 'cucumber-duplicate-scenario-run'
+    const spec = 'tests/features/duplicate-scenario-names.feature'
+    const scenario = 'records a same-named scenario'
+    await Promise.all([
+      fs.writeFile(path.join(outputDir, 'first.webm'), 'first'),
+      fs.writeFile(path.join(outputDir, 'second.webm'), 'second'),
+    ])
+    // Cucumber emits one outcome per step and carries the scenario id in
+    // `test.parent`, so both steps of a scenario must share its manifest entry.
+    const outcomes = (
+      [
+        ['0', 'Given a page'],
+        ['0', 'Then it is visible'],
+        ['1', 'Given a page'],
+        ['1', 'Then it is still visible'],
+      ] as const
+    ).map(([parent, name]) => ({
+      ...createOutcome({
+        runId,
+        cid: '0-0',
+        spec,
+        name,
+        fullName: `${parent}: ${name}`,
+        containerName: scenario,
+      }),
+      uid: `${parent}-${name}`,
+      test: {
+        name,
+        fullName: `${parent}: ${name}`,
+        parent,
+        containerName: scenario,
+      },
+    }))
+    const manifest = createManifest(runId, [
+      createEntry({
+        id: 'first-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: scenario,
+        fullName: scenario,
+        artifactPath: 'first.webm',
+      }),
+      createEntry({
+        id: 'second-entry',
+        runId,
+        cid: '0-0',
+        spec,
+        name: scenario,
+        fullName: scenario,
+        artifactPath: 'second.webm',
+      }),
+    ])
+    const run = manifest.runs[0]
+    if (!run) {
+      throw new TypeError('Expected duplicate scenario report fixture')
+    }
+
+    const model = await createReportModel({
+      outputDir,
+      runId,
+      fragments: [createFragment(runId, '0-0', [spec], outcomes)],
+      run,
+      initialDiagnostics: [],
+    })
+
+    const associations = model.items
+      .map((item) => [item.testName, item.media[0]?.path] as const)
+      .sort(
+        (left, right) =>
+          left[0].localeCompare(right[0]) ||
+          String(left[1]).localeCompare(String(right[1])),
+      )
+    // The shared step name resolves to a different scenario's media each time,
+    // and every step of a scenario keeps that scenario's media.
+    expect(associations).toEqual([
+      ['Given a page', 'first.webm'],
+      ['Given a page', 'second.webm'],
+      ['Then it is still visible', 'second.webm'],
+      ['Then it is visible', 'first.webm'],
+    ])
+    expect(model.diagnostics).toEqual([])
+  })
+
   it('prefers a Cucumber step container over another matching scenario title', async () => {
     const outputDir = await createTempDir()
     const runId = 'cucumber-title-collision-run'
@@ -922,7 +1072,7 @@ describe('static report generation', () => {
 })
 
 const assertOfflineFilterScript = (html: string): void => {
-  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/u.exec(html)?.[1]
+  const script = /<script>([\s\S]*?)<\/script>/u.exec(html)?.[1]
   expect(script).toBeDefined()
   const listeners = new Map<string, () => void>()
   const createFilter = (id: string) => ({
