@@ -1,6 +1,6 @@
 {
   "name": "wdio-puppeteer-video-service",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "description": "WebdriverIO Service to record videos using Puppeteer",
   "type": "module",
   "sideEffects": false,
