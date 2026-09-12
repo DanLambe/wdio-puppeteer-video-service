@@ -13,6 +13,7 @@ import {
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
 import {
+  ACTIVE_PAGE_POLL_MS,
   type ActiveSegment,
   RECORDER_STOP_TIMEOUT_MS,
   type ResolvedTranscodeOptions,
@@ -122,18 +123,7 @@ export class PuppeteerCaptureEngine {
     const windowHandle = await browser.getWindowHandle().catch(() => undefined)
     const markerId = this.nextPageMarkerId()
 
-    await browser.execute(
-      (property: string, id: string) => {
-        Object.defineProperty(globalThis, property, {
-          configurable: true,
-          enumerable: false,
-          value: id,
-          writable: false,
-        })
-      },
-      PAGE_MARKER_PROPERTY,
-      markerId,
-    )
+    await this.markPageContext(browser, markerId)
 
     const page = await findActivePage(puppeteerBrowser, markerId, {
       clock: this.clock,
@@ -150,6 +140,42 @@ export class PuppeteerCaptureEngine {
 
     await page.bringToFront().catch(() => undefined)
     return { page, windowHandle }
+  }
+
+  private async markPageContext(
+    browser: Browser,
+    markerId: string,
+  ): Promise<void> {
+    const mark = async (): Promise<void> => {
+      await browser.execute(
+        (property: string, id: string) => {
+          Object.defineProperty(globalThis, property, {
+            configurable: true,
+            enumerable: false,
+            value: id,
+            writable: false,
+          })
+        },
+        PAGE_MARKER_PROPERTY,
+        markerId,
+      )
+    }
+
+    try {
+      await mark()
+    } catch (error) {
+      if (
+        !/Cannot find context with specified id|Execution context was destroyed/iu.test(
+          describeError(error),
+        )
+      ) {
+        throw error
+      }
+      // WDIO's automatic tab switch can overlap the next navigation. Retry only
+      // the marker in its replacement context, once, before allocating media.
+      await this.clock.delay(ACTIVE_PAGE_POLL_MS)
+      await mark()
+    }
   }
 
   async startCapture(
@@ -472,9 +498,14 @@ export class PuppeteerCaptureEngine {
     browser: Browser,
     operations: CaptureWindowOperations,
   ): Promise<void> {
+    // WDIO may already have switched and resumed capture while closing a tab.
+    if (this.session.hasCapture) {
+      return
+    }
     const handle = await browser.getWindowHandle().catch(() => undefined)
-    if (!handle) {
-      this.session.setWindowHandle(undefined)
+    const handles = await browser.getWindowHandles().catch((): string[] => [])
+    this.session.setWindowHandle(undefined)
+    if (!handle || !handles.includes(handle)) {
       return
     }
     this.session.advanceSegment()
@@ -487,7 +518,10 @@ export class PuppeteerCaptureEngine {
     operations: CaptureWindowOperations,
   ): Promise<void> {
     const handle = await browser.getWindowHandle().catch(() => undefined)
-    if (!handle || this.session.currentWindowHandle === handle) {
+    if (
+      !handle ||
+      (this.session.currentWindowHandle === handle && this.session.hasCapture)
+    ) {
       return
     }
     await operations.stopRecording()

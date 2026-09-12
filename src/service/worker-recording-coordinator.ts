@@ -163,6 +163,8 @@ export class WorkerRecordingCoordinator
   }
 
   async endEntity(outcome: RecordingEntityOutcome): Promise<void> {
+    // WDIO reports passed=false for runtime skips; they are not test failures.
+    const nonFailing = outcome.passed || outcome.manifestResult === 'skipped'
     let manifestFailure: { readonly error: unknown } | undefined
     try {
       await this.manifest?.recordResult(outcome.manifestResult)
@@ -171,11 +173,11 @@ export class WorkerRecordingCoordinator
     }
 
     if (this.isSpecScope) {
-      if (!outcome.passed) {
+      if (!nonFailing) {
         this.specHadFailure = true
       }
     } else {
-      await this.finalizeIfRecording(outcome.passed)
+      await this.finalizeIfRecording(nonFailing, outcome.manifestResult)
     }
 
     if (manifestFailure) {
@@ -184,7 +186,9 @@ export class WorkerRecordingCoordinator
   }
 
   async finalizeSpecRecording(): Promise<void> {
-    await this.finalizeCurrentRecording(!this.specHadFailure)
+    // Manifest results were accumulated per entity; do not overwrite all-skipped
+    // specs with the non-failing boolean used for retention and Allure.
+    await this.finalizeCurrentRecording(!this.specHadFailure, 'unknown')
   }
 
   resetWorkerState(): void {
@@ -309,16 +313,22 @@ export class WorkerRecordingCoordinator
     })
   }
 
-  private async finalizeIfRecording(passed: boolean): Promise<void> {
+  private async finalizeIfRecording(
+    passed: boolean,
+    result: ManifestResult,
+  ): Promise<void> {
     if (!this.actions.isRecordingActive()) {
       return
     }
     await this.actions.runSerialized(async () => {
-      await this.finalizeCurrentRecording(passed)
+      await this.finalizeCurrentRecording(passed, result)
     })
   }
 
-  private async finalizeCurrentRecording(passed: boolean): Promise<void> {
+  private async finalizeCurrentRecording(
+    passed: boolean,
+    result: ManifestResult,
+  ): Promise<void> {
     if (!this.actions.isRecordingActive()) {
       return
     }
@@ -335,7 +345,7 @@ export class WorkerRecordingCoordinator
         createCompletedManifestOptions({
           deferred: finalized.deferred,
           keepArtifacts,
-          passed,
+          result,
           paths: finalized.paths,
           processing: this.options.processing,
         }),
@@ -349,7 +359,7 @@ export class WorkerRecordingCoordinator
       await this.manifest
         ?.completeCurrent({
           decision: 'failed',
-          result: passed ? 'passed' : 'failed',
+          result,
           paths: [...this.actions.getRecordedPaths()],
           reason: describeError(error),
           processingOutcome: 'failed',

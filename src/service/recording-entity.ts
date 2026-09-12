@@ -91,7 +91,10 @@ export const normalizeTestOutcome = (
   result: Frameworks.TestResult,
 ): RecordingEntityOutcome => {
   return Object.freeze({
-    manifestResult: resolveTestManifestResult(!!test.pending, result.passed),
+    manifestResult: resolveTestManifestResult(
+      !!test.pending || result.skipped === true,
+      result.passed,
+    ),
     passed: result.passed,
   })
 }

@@ -133,6 +133,20 @@ describe('recording entity normalization', () => {
     ).toEqual({ manifestResult: 'failed', passed: false })
   })
 
+  it.each([true, false, undefined])(
+    'uses WDIO runtime skipped=%s independently of the initial test snapshot',
+    (skipped) => {
+      const result = {
+        passed: false,
+        ...(skipped === undefined ? {} : { skipped }),
+      } as Frameworks.TestResult
+      expect(normalizeTestOutcome(createTest(), result)).toEqual({
+        passed: false,
+        manifestResult: skipped ? 'skipped' : 'failed',
+      })
+    },
+  )
+
   it('prefers test, context, then current-test retries and rejects invalid values', () => {
     expect(
       extractExplicitRetryCount(createTest({ _currentRetry: 3 }), {

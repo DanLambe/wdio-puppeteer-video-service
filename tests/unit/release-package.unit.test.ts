@@ -286,7 +286,9 @@ describe('release package validation', () => {
     expect(peerPuppeteer).toBe('>=24.11.2 <25')
     expect(semver.intersects(developmentPuppeteer, peerPuppeteer)).toBe(true)
     expect(semver.satisfies('25.0.0', developmentPuppeteer)).toBe(false)
-    expect(semver.satisfies('6.0.9', developmentExpect)).toBe(true)
+    const minimumDevelopmentExpect = semver.minVersion(developmentExpect)
+    expect(minimumDevelopmentExpect).not.toBeNull()
+    expect(semver.gte(minimumDevelopmentExpect ?? '0.0.0', '6.0.9')).toBe(true)
     expect(semver.satisfies('7.0.0', developmentExpect)).toBe(false)
     expect(
       packageJson.peerDependenciesMeta?.['puppeteer-core']?.optional,
