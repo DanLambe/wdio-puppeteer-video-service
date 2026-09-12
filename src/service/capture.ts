@@ -7,6 +7,8 @@ import type {
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 
+const FRAME_PRIMING_PAINT_TIMEOUT_MS = 500
+
 export interface StartScreencastOptions {
   capture: ResolvedCaptureOptions
   ffmpegPath: string
@@ -71,18 +73,50 @@ export const primeScreencastFrames = async (
     return
   }
 
-  await page
-    .setViewport({
-      ...targetViewport,
-      width: targetViewport.width + 1,
+  try {
+    await page
+      .setViewport({
+        ...targetViewport,
+        width: targetViewport.width + 1,
+      })
+      .catch(() => {
+        /* best-effort viewport resize */
+      })
+    // A timer or animation callback alone does not ensure a compositor frame.
+    // Request a paint before restoring the viewport; a static tab may otherwise
+    // emit just the initial frame, which Puppeteer cannot encode alone.
+    await waitForViewportPaint(page, clock)
+    await clock.delay(50)
+  } finally {
+    await page.setViewport(currentViewport).catch(() => {
+      /* best-effort viewport restore */
     })
-    .catch(() => {
-      /* best-effort viewport resize */
-    })
-  await clock.delay(50)
-  await page.setViewport(currentViewport).catch(() => {
-    /* best-effort viewport restore */
-  })
+  }
+}
+
+const waitForViewportPaint = async (
+  page: Page,
+  clock: ClockBoundary,
+): Promise<void> => {
+  const { promise: expired, resolve } = Promise.withResolvers<void>()
+  const timer = clock.setTimeout(resolve, FRAME_PRIMING_PAINT_TIMEOUT_MS)
+  timer.unref()
+  try {
+    await Promise.race([
+      expired,
+      // Discard this low-quality snapshot. Do not clip it: Chromium can expose
+      // the clip's temporary viewport to the simultaneously running screencast.
+      page.screenshot({
+        type: 'jpeg',
+        quality: 1,
+        captureBeyondViewport: false,
+      }),
+    ])
+  } catch {
+    /* best-effort priming if the page closes or navigates */
+  } finally {
+    clock.clearTimeout(timer)
+  }
 }
 
 const readCurrentViewport = async (
