@@ -193,7 +193,7 @@ export const shouldRetainRecording = (input: {
 export const createCompletedManifestOptions = (input: {
   readonly deferred: boolean
   readonly keepArtifacts: boolean
-  readonly passed: boolean
+  readonly result: CompleteManifestEntryOptions['result']
   readonly paths: readonly string[]
   readonly processing: ResolvedProcessingOptions
 }): CompleteManifestEntryOptions => {
@@ -215,7 +215,7 @@ export const createCompletedManifestOptions = (input: {
   const processingOperation = resolveProcessingOperation(input.processing)
   return {
     decision,
-    result: input.passed ? 'passed' : 'failed',
+    result: input.result,
     paths: [...input.paths],
     ...(!input.keepArtifacts ? { reason: 'retention-policy' } : {}),
     processingOutcome,

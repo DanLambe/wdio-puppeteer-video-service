@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { isVideoManifest } from '../../src/manifest.js'
+import { isVideoManifest, type ManifestEntryV1 } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
@@ -78,6 +78,19 @@ const runWdio = async (
       frameEntry && frameEntry.capture.segments.length >= 2,
       'Expected iframe-to-window recording segments without page-lookup skips',
     )
+    for (const title of [
+      'should handle multiple tabs and closing tabs',
+      'should tolerate a browser target closing itself',
+    ]) {
+      const windowEntry: ManifestEntryV1 | undefined = manifest.runs
+        .flatMap((run) => run.entries)
+        .find((entry) => entry.test?.name === title)
+      assert.equal(
+        windowEntry?.capture.segments.length,
+        3,
+        `Expected original, new-tab and returned-tab segments for ${title}`,
+      )
+    }
   }
   await assertStaticVideoReport({
     resultsDir,

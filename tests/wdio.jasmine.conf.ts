@@ -13,6 +13,7 @@ const resultsDir = path.resolve(
 )
 const expectedTestTitles = [
   'jasmine style should keep test name in video filename',
+  'jasmine style should retain an explicitly pending recording',
 ]
 
 export const config: WebdriverIO.Config = {
@@ -43,7 +44,8 @@ export const config: WebdriverIO.Config = {
     [
       videoServiceModulePath,
       {
-        outputDir: resultsDir,
+        // Exercise consumer-style relative paths through capture and MP4 processing.
+        outputDir: path.relative(process.cwd(), resultsDir),
         recording: {
           retain: 'all',
         },

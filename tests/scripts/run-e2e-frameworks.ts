@@ -1,8 +1,10 @@
+import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import {
   assertStaticVideoReport,
   listVideoArtifacts,
@@ -219,6 +221,12 @@ const resolveExpectedTitle = (framework: FrameworkMode): string => {
 }
 
 const resolveExpectedTitles = (framework: FrameworkMode): string[] => {
+  if (framework === 'jasmine') {
+    return [
+      resolveExpectedTitle(framework),
+      'jasmine style should retain an explicitly pending recording',
+    ]
+  }
   return framework === 'cucumber-duplicate-names'
     ? [...CUCUMBER_DUPLICATE_TITLES]
     : [resolveExpectedTitle(framework)]
@@ -265,6 +273,23 @@ const runWdioFramework = async (
     expectedTitles,
     runLabel: `${framework}-allure`,
   })
+  if (framework === 'jasmine') {
+    await assertManifestMediaDimensions(
+      resultsDir,
+      environment.ffmpegDetection.resolvedPath,
+    )
+    const manifest: unknown = JSON.parse(
+      await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+    )
+    assert.ok(isVideoManifest(manifest))
+    const entries = manifest.runs.flatMap((run) => run.entries)
+    assert.equal(entries.length, 2)
+    const pendingEntry = entries.find((entry) =>
+      entry.test?.name.includes('explicitly pending'),
+    )
+    assert.equal(pendingEntry?.result, 'skipped')
+    assert.equal(pendingEntry?.capture.decision, 'recorded')
+  }
   if (target.retryAttempts) {
     await assertCucumberRetryAttempts(resultsDir, target.retryAttempts)
   }

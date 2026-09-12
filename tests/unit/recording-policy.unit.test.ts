@@ -271,7 +271,7 @@ describe('recording policy', () => {
       createCompletedManifestOptions({
         deferred: false,
         keepArtifacts: false,
-        passed: true,
+        result: 'passed',
         paths: [],
         processing: baseProcessing,
       }),
@@ -290,7 +290,7 @@ describe('recording policy', () => {
       createCompletedManifestOptions({
         deferred: true,
         keepArtifacts: true,
-        passed: false,
+        result: 'failed',
         paths: ['capture.webm'],
         processing: mergeProcessing,
       }),
@@ -310,7 +310,7 @@ describe('recording policy', () => {
       createCompletedManifestOptions({
         deferred: false,
         keepArtifacts: true,
-        passed: true,
+        result: 'passed',
         paths: [],
         processing: baseProcessing,
       }),
@@ -323,7 +323,7 @@ describe('recording policy', () => {
       createCompletedManifestOptions({
         deferred: false,
         keepArtifacts: true,
-        passed: true,
+        result: 'passed',
         paths: ['capture.mp4'],
         processing: transcodeProcessing,
       }),

@@ -52,6 +52,15 @@ errors.
 
 ## Manifest video dimensions are missing or differ from the viewport
 
+In `1.0.0-rc.2` and earlier, a relative `outputDir` can produce incorrect manifest
+paths and `size: 0` even when the retained video has bytes on disk. It can also
+omit dimensions and break static-report links. As a workaround for those
+versions, use an absolute directory, for example `path.resolve('videos')`, and
+generate a new run. The corrected implementation accepts either absolute or
+working-directory-relative output paths; existing manifests are not rewritten.
+Check the actual file and try decoding it before treating a zero metadata size
+or an editor preview error as proof of an empty or corrupt recording.
+
 Dimensions come from the retained encoded file. Browser device pixel ratio,
 Puppeteer scaling, H264 padding, and custom processing filters can make them
 different from CSS viewport dimensions. Deferred inputs have no dimensions
@@ -87,6 +96,21 @@ expects a positive duration, and this repository's own media assertions require
 a positive duration and at least two frames. That is a test contract rather than
 proof that the file is corrupt — the recording really is that short. Keep the
 window under test open longer if a clip of usable length is expected.
+
+## A pending test appears as failed, or recording stops after closing a tab
+
+`1.0.0-rc.2` does not recognize Jasmine's runtime `pending()` hook result as
+skipped, which can affect manifest outcomes and failure-only retention. The
+corrected implementation treats runtime skips as non-failures for retention and
+default Allure attachments, while preserving the skipped manifest result.
+`retain: 'all'` still keeps a skipped test's recording when capture has started.
+
+With BiDi, WDIO may automatically switch to a surviving tab concurrently with
+the test's next navigation. Earlier versions could lose the remaining recording
+when the page-marker script hit the replaced document context. Startup now retries
+that marker once for known context-destruction errors; unrelated or persistent
+failures retain their diagnostics. Keep awaiting window/navigation commands in
+tests, and inspect service warnings if expected window segments are missing.
 
 ## FFmpeg is unavailable
 

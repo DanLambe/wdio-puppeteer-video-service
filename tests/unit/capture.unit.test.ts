@@ -249,10 +249,93 @@ describe('Puppeteer screencast capture controls', () => {
       {
         viewport: () => ({ width: 800, height: 600 }),
         setViewport,
+        screenshot: async () => {
+          throw new Error('document context destroyed')
+        },
       } as unknown as Page,
       { ...systemClock, delay },
     )
     expect(setViewport).toHaveBeenCalledTimes(2)
     expect(delay).toHaveBeenCalledWith(50)
+  })
+
+  it('requests one unclipped in-memory paint before restoring the viewport', async () => {
+    vi.useFakeTimers()
+    const { promise, resolve } = Promise.withResolvers<Uint8Array>()
+    const screenshot = vi.fn(async () => promise)
+    const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
+    const page = {
+      viewport: () => ({ width: 800, height: 600 }),
+      setViewport,
+      screenshot,
+    } as unknown as Page
+    const priming = primeScreencastFrames(page)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(setViewport).toHaveBeenCalledTimes(1)
+    expect(screenshot).toHaveBeenCalledExactlyOnceWith({
+      type: 'jpeg',
+      quality: 1,
+      captureBeyondViewport: false,
+    })
+    resolve(new Uint8Array([1]))
+    await vi.advanceTimersByTimeAsync(50)
+    await priming
+    expect(setViewport).toHaveBeenLastCalledWith({ width: 800, height: 600 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('bounds priming when the browser never answers its paint request', async () => {
+    vi.useFakeTimers()
+    const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
+    const { promise, reject } = Promise.withResolvers<void>()
+    const page = {
+      viewport: () => ({ width: 800, height: 600 }),
+      setViewport,
+      screenshot: async () => promise,
+    } as unknown as Page
+    const priming = primeScreencastFrames(page)
+    await vi.advanceTimersByTimeAsync(550)
+    await priming
+    expect(setViewport).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+    // A late protocol rejection must remain handled after the Node deadline.
+    reject(new Error('target closed after timeout'))
+    await vi.advanceTimersByTimeAsync(0)
+  })
+
+  it('contains a failed paint request and clears its deadline', async () => {
+    vi.useFakeTimers()
+    const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
+    const priming = primeScreencastFrames({
+      viewport: () => ({ width: 800, height: 600 }),
+      setViewport,
+      screenshot: async () => {
+        throw new Error('target closed')
+      },
+    } as unknown as Page)
+    await vi.advanceTimersByTimeAsync(50)
+    await priming
+    expect(setViewport).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('restores the viewport when the injected warmup clock fails', async () => {
+    const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
+    const error = new Error('clock interrupted')
+    const priming = primeScreencastFrames(
+      {
+        viewport: () => ({ width: 800, height: 600 }),
+        setViewport,
+        screenshot: async () => new Uint8Array(),
+      } as unknown as Page,
+      {
+        ...systemClock,
+        delay: async () => {
+          throw error
+        },
+      },
+    )
+    await expect(priming).rejects.toBe(error)
+    expect(setViewport).toHaveBeenLastCalledWith({ width: 800, height: 600 })
   })
 })

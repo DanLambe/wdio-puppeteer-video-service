@@ -301,6 +301,48 @@ describe('manifest runtime', () => {
     expect(entry.timings.durationMs).toBeGreaterThanOrEqual(0)
   })
 
+  it.each(['relative', 'absolute'] as const)(
+    'resolves %s filesystem paths without duplicating outputDir, including deferred reuse',
+    async (pathStyle) => {
+      const outputDir = await createTempDir()
+      const artifactPath = path.join(outputDir, 'nested', 'recording.webm')
+      await fs.mkdir(path.dirname(artifactPath), { recursive: true })
+      await fs.writeFile(artifactPath, 'retained-media')
+      const { context, recorder, readDimensions } =
+        await createRecorder(outputDir)
+      const filePath =
+        pathStyle === 'relative'
+          ? path.relative(process.cwd(), artifactPath)
+          : artifactPath
+      const entryId = await recorder.beginEntity({
+        scope: 'test',
+        specPaths: ['consumer.ts'],
+      })
+      await recorder.completeCurrent({
+        decision: 'recorded',
+        result: 'failed',
+        paths: [filePath],
+        processingOutcome: 'pending',
+      })
+      const pending = firstEntry(await aggregateManifestRun(context, 0))
+      expect(pending.capture.segments).toEqual([
+        { path: 'nested/recording.webm', size: 14, mimeType: 'video/webm' },
+      ])
+      readDimensions.mockResolvedValue({ width: 800, height: 600 })
+      await recorder.completeDeferred(entryId, { decision: 'recorded' })
+      expect(readDimensions).toHaveBeenCalledExactlyOnceWith(artifactPath)
+      expect(
+        firstEntry(await aggregateManifestRun(context, 0)).capture.final,
+      ).toEqual({
+        path: 'nested/recording.webm',
+        size: 14,
+        mimeType: 'video/webm',
+        width: 800,
+        height: 600,
+      })
+    },
+  )
+
   it('measures distinct retained segments independently and omits unavailable metadata', async () => {
     const outputDir = await createTempDir()
     const { context, recorder, readDimensions } =
@@ -335,7 +377,7 @@ describe('manifest runtime', () => {
     await recorder.completeCurrent({
       decision: 'recorded',
       result: 'failed',
-      paths: files,
+      paths: files.map((file) => path.join(outputDir, file)),
     })
 
     const entry = firstEntry(await aggregateManifestRun(context, 0))
@@ -375,7 +417,7 @@ describe('manifest runtime', () => {
     await recorder.completeCurrent({
       decision: 'recorded',
       result: 'failed',
-      paths: ['input.webm'],
+      paths: [path.join(outputDir, 'input.webm')],
       processingOutcome: 'pending',
     })
     expect(readDimensions).not.toHaveBeenCalled()
@@ -386,7 +428,7 @@ describe('manifest runtime', () => {
     readDimensions.mockResolvedValue({ width: 802, height: 402 })
     await recorder.completeDeferred(entryId, {
       decision: 'recorded',
-      paths: ['final.mp4'],
+      paths: [path.join(outputDir, 'final.mp4')],
       processingOutcome: 'completed',
     })
     expect(readDimensions).toHaveBeenCalledExactlyOnceWith(

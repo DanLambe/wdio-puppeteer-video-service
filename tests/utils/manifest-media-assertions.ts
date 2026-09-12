@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { probeMediaFile } from './media-probe.js'
@@ -18,9 +18,12 @@ export const assertManifestMediaDimensions = async (
   )
   assert.ok(artifacts.length > 0, 'Expected retained artifacts to verify')
   for (const artifact of artifacts) {
-    const media = await probeMediaFile(
-      ffmpegPath,
-      path.resolve(resultsDir, artifact.path),
+    const filePath = path.resolve(resultsDir, artifact.path)
+    const media = await probeMediaFile(ffmpegPath, filePath)
+    assert.equal(
+      artifact.size,
+      (await stat(filePath)).size,
+      `Manifest size for ${artifact.path}`,
     )
     assert.equal(
       artifact.width,

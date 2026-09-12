@@ -91,6 +91,7 @@ const createHarness = (
       },
     ),
     getWindowHandle: vi.fn(async () => 'window-1'),
+    getWindowHandles: vi.fn(async () => ['window-1']),
     options: { hostname: 'localhost' },
   }
   session.setBrowser(browser as never)
@@ -672,7 +673,7 @@ describe('Puppeteer capture engine', () => {
     expect(runSerialized).toHaveBeenCalledTimes(4)
   })
 
-  it('ignores missing and unchanged window handles', async () => {
+  it('ignores missing handles and resumes an unchanged handle without a recorder', async () => {
     const harness = createHarness()
     harness.session.beginRecording('windows')
     harness.session.setWindowHandle('window-1')
@@ -691,13 +692,57 @@ describe('Puppeteer capture engine', () => {
     harness.session.setWindowHandle('window-1')
     harness.browser.getWindowHandle.mockResolvedValueOnce('window-1')
     await harness.engine.afterWindowCommand('switchWindow', operations)
+    expect(operations.startRecording).toHaveBeenCalledOnce()
     harness.browser.getWindowHandle.mockRejectedValueOnce(
       new Error('target closed'),
     )
     await harness.engine.afterWindowCommand('newWindow', operations)
 
-    expect(operations.stopRecording).not.toHaveBeenCalled()
+    expect(operations.stopRecording).toHaveBeenCalledOnce()
+    expect(operations.startRecording).toHaveBeenCalledOnce()
+  })
+
+  it.each(['closed-handle', 'enumeration-failure'] as const)(
+    'waits for a usable window after close with %s',
+    async (mode) => {
+      const harness = createHarness()
+      harness.session.beginRecording('windows')
+      harness.session.setWindowHandle('window-1')
+      if (mode === 'enumeration-failure') {
+        harness.browser.getWindowHandles.mockRejectedValueOnce(
+          new Error('no context'),
+        )
+      } else {
+        harness.browser.getWindowHandles.mockResolvedValueOnce(['window-2'])
+      }
+      const operations: CaptureWindowOperations = {
+        runSerialized: async (task) => task(),
+        startRecording: vi.fn(async () => true),
+        stopRecording: vi.fn(async () => {}),
+      }
+      await harness.engine.afterWindowCommand('closeWindow', operations)
+      expect(operations.startRecording).not.toHaveBeenCalled()
+      expect(harness.session.currentWindowHandle).toBeUndefined()
+      harness.browser.getWindowHandle.mockResolvedValueOnce('window-2')
+      await harness.engine.afterWindowCommand('switchToWindow', operations)
+      expect(operations.startRecording).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('does not restart an active recorder after WDIO automatically returns to a live tab', async () => {
+    const outputPath = path.join(await createTempDir(), 'automatic-return.webm')
+    const harness = createHarness()
+    await startCapture(harness, outputPath)
+    const operations: CaptureWindowOperations = {
+      runSerialized: async (task) => task(),
+      startRecording: vi.fn(async () => true),
+      stopRecording: vi.fn(async () => {}),
+    }
+    await harness.engine.afterWindowCommand('closeWindow', operations)
+    await harness.engine.afterWindowCommand('switchToWindow', operations)
     expect(operations.startRecording).not.toHaveBeenCalled()
+    expect(operations.stopRecording).not.toHaveBeenCalled()
+    await harness.engine.resetRecording()
   })
 
   it('contains target closure and focus failures during page lookup', async () => {
@@ -714,4 +759,37 @@ describe('Puppeteer capture engine', () => {
       windowHandle: undefined,
     })
   })
+
+  it.each([
+    'Cannot find context with specified id',
+    'Execution context was destroyed',
+  ])(
+    'recovers a navigation race during marker creation: %s',
+    async (message) => {
+      const delay = vi.fn(async () => {})
+      const harness = createHarness({ clock: { ...systemClock, delay } })
+      harness.browser.execute.mockRejectedValueOnce(new Error(message))
+      await expect(harness.engine.preparePage()).resolves.toMatchObject({
+        page: harness.page,
+      })
+      expect(delay).toHaveBeenCalledOnce()
+      expect(harness.browser.execute).toHaveBeenCalledTimes(3) // retry and cleanup
+      expect(Reflect.has(globalThis, PAGE_MARKER_PROPERTY)).toBe(false)
+    },
+  )
+
+  it.each(['Cannot find context with specified id', 'session is closed'])(
+    'bounds marker retries and preserves permanent errors: %s',
+    async (message) => {
+      const delay = vi.fn(async () => {})
+      const harness = createHarness({ clock: { ...systemClock, delay } })
+      const failure = new Error(message)
+      harness.browser.execute.mockRejectedValue(failure)
+      await expect(harness.engine.preparePage()).rejects.toBe(failure)
+      expect(harness.browser.execute).toHaveBeenCalledTimes(
+        message.startsWith('Cannot') ? 2 : 1,
+      )
+      expect(harness.startScreencast).not.toHaveBeenCalled()
+    },
+  )
 })

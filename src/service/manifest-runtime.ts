@@ -54,6 +54,7 @@ export interface ManifestEntityInput {
 export interface CompleteManifestEntryOptions {
   readonly decision: ManifestCaptureDecision
   readonly result: ManifestResult
+  /** Filesystem paths, absolute or relative to the worker's working directory. */
   readonly paths?: string[]
   readonly reason?: string
   readonly processingOutcome?: ManifestProcessingOutcome
@@ -266,7 +267,10 @@ export class ManifestWorkerRecorder {
       return
     }
     const artifacts = await this.createArtifacts(
-      options.paths ?? existing.capture.segments.map((item) => item.path),
+      options.paths ??
+        existing.capture.segments.map((item) =>
+          path.resolve(this.context.outputDir, item.path),
+        ),
       true,
     )
     const completedAt = new Date().toISOString()
@@ -378,9 +382,9 @@ export class ManifestWorkerRecorder {
   }> {
     const artifacts = await Promise.all(
       [...new Set(paths)].map(async (filePath) => {
-        const absolutePath = path.isAbsolute(filePath)
-          ? filePath
-          : path.resolve(this.context.outputDir, filePath)
+        // Capture/processing paths already include outputDir; only persisted
+        // manifest paths are relative to the manifest's directory.
+        const absolutePath = path.resolve(filePath)
         const size = await fs
           .stat(absolutePath)
           .then((stats) => stats.size)

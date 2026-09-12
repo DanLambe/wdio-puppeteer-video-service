@@ -293,6 +293,48 @@ describe('worker recording coordinator', () => {
     expect(harness.manifest.completed).toHaveLength(1)
   })
 
+  it.each(['test', 'spec'] as const)(
+    'does not treat a runtime skip as failure for %s retention or Allure',
+    async (scope) => {
+      const harness = createHarness({
+        recording: { scope, retain: 'failures' },
+      })
+      await harness.coordinator.beginEntity(createEntity('runtime pending'))
+      await harness.coordinator.endEntity({
+        manifestResult: 'skipped',
+        passed: false,
+      })
+      if (scope === 'spec') {
+        await harness.coordinator.finalizeSpecRecording()
+      }
+      expect(harness.events).toContain('manifest:result:skipped')
+      expect(harness.events).toContain('media:finalize:true:false')
+      expect(harness.events).toContain('allure:attach::true')
+      expect(harness.events).not.toContain('media:finalize:false:true')
+      expect(harness.manifest.completed[0]).toMatchObject({
+        result: scope === 'spec' ? 'unknown' : 'skipped',
+      })
+    },
+  )
+
+  it('keeps an earlier spec failure when a later entity is skipped', async () => {
+    const harness = createHarness({
+      recording: { scope: 'spec', retain: 'failures' },
+    })
+    await harness.coordinator.beginEntity(createEntity('failed test'))
+    await harness.coordinator.endEntity({
+      manifestResult: 'failed',
+      passed: false,
+    })
+    await harness.coordinator.beginEntity(createEntity('runtime pending'))
+    await harness.coordinator.endEntity({
+      manifestResult: 'skipped',
+      passed: false,
+    })
+    await harness.coordinator.finalizeSpecRecording()
+    expect(harness.events).toContain('media:finalize:false:true')
+  })
+
   it('retains an active spec recording after a retry begins', async () => {
     const harness = createHarness({
       recording: { attempts: 'all', retain: 'retries', scope: 'spec' },

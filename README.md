@@ -142,7 +142,7 @@ Top-level options:
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
 - `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer.
 - `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or Puppeteer rejects the recording. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by Puppeteer and FFmpeg.
-- `framePriming` (default `true`): primes early screencast frames with the viewport warmup.
+- `framePriming` (default `true`): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. Priming remains best-effort if the page navigates or closes.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
 
 `processing`:
