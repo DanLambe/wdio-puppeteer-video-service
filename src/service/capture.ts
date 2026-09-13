@@ -8,6 +8,21 @@ import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 
 const FRAME_PRIMING_PAINT_TIMEOUT_MS = 500
+// A screencast started just after its tab's activation changes can drop the
+// frames priming produces, and a static page then never emits another. Retry
+// priming on this cadence, within this budget, until a second frame arrives.
+const FRAME_PRIMING_RECOVERY_INTERVAL_MS = 100
+const FRAME_PRIMING_RECOVERY_TIMEOUT_MS = 1_500
+
+export interface ScreencastFrameObserver {
+  readonly frameCount: number
+  dispose(): void
+}
+
+interface ScreencastEventSource {
+  on(event: string, listener: (event: unknown) => void): unknown
+  off(event: string, listener: (event: unknown) => void): unknown
+}
 
 export interface StartScreencastOptions {
   capture: ResolvedCaptureOptions
@@ -63,16 +78,83 @@ export const createScreencastOptions = (
   }
 }
 
+/**
+ * Count the screencast frames Puppeteer's recorder will encode. This listens on
+ * the main frame's CDP session, the channel `ScreenRecorder` itself uses. That
+ * session is not public API, so when it is unreachable frame verification is
+ * skipped rather than failing capture.
+ */
+export const observeScreencastFrames = (
+  page: Page,
+): ScreencastFrameObserver | undefined => {
+  let source: unknown
+  try {
+    source = Reflect.get(page.mainFrame(), 'client')
+  } catch {
+    return undefined
+  }
+  if (!isScreencastEventSource(source)) {
+    return undefined
+  }
+  const events = source
+  let frameCount = 0
+  const onFrame = (event: unknown): void => {
+    if (hasFrameTimestamp(event)) {
+      frameCount += 1
+    }
+  }
+  events.on('Page.screencastFrame', onFrame)
+  return {
+    get frameCount(): number {
+      return frameCount
+    },
+    dispose: () => {
+      events.off('Page.screencastFrame', onFrame)
+    },
+  }
+}
+
+/**
+ * Prime the screencast so Puppeteer has frames to encode. Resolves `false` only
+ * when an observed screencast still had fewer than two frames once recovery
+ * ran out of time; Puppeteer encodes a frame only when the next one arrives, so
+ * that recording is likely empty.
+ */
 export const primeScreencastFrames = async (
   page: Page,
   clock: ClockBoundary = systemClock,
-): Promise<void> => {
+  frames?: ScreencastFrameObserver,
+): Promise<boolean> => {
   const currentViewport = page.viewport()
   const targetViewport = currentViewport ?? (await readCurrentViewport(page))
   if (!targetViewport) {
-    return
+    return true
   }
 
+  await warmViewport(page, clock, currentViewport, targetViewport)
+  if (!frames) {
+    return true
+  }
+  // A tab whose activation just changed can swallow every frame priming
+  // produced. Give an in-flight frame time to land, then prime again once the
+  // tab has settled.
+  const deadline = clock.now() + FRAME_PRIMING_RECOVERY_TIMEOUT_MS
+  while (frames.frameCount < 2 && clock.now() < deadline) {
+    await clock.delay(FRAME_PRIMING_RECOVERY_INTERVAL_MS)
+    if (frames.frameCount >= 2) {
+      break
+    }
+    await warmViewport(page, clock, currentViewport, targetViewport)
+  }
+  return frames.frameCount >= 2
+}
+
+const warmViewport = async (
+  page: Page,
+  clock: ClockBoundary,
+  currentViewport: Viewport | null,
+  targetViewport: Pick<Viewport, 'width' | 'height'>,
+): Promise<void> => {
   try {
     await page
       .setViewport({
@@ -100,7 +182,7 @@ const waitForViewportPaint = async (
 ): Promise<void> => {
   const { promise: expired, resolve } = Promise.withResolvers<void>()
   const timer = clock.setTimeout(resolve, FRAME_PRIMING_PAINT_TIMEOUT_MS)
-  timer.unref()
+  timer.unref?.()
   try {
     await Promise.race([
       expired,
@@ -136,4 +218,28 @@ const readCurrentViewport = async (
   } catch {
     return undefined
   }
+}
+
+const isScreencastEventSource = (
+  value: unknown,
+): value is ScreencastEventSource => {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof Reflect.get(value, 'on') === 'function' &&
+    typeof Reflect.get(value, 'off') === 'function'
+  )
+}
+
+// Mirror ScreenRecorder, which drops frames without a timestamp before encoding.
+const hasFrameTimestamp = (event: unknown): boolean => {
+  if (typeof event !== 'object' || event === null) {
+    return false
+  }
+  const metadata: unknown = Reflect.get(event, 'metadata')
+  return (
+    typeof metadata === 'object' &&
+    metadata !== null &&
+    Reflect.get(metadata, 'timestamp') !== undefined
+  )
 }

@@ -8,7 +8,9 @@ import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
+  observeScreencastFrames,
   primeScreencastFrames,
+  type ScreencastFrameObserver,
   type StartScreencastOptions,
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
@@ -184,6 +186,7 @@ export class PuppeteerCaptureEngine {
     let pendingRecorder: ScreenRecorder | undefined
     let pendingSegment: ActiveSegment | undefined
     let pendingRecordingPath: string | undefined
+    let frameObserver: ScreencastFrameObserver | undefined
     try {
       const activePage = await this.preparePage()
       if (!activePage) {
@@ -193,6 +196,10 @@ export class PuppeteerCaptureEngine {
       const { page, windowHandle } = activePage
       const output = await options.createOutput()
       pendingRecordingPath = output.recordingPath
+      // Observe before starting so the screencast's first frame is counted.
+      if (this.capture.framePriming) {
+        frameObserver = observeScreencastFrames(page)
+      }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
         ffmpegPath: options.ffmpegPath,
@@ -212,8 +219,14 @@ export class PuppeteerCaptureEngine {
       )
       pendingSegment = segment
       recorder.pipe(segment.writeStream)
-      if (this.capture.framePriming) {
-        await primeScreencastFrames(page, this.clock)
+      if (
+        this.capture.framePriming &&
+        !(await primeScreencastFrames(page, this.clock, frameObserver))
+      ) {
+        this.log(
+          'debug',
+          '[WdioPuppeteerVideoService] Screencast delivered fewer than two frames after frame priming; this recording may be empty.',
+        )
       }
 
       this.session.attachCapture({
@@ -233,6 +246,8 @@ export class PuppeteerCaptureEngine {
           .catch(() => undefined)
       }
       throw error
+    } finally {
+      frameObserver?.dispose()
     }
   }
 
