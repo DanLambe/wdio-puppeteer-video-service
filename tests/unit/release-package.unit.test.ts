@@ -265,6 +265,40 @@ describe('release package validation', () => {
     ).toBe(false)
   })
 
+  it('pins the reviewed Edge driver in both lock-free minimum installs', async () => {
+    const [workflow, packageJsonText, lockText, npmConfig] = await Promise.all([
+      fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
+      fs.readFile('package.json', 'utf8'),
+      fs.readFile('package-lock.json', 'utf8'),
+      fs.readFile('.npmrc', 'utf8'),
+    ])
+    const packageJson = JSON.parse(packageJsonText) as {
+      readonly allowScripts?: Readonly<Record<string, boolean>>
+    }
+    const lock = JSON.parse(lockText) as {
+      readonly packages?: Readonly<
+        Record<string, { readonly version?: string }>
+      >
+    }
+    const minimumPackages = workflow.slice(
+      workflow.indexOf('  MINIMUM_SUPPORTED_PEERS:'),
+      workflow.indexOf('\njobs:'),
+    )
+    const version = minimumPackages.match(
+      /\bedgedriver@(\d+\.\d+\.\d+)\b/u,
+    )?.[1]
+
+    expect(version).toBeDefined()
+    expect(packageJson.allowScripts?.[`edgedriver@${version}`]).toBe(true)
+    expect(lock.packages?.['node_modules/edgedriver']?.version).toBe(version)
+    expect(
+      workflow.match(/\$\{\{ env.MINIMUM_SUPPORTED_PEERS \}\}/gu),
+    ).toHaveLength(2)
+    expect(workflow.split(`expected edgedriver ${version}`)).toHaveLength(3)
+    expect(npmConfig).toContain('strict-allow-scripts=true')
+    expect(workflow).not.toContain('--dangerously-allow-all-scripts')
+  })
+
   it('aligns Puppeteer support with the WebdriverIO v9 compatibility band', async () => {
     const [workflow, packageJsonText] = await Promise.all([
       fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
