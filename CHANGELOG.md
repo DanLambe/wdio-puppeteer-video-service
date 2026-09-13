@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0-rc.3
+
+### Patch Changes
+
+- bb976b6: Fix retained-video metadata and report links when `outputDir` is relative to the
+  worker's working directory, including deferred processing. Keep runtime skipped
+  tests marked as skipped and do not retain them as failures or attach them to
+  failure-only Allure reports.
+
+  Recover recording startup when WebdriverIO's automatic tab-close switch overlaps
+  navigation and destroys the page-marker script context. Retry only marker
+  creation once for known context-destruction errors, before allocating media, and
+  avoid duplicate recording restarts on an already active window.
+
+- bb976b6: Request a bounded compositor paint during frame priming so static tabs have an
+  opportunity to emit more than the initial screencast frame. The unclipped,
+  low-quality viewport snapshot is discarded in memory, not used to encode video.
+  Restore the original viewport even if warmup is interrupted and clear the paint
+  deadline. The public configuration and frame-priming default are unchanged.
+
 ## 1.0.0-rc.2
 
 ### Patch Changes
