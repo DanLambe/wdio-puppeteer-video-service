@@ -1,0 +1,74 @@
+name: Install Script Drift
+
+# Release validation installs the supported peer stacks without a lockfile, so a
+# new upstream release can pull in a package whose install script allowScripts
+# has not reviewed. Resolve the same stacks weekly, without running any script,
+# so that shows up before a release rather than during one. This workflow never
+# approves anything; a failure lists the packages for review.
+on:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: install-script-drift
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Keep identical to release-validation.yaml; a unit test enforces it.
+env:
+  MINIMUM_SUPPORTED_PEERS: >-
+    webdriverio@9.29.1 puppeteer-core@24.11.2
+    @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
+    @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
+    @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
+    @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
+    @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
+    @wdio/types@9.29.1
+    expect-webdriverio@5.7.0
+
+jobs:
+  install-scripts:
+    name: Install scripts (${{ matrix.dependencies }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        dependencies:
+          - minimum
+          - latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install Dependencies Without Scripts
+        run: corepack npm ci --ignore-scripts
+
+      - name: Install Minimum Supported Peers
+        if: matrix.dependencies == 'minimum'
+        run: >-
+          corepack npm install --no-save --ignore-scripts --no-package-lock
+          ${{ env.MINIMUM_SUPPORTED_PEERS }}
+
+      - name: Install Latest Supported Peers
+        if: matrix.dependencies == 'latest'
+        run: >-
+          corepack npm install --no-save --ignore-scripts
+          webdriverio@9 puppeteer-core@24
+          @wdio/allure-reporter@9 @wdio/cli@9
+          @wdio/cucumber-framework@9 @wdio/globals@9
+          @wdio/jasmine-framework@9 @wdio/local-runner@9
+          @wdio/mocha-framework@9 @wdio/reporter@9
+          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
