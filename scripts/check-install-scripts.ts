@@ -68,14 +68,17 @@ export const describePendingInstallScripts = (
   ].join('\n')
 }
 
+// Run the npm that launched this script rather than resolving one from PATH.
 const runNpm = (args: readonly string[]): string => {
   const npmCli = process.env.npm_execpath
-  const result = npmCli
-    ? spawnSync(process.execPath, [npmCli, ...args], { encoding: 'utf8' })
-    : spawnSync('npm', args, {
-        encoding: 'utf8',
-        shell: process.platform === 'win32',
-      })
+  if (!npmCli) {
+    throw new Error(
+      'Run this check through npm: corepack npm run check:install-scripts',
+    )
+  }
+  const result = spawnSync(process.execPath, [npmCli, ...args], {
+    encoding: 'utf8',
+  })
   if (result.error) {
     throw result.error
   }

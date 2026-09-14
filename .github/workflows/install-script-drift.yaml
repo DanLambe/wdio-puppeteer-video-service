@@ -7,7 +7,7 @@ name: Install Script Drift
 # approves anything; a failure lists the packages for review.
 on:
   schedule:
-    - cron: '23 7 * * 1'
+    - cron: '41 6 * * 1'
   workflow_dispatch:
 
 concurrency:
