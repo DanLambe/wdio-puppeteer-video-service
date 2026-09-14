@@ -198,7 +198,7 @@ export class PuppeteerCaptureEngine {
       pendingRecordingPath = output.recordingPath
       // Observe before starting so the screencast's first frame is counted.
       if (this.capture.framePriming) {
-        frameObserver = observeScreencastFrames(page)
+        frameObserver = observeScreencastFrames(page, this.capture.fps)
       }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
@@ -225,7 +225,7 @@ export class PuppeteerCaptureEngine {
       ) {
         this.log(
           'debug',
-          '[WdioPuppeteerVideoService] Screencast delivered fewer than two frames after frame priming; this recording may be empty.',
+          '[WdioPuppeteerVideoService] Screencast did not deliver enough frames for encoding after frame priming; this recording may be empty.',
         )
       }
 

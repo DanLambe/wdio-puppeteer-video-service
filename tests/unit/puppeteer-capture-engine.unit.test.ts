@@ -47,6 +47,7 @@ const createHarness = (
     connectError?: Error
     fileSystem?: FileSystemBoundary
     framePriming?: boolean
+    fps?: number
     recorder?: FakeRecorder
     sessionToken?: string
   } = {},
@@ -101,7 +102,10 @@ const createHarness = (
   const protocols: string[] = []
   let uuidIndex = 0
   const capture = resolveServiceConfiguration({
-    capture: { framePriming: options.framePriming ?? false },
+    capture: {
+      framePriming: options.framePriming ?? false,
+      fps: options.fps ?? 30,
+    },
   }).options.capture
   const startScreencast = vi.fn(
     async (_page: Page, _options: StartScreencastOptions) => recorder as never,
@@ -410,7 +414,7 @@ describe('Puppeteer capture engine', () => {
     const frames = attachScreencastSession(harness, (warmup, session) => {
       // A just-activated tab drops everything the first warmup produces.
       if (warmup === 2) {
-        session.emit('Page.screencastFrame', screencastFrame)
+        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
       }
     })
 
@@ -423,11 +427,38 @@ describe('Puppeteer capture engine', () => {
     expect(frames.warmups()).toBe(2)
     expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
     expect(
-      harness.logs.some(({ message }) => message.includes('fewer than two')),
+      harness.logs.some(({ message }) =>
+        message.includes('enough frames for encoding'),
+      ),
     ).toBe(false)
   })
 
-  it('reports a screencast that never delivers a second frame', async () => {
+  it('uses the configured FPS when verifying recorder readiness', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness({
+      framePriming: true,
+      fps: 1,
+      clock: createAdvancingClock(),
+    })
+    // The first warmup's 0.2 s gap is six frames at 30 FPS but none at 1 FPS,
+    // so only the configured rate makes recovery prime a second time.
+    const frames = attachScreencastSession(harness, (warmup, session) => {
+      session.emit('Page.screencastFrame', {
+        metadata: { timestamp: warmup === 1 ? 1.2 : 4.2 },
+      })
+    })
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    const { segment } = harness.session.detachCapture()
+    harness.recorder.end()
+    await segment?.writeStreamDone
+    expect(frames.warmups()).toBe(2)
+    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('reports a screencast that never delivers an encodable pair', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness({
@@ -447,7 +478,7 @@ describe('Puppeteer capture engine', () => {
     expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
     expect(harness.logs).toContainEqual({
       level: 'debug',
-      message: expect.stringContaining('fewer than two frames'),
+      message: expect.stringContaining('enough frames for encoding'),
     })
   })
 

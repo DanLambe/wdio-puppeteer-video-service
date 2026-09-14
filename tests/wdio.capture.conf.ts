@@ -65,6 +65,9 @@ const expectedDimensions: Record<string, { width: number; height: number }> = {
   'padded-mp4': { width: 802, height: 402 },
   'filtered-mp4': { width: 320, height: 240 },
 }
+if (mode === 'low-fps') {
+  capture.fps = 1
+}
 if (mode !== 'controls' && expectedDimensions[mode]) {
   capture.viewport = { width: 960, height: 600 }
   capture.crop = { x: 10, y: 20, width: 801, height: 401 }

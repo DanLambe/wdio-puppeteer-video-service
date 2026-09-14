@@ -154,6 +154,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Verify Low-FPS Static Recording
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:low-fps
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics

@@ -4,6 +4,13 @@
 
 ### Patch Changes
 
+- Recover screencasts that stall immediately after a tab switch. Verify enough
+  timestamp-separated input frames to pass Puppeteer's FFmpeg startup probing,
+  rather than assuming that two received frames produce video. Retry priming only
+  when needed, with an FPS-aware scheduling budget and viewport restoration.
+  Keep the public configuration unchanged and cover low-FPS static capture with
+  decoded-media regression tests.
+
 - bb976b6: Fix retained-video metadata and report links when `outputDir` is relative to the
   worker's working directory, including deferred processing. Keep runtime skipped
   tests marked as skipped and do not retain them as failures or attach them to

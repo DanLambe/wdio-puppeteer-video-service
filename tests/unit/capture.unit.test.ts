@@ -391,22 +391,108 @@ const createFramePage = (
 }
 
 describe('screencast frame recovery', () => {
-  it('counts only encodable frames on the recorder session until disposed', () => {
+  it.each([
+    { fps: 1, timestamps: [1, 1.49], encodable: false },
+    { fps: 1, timestamps: [1, 1.5], encodable: false },
+    { fps: 1, timestamps: [1, 3.49], encodable: false },
+    { fps: 1, timestamps: [1, 3.5], encodable: true },
+    { fps: 30, timestamps: [1, 1.001], encodable: false },
+    { fps: 30, timestamps: [1, 1.02], encodable: false },
+    { fps: 30, timestamps: [1, 1.1], encodable: true },
+    { fps: 30, timestamps: [1, 1.04, 1.08, 1.12], encodable: true },
+    { fps: 1, timestamps: [1, 1.3, 1.6], encodable: false },
+    { fps: 30, timestamps: [2, 2, 1], encodable: false },
+    { fps: 30, timestamps: [1, 1.1, 1.1, 0], encodable: true },
+  ])(
+    'matches consecutive-frame rounding for $fps FPS and $timestamps',
+    ({ fps, timestamps, encodable }) => {
+      const session = new EventEmitter()
+      const frames = observeScreencastFrames(
+        { mainFrame: () => ({ client: session }) } as unknown as Page,
+        fps,
+      )
+      for (const timestamp of timestamps) {
+        session.emit('Page.screencastFrame', { metadata: { timestamp } })
+      }
+      expect(frames?.hasEncodableFrames).toBe(encodable)
+      frames?.dispose()
+    },
+  )
+
+  it('ignores invalid metadata and stops observing before an encodable pair', () => {
     const session = new EventEmitter()
-    const frames = observeScreencastFrames({
-      mainFrame: () => ({ client: session }),
-    } as unknown as Page)
+    const frames = observeScreencastFrames(
+      { mainFrame: () => ({ client: session }) } as unknown as Page,
+      30,
+    )
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 1 } })
+    for (const metadata of [
+      null,
+      42,
+      {},
+      { timestamp: '2' },
+      { timestamp: Number.NaN },
+      { timestamp: Number.POSITIVE_INFINITY },
+    ]) {
+      session.emit('Page.screencastFrame', { metadata })
+    }
+    expect(frames?.hasEncodableFrames).toBe(false)
+    frames?.dispose()
+    frames?.dispose()
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 2 } })
+    expect(frames?.hasEncodableFrames).toBe(false)
+    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('does not start another low-FPS warmup after the recovery deadline', async () => {
+    const harness = createFramePage(() => {})
+    const frames = observeScreencastFrames(harness.page, 1)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(false)
+    expect(delays).toEqual([50, 3_000, 50, 500])
+    expect(harness.warmups()).toBe(2)
+  })
+
+  it('recovers when two received frames round to zero encoded frames at low FPS', async () => {
+    const harness = createFramePage((warmup, session) => {
+      session.emit('Page.screencastFrame', {
+        metadata: { timestamp: warmup === 1 ? 1.05 : 4.1 },
+      })
+    })
+    const frames = observeScreencastFrames(harness.page, 1)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(true)
+    expect(harness.warmups()).toBe(2)
+    expect(delays).toEqual([50, 3_000, 50])
+  })
+
+  it('confirms an encodable pair on the recorder session until disposed', () => {
+    const session = new EventEmitter()
+    const frames = observeScreencastFrames(
+      { mainFrame: () => ({ client: session }) } as unknown as Page,
+      30,
+    )
     expect(frames).toBeDefined()
 
     session.emit('Page.screencastFrame', screencastFrame)
     // ScreenRecorder drops frames without a timestamp, so they must not count.
     session.emit('Page.screencastFrame', { data: '', metadata: {} })
     session.emit('Page.screencastFrame', undefined)
-    expect(frames?.frameCount).toBe(1)
+    expect(frames?.hasEncodableFrames).toBe(false)
+    expect(frames?.recoveryIntervalMs).toBe(100)
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
+    expect(frames?.hasEncodableFrames).toBe(true)
 
     frames?.dispose()
     session.emit('Page.screencastFrame', screencastFrame)
-    expect(frames?.frameCount).toBe(1)
+    expect(frames?.hasEncodableFrames).toBe(true)
     expect(session.listenerCount('Page.screencastFrame')).toBe(0)
   })
 
@@ -420,16 +506,16 @@ describe('screencast frame recovery', () => {
     ['the session is missing', () => ({})],
     ['the session cannot be observed', () => ({ client: { on: () => {} } })],
   ])('skips verification when %s', (_label, mainFrame) => {
-    expect(observeScreencastFrames({ mainFrame } as unknown as Page)).toBe(
-      undefined,
-    )
+    expect(
+      observeScreencastFrames({ mainFrame } as unknown as Page, 30),
+    ).toBeUndefined()
   })
 
   it('does not prime again when the first warmup produced a frame', async () => {
     const harness = createFramePage((_warmup, session) => {
-      session.emit('Page.screencastFrame', screencastFrame)
+      session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
     })
-    const frames = observeScreencastFrames(harness.page)
+    const frames = observeScreencastFrames(harness.page, 30)
     harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
@@ -446,10 +532,10 @@ describe('screencast frame recovery', () => {
     // Puppeteer would encode an empty recording without a second warmup.
     const harness = createFramePage((warmup, session) => {
       if (warmup === 2) {
-        session.emit('Page.screencastFrame', screencastFrame)
+        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
       }
     })
-    const frames = observeScreencastFrames(harness.page)
+    const frames = observeScreencastFrames(harness.page, 30)
     harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
@@ -458,17 +544,19 @@ describe('screencast frame recovery', () => {
     ).resolves.toBe(true)
     expect(harness.warmups()).toBe(2)
     expect(delays).toEqual([50, 100, 50])
-    expect(frames?.frameCount).toBe(2)
+    expect(frames?.hasEncodableFrames).toBe(true)
   })
 
   it('waits for an in-flight frame instead of priming again', async () => {
     const harness = createFramePage(() => {})
-    const frames = observeScreencastFrames(harness.page)
+    const frames = observeScreencastFrames(harness.page, 30)
     harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock } = createClock((milliseconds) => {
       // The restore frame lands during the settle wait.
       if (milliseconds === 100) {
-        harness.session.emit('Page.screencastFrame', screencastFrame)
+        harness.session.emit('Page.screencastFrame', {
+          metadata: { timestamp: 1.2 },
+        })
       }
     })
 
@@ -480,7 +568,7 @@ describe('screencast frame recovery', () => {
 
   it('gives up within its budget when the screencast never recovers', async () => {
     const harness = createFramePage(() => {})
-    const frames = observeScreencastFrames(harness.page)
+    const frames = observeScreencastFrames(harness.page, 30)
     harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
