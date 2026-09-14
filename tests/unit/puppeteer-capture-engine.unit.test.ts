@@ -1,8 +1,9 @@
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
-import type { Page, ScreenRecorder } from 'puppeteer-core'
+import type { Page, ScreenRecorder, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type ClockBoundary,
@@ -46,6 +47,7 @@ const createHarness = (
     connectError?: Error
     fileSystem?: FileSystemBoundary
     framePriming?: boolean
+    fps?: number
     recorder?: FakeRecorder
     sessionToken?: string
   } = {},
@@ -100,7 +102,10 @@ const createHarness = (
   const protocols: string[] = []
   let uuidIndex = 0
   const capture = resolveServiceConfiguration({
-    capture: { framePriming: options.framePriming ?? false },
+    capture: {
+      framePriming: options.framePriming ?? false,
+      fps: options.fps ?? 30,
+    },
   }).options.capture
   const startScreencast = vi.fn(
     async (_page: Page, _options: StartScreencastOptions) => recorder as never,
@@ -142,6 +147,49 @@ const createHarness = (
     recorder,
     session,
     startScreencast,
+  }
+}
+
+const screencastFrame = { data: '', metadata: { timestamp: 1 }, sessionId: 1 }
+
+// Give the harness page the CDP session Puppeteer's recorder listens on. The
+// screencast delivers its initial frame on start; `onWarmup` decides which
+// priming warmups also produce one.
+const attachScreencastSession = (
+  harness: ReturnType<typeof createHarness>,
+  onWarmup: (warmup: number, session: EventEmitter) => void,
+): { session: EventEmitter; warmups: () => number } => {
+  const session = new EventEmitter()
+  let warmups = 0
+  Object.assign(harness.page, {
+    mainFrame: () => ({ client: session }),
+    screenshot: async () => new Uint8Array(),
+    setViewport: vi.fn(async (viewport: Viewport | null) => {
+      if (viewport?.width === 801) {
+        warmups += 1
+        onWarmup(warmups, session)
+      }
+    }),
+  })
+  harness.startScreencast.mockImplementation(async () => {
+    session.emit('Page.screencastFrame', screencastFrame)
+    return harness.recorder as never
+  })
+  return { session, warmups: () => warmups }
+}
+
+const createAdvancingClock = (): ClockBoundary => {
+  let now = 0
+  return {
+    clearInterval: () => {},
+    clearTimeout: () => {},
+    delay: async (milliseconds) => {
+      now += milliseconds
+    },
+    now: () => now,
+    queueMicrotask,
+    setInterval: () => ({}) as NodeJS.Timeout,
+    setTimeout: () => ({}) as NodeJS.Timeout,
   }
 }
 
@@ -357,6 +405,97 @@ describe('Puppeteer capture engine', () => {
     expect(
       harness.logs.some(({ message }) => message.includes('viewport closed')),
     ).toBe(true)
+  })
+
+  it('recovers a stalled screencast start and releases its frame listener', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness({ framePriming: true })
+    const frames = attachScreencastSession(harness, (warmup, session) => {
+      // A just-activated tab drops everything the first warmup produces.
+      if (warmup === 2) {
+        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
+      }
+    })
+
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    harness.recorder.end()
+    await harness.engine.stopCapture()
+
+    expect(frames.warmups()).toBe(2)
+    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(
+      harness.logs.some(({ message }) =>
+        message.includes('enough frames for encoding'),
+      ),
+    ).toBe(false)
+  })
+
+  it('uses the configured FPS when verifying recorder readiness', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness({
+      framePriming: true,
+      fps: 1,
+      clock: createAdvancingClock(),
+    })
+    // The first warmup's 0.2 s gap is six frames at 30 FPS but none at 1 FPS,
+    // so only the configured rate makes recovery prime a second time.
+    const frames = attachScreencastSession(harness, (warmup, session) => {
+      session.emit('Page.screencastFrame', {
+        metadata: { timestamp: warmup === 1 ? 1.2 : 4.2 },
+      })
+    })
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    const { segment } = harness.session.detachCapture()
+    harness.recorder.end()
+    await segment?.writeStreamDone
+    expect(frames.warmups()).toBe(2)
+    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('reports a screencast that never delivers an encodable pair', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness({
+      clock: createAdvancingClock(),
+      framePriming: true,
+    })
+    const frames = attachScreencastSession(harness, () => {})
+
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    // The advancing clock only drives startup; release the segment directly.
+    const { segment } = harness.session.detachCapture()
+    harness.recorder.end()
+    await segment?.writeStreamDone
+
+    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(harness.logs).toContainEqual({
+      level: 'debug',
+      message: expect.stringContaining('enough frames for encoding'),
+    })
+  })
+
+  it('releases its frame listener when screencast startup fails', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness({ framePriming: true })
+    const frames = attachScreencastSession(harness, () => {})
+    harness.startScreencast.mockReset()
+    harness.startScreencast.mockRejectedValueOnce(
+      new Error('screencast unavailable'),
+    )
+
+    await expect(startCapture(harness, outputPath)).rejects.toThrow(
+      'screencast unavailable',
+    )
+    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
   })
 
   it('cleans reserved output when screencast startup fails', async () => {

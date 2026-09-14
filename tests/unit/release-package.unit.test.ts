@@ -265,38 +265,40 @@ describe('release package validation', () => {
     ).toBe(false)
   })
 
-  it('pins the reviewed Edge driver in both lock-free minimum installs', async () => {
-    const [workflow, packageJsonText, lockText, npmConfig] = await Promise.all([
-      fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
-      fs.readFile('package.json', 'utf8'),
-      fs.readFile('package-lock.json', 'utf8'),
-      fs.readFile('.npmrc', 'utf8'),
-    ])
+  // WebdriverIO downloads the Edge driver itself when a session starts, and the
+  // edgedriver install script downloads only when EDGEDRIVER_AUTO_INSTALL is
+  // set, which CI never does. Denying it by name therefore runs no install-time
+  // code and cannot go stale when lock-free installs resolve a new release; a
+  // per-version approval blocked validation each time one was published.
+  it('denies the inert Edge driver install script for every version', async () => {
+    const [packageJsonText, npmConfig, validation, pullRequest] =
+      await Promise.all([
+        fs.readFile('package.json', 'utf8'),
+        fs.readFile('.npmrc', 'utf8'),
+        fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
+        fs.readFile('.github/workflows/pull-request-checks.yaml', 'utf8'),
+      ])
     const packageJson = JSON.parse(packageJsonText) as {
       readonly allowScripts?: Readonly<Record<string, boolean>>
     }
-    const lock = JSON.parse(lockText) as {
-      readonly packages?: Readonly<
-        Record<string, { readonly version?: string }>
-      >
-    }
-    const minimumPackages = workflow.slice(
-      workflow.indexOf('  MINIMUM_SUPPORTED_PEERS:'),
-      workflow.indexOf('\njobs:'),
-    )
-    const version = minimumPackages.match(
-      /\bedgedriver@(\d+\.\d+\.\d+)\b/u,
-    )?.[1]
 
-    expect(version).toBeDefined()
-    expect(packageJson.allowScripts?.[`edgedriver@${version}`]).toBe(true)
-    expect(lock.packages?.['node_modules/edgedriver']?.version).toBe(version)
+    expect(packageJson.allowScripts?.edgedriver).toBe(false)
     expect(
-      workflow.match(/\$\{\{ env.MINIMUM_SUPPORTED_PEERS \}\}/gu),
-    ).toHaveLength(2)
-    expect(workflow.split(`expected edgedriver ${version}`)).toHaveLength(3)
+      Object.keys(packageJson.allowScripts ?? {}).some((name) => {
+        return name.startsWith('edgedriver@')
+      }),
+    ).toBe(false)
     expect(npmConfig).toContain('strict-allow-scripts=true')
-    expect(workflow).not.toContain('--dangerously-allow-all-scripts')
+    // Both minimum installs still share the one declared supported floor.
+    expect(
+      validation.match(/\$\{\{ env.MINIMUM_SUPPORTED_PEERS \}\}/gu),
+    ).toHaveLength(2)
+    for (const workflow of [validation, pullRequest]) {
+      // Pinning or rebuilding the driver would reintroduce approval churn.
+      expect(workflow).not.toContain('edgedriver')
+      expect(workflow).not.toContain('EDGEDRIVER_AUTO_INSTALL')
+      expect(workflow).not.toContain('--dangerously-allow-all-scripts')
+    }
   })
 
   it('aligns Puppeteer support with the WebdriverIO v9 compatibility band', async () => {

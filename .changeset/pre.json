@@ -23,6 +23,7 @@
     "prime-static-tab-paints",
     "quiet-browsers-align",
     "reach-windows-descendants",
+    "recover-stalled-screencast-start",
     "remove-unreachable-service-code",
     "retry-transient-lock-failures",
     "safe-configuration-example",

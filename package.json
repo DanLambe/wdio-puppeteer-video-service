@@ -72,6 +72,7 @@
     "test:e2e:capture:controls": "tsx tests/scripts/run-e2e-capture-modes.ts controls",
     "test:e2e:capture:metadata": "tsx tests/scripts/run-e2e-capture-modes.ts metadata",
     "test:e2e:capture:edge": "tsx tests/scripts/run-e2e-capture-modes.ts edge",
+    "test:e2e:capture:low-fps": "tsx tests/scripts/run-e2e-capture-modes.ts low-fps",
     "test:e2e:advanced": "tsx tests/scripts/run-e2e-advanced-options.ts all",
     "test:e2e:advanced:windows": "tsx tests/scripts/run-e2e-advanced-options.ts windows",
     "test:e2e:advanced:retry": "tsx tests/scripts/run-e2e-advanced-options.ts retry",
@@ -166,7 +167,7 @@
     "webdriverio": "^9.29.1"
   },
   "allowScripts": {
-    "edgedriver@6.3.0": true,
+    "edgedriver": false,
     "ffmpeg-static@5.3.0": true,
     "geckodriver": false,
     "esbuild@0.28.2": true

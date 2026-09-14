@@ -1,7 +1,12 @@
+import { EventEmitter } from 'node:events'
 import type { Page, ScreenRecorder, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { systemClock } from '../../src/service/boundaries.js'
 import {
+  type ClockBoundary,
+  systemClock,
+} from '../../src/service/boundaries.js'
+import {
+  observeScreencastFrames,
   primeScreencastFrames,
   startScreencast,
 } from '../../src/service/capture.js'
@@ -337,5 +342,256 @@ describe('Puppeteer screencast capture controls', () => {
     )
     await expect(priming).rejects.toBe(error)
     expect(setViewport).toHaveBeenLastCalledWith({ width: 800, height: 600 })
+  })
+})
+
+const screencastFrame = { data: '', metadata: { timestamp: 1 }, sessionId: 1 }
+
+const createClock = (
+  onDelay: (milliseconds: number) => void = () => {},
+): { clock: ClockBoundary; delays: number[] } => {
+  let now = 0
+  const delays: number[] = []
+  const clock: ClockBoundary = {
+    clearInterval: () => {},
+    clearTimeout: () => {},
+    delay: async (milliseconds) => {
+      delays.push(milliseconds)
+      onDelay(milliseconds)
+      now += milliseconds
+    },
+    now: () => now,
+    queueMicrotask,
+    setInterval: () => ({}) as NodeJS.Timeout,
+    setTimeout: () => ({}) as NodeJS.Timeout,
+  }
+  return { clock, delays }
+}
+
+// A page whose CDP session delivers screencast frames the way Chrome does. The
+// callback decides which warmups produce a frame, which is how a tab that has
+// just been activated is modelled: its early frames never arrive.
+const createFramePage = (
+  onWarmup: (warmup: number, session: EventEmitter) => void,
+): { page: Page; session: EventEmitter; warmups: () => number } => {
+  const session = new EventEmitter()
+  let warmups = 0
+  const page = {
+    mainFrame: () => ({ client: session }),
+    screenshot: async () => new Uint8Array(),
+    setViewport: vi.fn(async (viewport: Viewport | null) => {
+      if (viewport?.width === 801) {
+        warmups += 1
+        onWarmup(warmups, session)
+      }
+    }),
+    viewport: () => ({ width: 800, height: 600 }),
+  } as unknown as Page
+  return { page, session, warmups: () => warmups }
+}
+
+describe('screencast frame recovery', () => {
+  it.each([
+    { fps: 1, timestamps: [1, 1.49], encodable: false },
+    { fps: 1, timestamps: [1, 1.5], encodable: false },
+    { fps: 1, timestamps: [1, 3.49], encodable: false },
+    { fps: 1, timestamps: [1, 3.5], encodable: true },
+    { fps: 30, timestamps: [1, 1.001], encodable: false },
+    { fps: 30, timestamps: [1, 1.02], encodable: false },
+    { fps: 30, timestamps: [1, 1.1], encodable: true },
+    { fps: 30, timestamps: [1, 1.04, 1.08, 1.12], encodable: true },
+    { fps: 1, timestamps: [1, 1.3, 1.6], encodable: false },
+    { fps: 30, timestamps: [2, 2, 1], encodable: false },
+    { fps: 30, timestamps: [1, 1.1, 1.1, 0], encodable: true },
+  ])(
+    'matches consecutive-frame rounding for $fps FPS and $timestamps',
+    ({ fps, timestamps, encodable }) => {
+      const session = new EventEmitter()
+      const frames = observeScreencastFrames(
+        { mainFrame: () => ({ client: session }) } as unknown as Page,
+        fps,
+      )
+      for (const timestamp of timestamps) {
+        session.emit('Page.screencastFrame', { metadata: { timestamp } })
+      }
+      expect(frames?.hasEncodableFrames).toBe(encodable)
+      frames?.dispose()
+    },
+  )
+
+  it('ignores invalid metadata and stops observing before an encodable pair', () => {
+    const session = new EventEmitter()
+    const frames = observeScreencastFrames(
+      { mainFrame: () => ({ client: session }) } as unknown as Page,
+      30,
+    )
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 1 } })
+    for (const metadata of [
+      null,
+      42,
+      {},
+      { timestamp: '2' },
+      { timestamp: Number.NaN },
+      { timestamp: Number.POSITIVE_INFINITY },
+    ]) {
+      session.emit('Page.screencastFrame', { metadata })
+    }
+    expect(frames?.hasEncodableFrames).toBe(false)
+    frames?.dispose()
+    frames?.dispose()
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 2 } })
+    expect(frames?.hasEncodableFrames).toBe(false)
+    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('does not start another low-FPS warmup after the recovery deadline', async () => {
+    const harness = createFramePage(() => {})
+    const frames = observeScreencastFrames(harness.page, 1)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(false)
+    expect(delays).toEqual([50, 3_000, 50, 500])
+    expect(harness.warmups()).toBe(2)
+  })
+
+  it('recovers when two received frames round to zero encoded frames at low FPS', async () => {
+    const harness = createFramePage((warmup, session) => {
+      session.emit('Page.screencastFrame', {
+        metadata: { timestamp: warmup === 1 ? 1.05 : 4.1 },
+      })
+    })
+    const frames = observeScreencastFrames(harness.page, 1)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(true)
+    expect(harness.warmups()).toBe(2)
+    expect(delays).toEqual([50, 3_000, 50])
+  })
+
+  it('confirms an encodable pair on the recorder session until disposed', () => {
+    const session = new EventEmitter()
+    const frames = observeScreencastFrames(
+      { mainFrame: () => ({ client: session }) } as unknown as Page,
+      30,
+    )
+    expect(frames).toBeDefined()
+
+    session.emit('Page.screencastFrame', screencastFrame)
+    // ScreenRecorder drops frames without a timestamp, so they must not count.
+    session.emit('Page.screencastFrame', { data: '', metadata: {} })
+    session.emit('Page.screencastFrame', undefined)
+    expect(frames?.hasEncodableFrames).toBe(false)
+    expect(frames?.recoveryIntervalMs).toBe(100)
+    session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
+    expect(frames?.hasEncodableFrames).toBe(true)
+
+    frames?.dispose()
+    session.emit('Page.screencastFrame', screencastFrame)
+    expect(frames?.hasEncodableFrames).toBe(true)
+    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it.each([
+    [
+      'the main frame is gone',
+      () => {
+        throw new Error('target closed')
+      },
+    ],
+    ['the session is missing', () => ({})],
+    ['the session cannot be observed', () => ({ client: { on: () => {} } })],
+  ])('skips verification when %s', (_label, mainFrame) => {
+    expect(
+      observeScreencastFrames({ mainFrame } as unknown as Page, 30),
+    ).toBeUndefined()
+  })
+
+  it('does not prime again when the first warmup produced a frame', async () => {
+    const harness = createFramePage((_warmup, session) => {
+      session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
+    })
+    const frames = observeScreencastFrames(harness.page, 30)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(true)
+    expect(harness.warmups()).toBe(1)
+    expect(delays).toEqual([50])
+  })
+
+  it('primes again when a just-activated tab swallows the first warmup', async () => {
+    // The regression: the screencast delivers its initial frame, then drops
+    // every frame the first warmup produces. A static page never repaints, so
+    // Puppeteer would encode an empty recording without a second warmup.
+    const harness = createFramePage((warmup, session) => {
+      if (warmup === 2) {
+        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
+      }
+    })
+    const frames = observeScreencastFrames(harness.page, 30)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(true)
+    expect(harness.warmups()).toBe(2)
+    expect(delays).toEqual([50, 100, 50])
+    expect(frames?.hasEncodableFrames).toBe(true)
+  })
+
+  it('waits for an in-flight frame instead of priming again', async () => {
+    const harness = createFramePage(() => {})
+    const frames = observeScreencastFrames(harness.page, 30)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock } = createClock((milliseconds) => {
+      // The restore frame lands during the settle wait.
+      if (milliseconds === 100) {
+        harness.session.emit('Page.screencastFrame', {
+          metadata: { timestamp: 1.2 },
+        })
+      }
+    })
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(true)
+    expect(harness.warmups()).toBe(1)
+  })
+
+  it('gives up within its budget when the screencast never recovers', async () => {
+    const harness = createFramePage(() => {})
+    const frames = observeScreencastFrames(harness.page, 30)
+    harness.session.emit('Page.screencastFrame', screencastFrame)
+    const { clock, delays } = createClock()
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, frames),
+    ).resolves.toBe(false)
+    const elapsed = delays.reduce((total, milliseconds) => total + milliseconds)
+    // One warmup, then 100 ms settle plus a 50 ms warmup per retry until the
+    // 1,500 ms recovery budget is spent.
+    expect(harness.warmups()).toBe(11)
+    expect(elapsed).toBe(50 + 1_500)
+    // Every warmup restores the viewport it bumped.
+    expect(vi.mocked(harness.page.setViewport)).toHaveBeenLastCalledWith({
+      width: 800,
+      height: 600,
+    })
+  })
+
+  it('primes once without verification when no observer is available', async () => {
+    const harness = createFramePage(() => {})
+    const { clock } = createClock()
+
+    await expect(primeScreencastFrames(harness.page, clock)).resolves.toBe(true)
+    expect(harness.warmups()).toBe(1)
   })
 })

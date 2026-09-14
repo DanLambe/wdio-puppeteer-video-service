@@ -15,8 +15,6 @@ permissions:
 # `@wdio/globals` back in and conflicts with the minimum `expect-webdriverio`.
 # The whole supported floor is therefore declared once and used by every job
 # that installs it, so the lists cannot drift apart again.
-# Lock-free installs must also pin the reviewed Edge driver: npm's strict
-# install-script check covers the entire tree, even for targeted rebuilds.
 env:
   MINIMUM_SUPPORTED_PEERS: >-
     webdriverio@9.29.1 puppeteer-core@24.11.2
@@ -26,7 +24,7 @@ env:
     @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
     @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
     @wdio/types@9.29.1
-    expect-webdriverio@5.7.0 edgedriver@6.3.0
+    expect-webdriverio@5.7.0
 
 jobs:
   core:
@@ -91,7 +89,6 @@ jobs:
           if [ "${{ matrix.dependencies }}" = 'minimum' ]; then
             [ "${wdio}" = '9.29.1' ] || { echo 'expected webdriverio 9.29.1'; exit 1; }
             [ "${puppeteer}" = '24.11.2' ] || { echo 'expected puppeteer-core 24.11.2'; exit 1; }
-            [ "$(installed edgedriver)" = '6.3.0' ] || { echo 'expected edgedriver 6.3.0'; exit 1; }
           else
             case "${wdio}" in 9.*) ;; *) echo 'expected webdriverio 9.x'; exit 1;; esac
             case "${puppeteer}" in 24.*) ;; *) echo 'expected puppeteer-core 24.x'; exit 1;; esac
@@ -157,6 +154,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Verify Low-FPS Static Recording
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:low-fps
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics
@@ -184,12 +185,6 @@ jobs:
         run: >-
           corepack npm install --no-save --ignore-scripts --no-package-lock
           --min-release-age=0 ${{ env.MINIMUM_SUPPORTED_PEERS }}
-
-      - name: Verify Reviewed Edge Driver
-        shell: bash
-        run: |
-          edgedriver="$(node -p "JSON.parse(require('node:fs').readFileSync('node_modules/edgedriver/package.json','utf8')).version")"
-          [ "${edgedriver}" = '6.3.0' ] || { echo 'expected edgedriver 6.3.0'; exit 1; }
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -324,7 +319,7 @@ jobs:
           @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
 
       - name: Rebuild Edge Test Dependencies
-        run: corepack npm rebuild esbuild ffmpeg-static edgedriver
+        run: corepack npm rebuild esbuild ffmpeg-static
 
       - name: Run Edge Capture Smoke Test
         run: corepack npm run test:e2e:capture:edge
