@@ -1,19 +1,21 @@
-import { EventEmitter } from 'node:events'
-import type { Page, ScreenRecorder, Viewport } from 'puppeteer-core'
+import type { Page, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type ClockBoundary,
   systemClock,
 } from '../../src/service/boundaries.js'
 import {
-  observeScreencastFrames,
   primeScreencastFrames,
   startScreencast,
 } from '../../src/service/capture.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
+import type {
+  ScreencastRecorder,
+  ScreencastRecorderOptions,
+} from '../../src/service/screencast-recorder.js'
 
-const createRecorder = (): ScreenRecorder => {
-  return { id: 'recorder' } as unknown as ScreenRecorder
+const createRecorder = (): ScreencastRecorder => {
+  return { id: 'recorder' } as unknown as ScreencastRecorder
 }
 
 describe('Puppeteer screencast capture controls', () => {
@@ -26,7 +28,9 @@ describe('Puppeteer screencast capture controls', () => {
     const recorder = createRecorder()
     const originalViewport: Viewport = { width: 1365, height: 768 }
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
-    const screencast = vi.fn(async () => recorder)
+    const record = vi.fn(
+      async (_page: Page, _options: ScreencastRecorderOptions) => recorder,
+    )
     const capture = resolveServiceConfiguration({
       capture: {
         viewport: { width: 1280, height: 720 },
@@ -37,15 +41,16 @@ describe('Puppeteer screencast capture controls', () => {
         crop: { x: 10, y: 20, width: 1000, height: 600 },
       },
     }).options.capture
+    const page = {
+      setViewport,
+      viewport: () => originalViewport,
+    } as unknown as Page
 
     await expect(
       startScreencast(
-        {
-          screencast,
-          setViewport,
-          viewport: () => originalViewport,
-        } as unknown as Page,
+        page,
         { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        record,
       ),
     ).resolves.toBe(recorder)
 
@@ -53,7 +58,7 @@ describe('Puppeteer screencast capture controls', () => {
       width: 1280,
       height: 720,
     })
-    expect(screencast).toHaveBeenCalledWith({
+    expect(record).toHaveBeenCalledWith(page, {
       crop: { x: 10, y: 20, width: 1000, height: 600 },
       ffmpegPath: 'ffmpeg.exe',
       format: 'webm',
@@ -63,7 +68,7 @@ describe('Puppeteer screencast capture controls', () => {
       speed: 1.5,
     })
     expect(setViewport).toHaveBeenNthCalledWith(2, originalViewport)
-    expect(screencast.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(record.mock.invocationCallOrder[0]).toBeLessThan(
       setViewport.mock.invocationCallOrder[1] ?? Number.MAX_SAFE_INTEGER,
     )
   })
@@ -73,20 +78,16 @@ describe('Puppeteer screencast capture controls', () => {
     const capture = resolveServiceConfiguration({
       capture: { viewport: { width: 800, height: 600 } },
     }).options.capture
-    const page = {
-      screencast: async () => {
-        throw new Error('capture failed')
-      },
-      setViewport,
-      viewport: () => null,
-    } as unknown as Page
+    const page = { setViewport, viewport: () => null } as unknown as Page
 
     await expect(
-      startScreencast(page, {
-        capture,
-        format: 'webm',
-        ffmpegPath: 'ffmpeg.exe',
-      }),
+      startScreencast(
+        page,
+        { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        async () => {
+          throw new Error('capture failed')
+        },
+      ),
     ).rejects.toThrow('capture failed')
     expect(setViewport).toHaveBeenLastCalledWith(null)
   })
@@ -105,17 +106,14 @@ describe('Puppeteer screencast capture controls', () => {
 
     await expect(
       startScreencast(
-        {
-          screencast: async () => recorder,
-          setViewport,
-          viewport: () => null,
-        } as unknown as Page,
+        { setViewport, viewport: () => null } as unknown as Page,
         {
           capture,
           format: 'webm',
           ffmpegPath: 'ffmpeg.exe',
           onViewportRestoreError,
         },
+        async () => recorder,
       ),
     ).resolves.toBe(recorder)
     expect(onViewportRestoreError).toHaveBeenCalledWith(restoreError)
@@ -134,14 +132,11 @@ describe('Puppeteer screencast capture controls', () => {
 
       await expect(
         startScreencast(
-          {
-            viewport: () => null,
-            setViewport,
-            screencast: async () => {
-              throw failure
-            },
-          } as unknown as Page,
+          { viewport: () => null, setViewport } as unknown as Page,
           { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+          async () => {
+            throw failure
+          },
         ),
       ).rejects.toMatchObject({
         cause: failure,
@@ -162,13 +157,11 @@ describe('Puppeteer screencast capture controls', () => {
     }).options.capture
     await expect(
       startScreencast(
-        {
-          viewport: () => null,
-          screencast: async () => {
-            throw failure
-          },
-        } as unknown as Page,
+        { viewport: () => null } as unknown as Page,
         { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        async () => {
+          throw failure
+        },
       ),
     ).rejects.toBe(failure)
   })
@@ -179,12 +172,9 @@ describe('Puppeteer screencast capture controls', () => {
     const capture = resolveServiceConfiguration({}).options.capture
 
     await startScreencast(
-      {
-        screencast: async () => recorder,
-        setViewport,
-        viewport: () => null,
-      } as unknown as Page,
+      { setViewport, viewport: () => null } as unknown as Page,
       { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+      async () => recorder,
     )
 
     expect(setViewport).not.toHaveBeenCalled()
@@ -345,10 +335,8 @@ describe('Puppeteer screencast capture controls', () => {
   })
 })
 
-const screencastFrame = { data: '', metadata: { timestamp: 1 }, sessionId: 1 }
-
 const createClock = (
-  onDelay: (milliseconds: number) => void = () => {},
+  onDelay: (milliseconds: number) => number | undefined = () => undefined,
 ): { clock: ClockBoundary; delays: number[] } => {
   let now = 0
   const delays: number[] = []
@@ -357,8 +345,8 @@ const createClock = (
     clearTimeout: () => {},
     delay: async (milliseconds) => {
       delays.push(milliseconds)
-      onDelay(milliseconds)
-      now += milliseconds
+      // A callback may report extra time the awaited work took.
+      now += milliseconds + (onDelay(milliseconds) ?? 0)
     },
     now: () => now,
     queueMicrotask,
@@ -368,159 +356,36 @@ const createClock = (
   return { clock, delays }
 }
 
-// A page whose CDP session delivers screencast frames the way Chrome does. The
-// callback decides which warmups produce a frame, which is how a tab that has
-// just been activated is modelled: its early frames never arrive.
+// A page whose recorder has already received the screencast's initial frame.
+// The callback decides which warmups produce another, which is how a tab that
+// has just been activated is modelled: its early frames never arrive.
 const createFramePage = (
-  onWarmup: (warmup: number, session: EventEmitter) => void,
-): { page: Page; session: EventEmitter; warmups: () => number } => {
-  const session = new EventEmitter()
+  onWarmup: (warmup: number, frames: { frameCount: number }) => void,
+): { frames: { frameCount: number }; page: Page; warmups: () => number } => {
+  const frames = { frameCount: 1 }
   let warmups = 0
   const page = {
-    mainFrame: () => ({ client: session }),
     screenshot: async () => new Uint8Array(),
     setViewport: vi.fn(async (viewport: Viewport | null) => {
       if (viewport?.width === 801) {
         warmups += 1
-        onWarmup(warmups, session)
+        onWarmup(warmups, frames)
       }
     }),
     viewport: () => ({ width: 800, height: 600 }),
   } as unknown as Page
-  return { page, session, warmups: () => warmups }
+  return { frames, page, warmups: () => warmups }
 }
 
 describe('screencast frame recovery', () => {
-  it.each([
-    { fps: 1, timestamps: [1, 1.49], encodable: false },
-    { fps: 1, timestamps: [1, 1.5], encodable: false },
-    { fps: 1, timestamps: [1, 3.49], encodable: false },
-    { fps: 1, timestamps: [1, 3.5], encodable: true },
-    { fps: 30, timestamps: [1, 1.001], encodable: false },
-    { fps: 30, timestamps: [1, 1.02], encodable: false },
-    { fps: 30, timestamps: [1, 1.1], encodable: true },
-    { fps: 30, timestamps: [1, 1.04, 1.08, 1.12], encodable: true },
-    { fps: 1, timestamps: [1, 1.3, 1.6], encodable: false },
-    { fps: 30, timestamps: [2, 2, 1], encodable: false },
-    { fps: 30, timestamps: [1, 1.1, 1.1, 0], encodable: true },
-  ])(
-    'matches consecutive-frame rounding for $fps FPS and $timestamps',
-    ({ fps, timestamps, encodable }) => {
-      const session = new EventEmitter()
-      const frames = observeScreencastFrames(
-        { mainFrame: () => ({ client: session }) } as unknown as Page,
-        fps,
-      )
-      for (const timestamp of timestamps) {
-        session.emit('Page.screencastFrame', { metadata: { timestamp } })
-      }
-      expect(frames?.hasEncodableFrames).toBe(encodable)
-      frames?.dispose()
-    },
-  )
-
-  it('ignores invalid metadata and stops observing before an encodable pair', () => {
-    const session = new EventEmitter()
-    const frames = observeScreencastFrames(
-      { mainFrame: () => ({ client: session }) } as unknown as Page,
-      30,
-    )
-    session.emit('Page.screencastFrame', { metadata: { timestamp: 1 } })
-    for (const metadata of [
-      null,
-      42,
-      {},
-      { timestamp: '2' },
-      { timestamp: Number.NaN },
-      { timestamp: Number.POSITIVE_INFINITY },
-    ]) {
-      session.emit('Page.screencastFrame', { metadata })
-    }
-    expect(frames?.hasEncodableFrames).toBe(false)
-    frames?.dispose()
-    frames?.dispose()
-    session.emit('Page.screencastFrame', { metadata: { timestamp: 2 } })
-    expect(frames?.hasEncodableFrames).toBe(false)
-    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
-  })
-
-  it('does not start another low-FPS warmup after the recovery deadline', async () => {
-    const harness = createFramePage(() => {})
-    const frames = observeScreencastFrames(harness.page, 1)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
-    const { clock, delays } = createClock()
-    await expect(
-      primeScreencastFrames(harness.page, clock, frames),
-    ).resolves.toBe(false)
-    expect(delays).toEqual([50, 3_000, 50, 500])
-    expect(harness.warmups()).toBe(2)
-  })
-
-  it('recovers when two received frames round to zero encoded frames at low FPS', async () => {
-    const harness = createFramePage((warmup, session) => {
-      session.emit('Page.screencastFrame', {
-        metadata: { timestamp: warmup === 1 ? 1.05 : 4.1 },
-      })
-    })
-    const frames = observeScreencastFrames(harness.page, 1)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
-    const { clock, delays } = createClock()
-
-    await expect(
-      primeScreencastFrames(harness.page, clock, frames),
-    ).resolves.toBe(true)
-    expect(harness.warmups()).toBe(2)
-    expect(delays).toEqual([50, 3_000, 50])
-  })
-
-  it('confirms an encodable pair on the recorder session until disposed', () => {
-    const session = new EventEmitter()
-    const frames = observeScreencastFrames(
-      { mainFrame: () => ({ client: session }) } as unknown as Page,
-      30,
-    )
-    expect(frames).toBeDefined()
-
-    session.emit('Page.screencastFrame', screencastFrame)
-    // ScreenRecorder drops frames without a timestamp, so they must not count.
-    session.emit('Page.screencastFrame', { data: '', metadata: {} })
-    session.emit('Page.screencastFrame', undefined)
-    expect(frames?.hasEncodableFrames).toBe(false)
-    expect(frames?.recoveryIntervalMs).toBe(100)
-    session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
-    expect(frames?.hasEncodableFrames).toBe(true)
-
-    frames?.dispose()
-    session.emit('Page.screencastFrame', screencastFrame)
-    expect(frames?.hasEncodableFrames).toBe(true)
-    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
-  })
-
-  it.each([
-    [
-      'the main frame is gone',
-      () => {
-        throw new Error('target closed')
-      },
-    ],
-    ['the session is missing', () => ({})],
-    ['the session cannot be observed', () => ({ client: { on: () => {} } })],
-  ])('skips verification when %s', (_label, mainFrame) => {
-    expect(
-      observeScreencastFrames({ mainFrame } as unknown as Page, 30),
-    ).toBeUndefined()
-  })
-
   it('does not prime again when the first warmup produced a frame', async () => {
-    const harness = createFramePage((_warmup, session) => {
-      session.emit('Page.screencastFrame', { metadata: { timestamp: 1.1 } })
+    const harness = createFramePage((_warmup, frames) => {
+      frames.frameCount += 1
     })
-    const frames = observeScreencastFrames(harness.page, 30)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
     await expect(
-      primeScreencastFrames(harness.page, clock, frames),
+      primeScreencastFrames(harness.page, clock, harness.frames),
     ).resolves.toBe(true)
     expect(harness.warmups()).toBe(1)
     expect(delays).toEqual([50])
@@ -529,51 +394,43 @@ describe('screencast frame recovery', () => {
   it('primes again when a just-activated tab swallows the first warmup', async () => {
     // The regression: the screencast delivers its initial frame, then drops
     // every frame the first warmup produces. A static page never repaints, so
-    // Puppeteer would encode an empty recording without a second warmup.
-    const harness = createFramePage((warmup, session) => {
+    // without a second warmup the recording shows only that first frame.
+    const harness = createFramePage((warmup, frames) => {
       if (warmup === 2) {
-        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
+        frames.frameCount += 1
       }
     })
-    const frames = observeScreencastFrames(harness.page, 30)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
     await expect(
-      primeScreencastFrames(harness.page, clock, frames),
+      primeScreencastFrames(harness.page, clock, harness.frames),
     ).resolves.toBe(true)
     expect(harness.warmups()).toBe(2)
     expect(delays).toEqual([50, 100, 50])
-    expect(frames?.hasEncodableFrames).toBe(true)
   })
 
   it('waits for an in-flight frame instead of priming again', async () => {
     const harness = createFramePage(() => {})
-    const frames = observeScreencastFrames(harness.page, 30)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock } = createClock((milliseconds) => {
       // The restore frame lands during the settle wait.
       if (milliseconds === 100) {
-        harness.session.emit('Page.screencastFrame', {
-          metadata: { timestamp: 1.2 },
-        })
+        harness.frames.frameCount += 1
       }
+      return undefined
     })
 
     await expect(
-      primeScreencastFrames(harness.page, clock, frames),
+      primeScreencastFrames(harness.page, clock, harness.frames),
     ).resolves.toBe(true)
     expect(harness.warmups()).toBe(1)
   })
 
   it('gives up within its budget when the screencast never recovers', async () => {
     const harness = createFramePage(() => {})
-    const frames = observeScreencastFrames(harness.page, 30)
-    harness.session.emit('Page.screencastFrame', screencastFrame)
     const { clock, delays } = createClock()
 
     await expect(
-      primeScreencastFrames(harness.page, clock, frames),
+      primeScreencastFrames(harness.page, clock, harness.frames),
     ).resolves.toBe(false)
     const elapsed = delays.reduce((total, milliseconds) => total + milliseconds)
     // One warmup, then 100 ms settle plus a 50 ms warmup per retry until the
@@ -587,7 +444,24 @@ describe('screencast frame recovery', () => {
     })
   })
 
-  it('primes once without verification when no observer is available', async () => {
+  it('does not start another warmup once the recovery deadline has passed', async () => {
+    const harness = createFramePage(() => {})
+    // Each warmup's paint takes 60 ms longer than its hold, so a settle wait
+    // eventually ends exactly at the deadline.
+    const { clock, delays } = createClock((milliseconds) =>
+      milliseconds === 50 ? 60 : undefined,
+    )
+
+    await expect(
+      primeScreencastFrames(harness.page, clock, harness.frames),
+    ).resolves.toBe(false)
+    // Warmups end at 110 ms, then every 210 ms; the eighth settle wait is cut
+    // to the 30 ms left before the 1,610 ms deadline and no warmup follows it.
+    expect(delays.at(-1)).toBe(30)
+    expect(harness.warmups()).toBe(8)
+  })
+
+  it('primes once without verification when no frame source is available', async () => {
     const harness = createFramePage(() => {})
     const { clock } = createClock()
 

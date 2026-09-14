@@ -76,6 +76,9 @@ jobs:
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Verify Real-Time Animation Recording
+        run: corepack npm run test:e2e:capture:animation
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics

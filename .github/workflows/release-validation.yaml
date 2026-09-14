@@ -158,6 +158,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:low-fps
 
+      - name: Verify Real-Time Animation Recording
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:animation
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics

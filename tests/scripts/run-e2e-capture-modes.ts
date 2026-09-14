@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
+import {
+  assertManifestMediaDimensions,
+  assertManifestPlaybackMatchesCapture,
+} from '../utils/manifest-media-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
 
@@ -14,6 +17,7 @@ type CaptureMode =
   | 'padded-mp4'
   | 'filtered-mp4'
   | 'low-fps'
+  | 'animation'
 
 const requestedMode = process.argv[2] ?? 'all'
 const allModes: CaptureMode[] = [
@@ -26,6 +30,7 @@ const allModes: CaptureMode[] = [
   'padded-mp4',
   'filtered-mp4',
   'low-fps',
+  'animation',
 ]
 const modes = allModes.filter(
   (mode) =>
@@ -67,6 +72,12 @@ const runMode = async (
   await assertManifestMediaDimensions(
     resultsDir,
     environment.ffmpegDetection.resolvedPath,
+  )
+  // Keep in step with tests/wdio.capture.conf.ts: only controls changes speed.
+  await assertManifestPlaybackMatchesCapture(
+    resultsDir,
+    environment.ffmpegDetection.resolvedPath,
+    mode === 'controls' ? 2 : 1,
   )
 }
 

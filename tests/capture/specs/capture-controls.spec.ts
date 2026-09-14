@@ -5,14 +5,13 @@ import { resolveServiceConfiguration } from '../../../src/service/options.js'
 const mode = process.env.WDIO_CAPTURE_MODE ?? 'bidi'
 
 /**
- * Pins the upstream crop-bound contract against the installed Puppeteer. The
- * service recognizes Puppeteer's crop errors by their message prefix, so a
- * reworded upstream error would silently drop the diagnostic while the unit
- * test — which uses a copy of that wording — kept passing. Puppeteer rejects an
- * out-of-bounds crop before it constructs a recorder, so this never disturbs
- * the capture already in progress.
+ * Pins the crop-bound contract in a real browser. The capture layer recognizes
+ * the recorder's crop errors by their message prefix, so a reworded error would
+ * silently drop the diagnostic. The recorder rejects an out-of-bounds crop
+ * before it starts FFmpeg or a screencast, so this never disturbs the capture
+ * already in progress.
  */
-const assertCropDiagnosticStillMatchesPuppeteer = async (): Promise<void> => {
+const assertCropDiagnosticIsRecognized = async (): Promise<void> => {
   const puppeteer = await browser.getPuppeteer()
   const [page] = await puppeteer.pages()
   if (!page) {
@@ -75,6 +74,21 @@ describe('Puppeteer capture protocol and media controls', () => {
       expect(viewport).not.toEqual({ width: 960, height: 600 })
     }
 
+    if (mode === 'animation') {
+      // A box that moves on every animation frame, so each captured frame differs.
+      await browser.execute(`
+        const box = document.createElement('div')
+        box.style.cssText = 'position:fixed;top:40px;left:0;width:120px;height:120px;background:#2563eb'
+        document.body.append(box)
+        const startedAt = performance.now()
+        const step = (now) => {
+          box.style.transform = 'translateX(' + (((now - startedAt) / 4) % 600) + 'px)'
+          requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      `)
+    }
+    const dwellMs = mode === 'animation' ? 3000 : 1500
     const recordingStartedAt = Number(await browser.execute(() => Date.now()))
     await browser.waitUntil(
       async () => {
@@ -84,15 +98,15 @@ describe('Puppeteer capture protocol and media controls', () => {
             recordingStartedAt,
           ),
         )
-        return elapsed >= 1500
+        return elapsed >= dwellMs
       },
       {
         interval: 100,
-        timeout: 3000,
-        timeoutMsg: 'static capture did not remain active for 1.5 seconds',
+        timeout: dwellMs + 1500,
+        timeoutMsg: `capture did not remain active for ${dwellMs.toString()} ms`,
       },
     )
 
-    await assertCropDiagnosticStillMatchesPuppeteer()
+    await assertCropDiagnosticIsRecognized()
   })
 })

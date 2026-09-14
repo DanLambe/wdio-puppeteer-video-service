@@ -2,7 +2,6 @@ import type { WriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { ScreenRecorder } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
 import { nodeFileSystem } from '../../src/service/boundaries.js'
@@ -16,6 +15,7 @@ import {
   type RecordingControllerOptions,
 } from '../../src/service/recording-controller.js'
 import { RecordingMediaCoordinator } from '../../src/service/recording-media-coordinator.js'
+import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 
@@ -181,7 +181,7 @@ const attachTranscodedSegment = async (
   await fs.writeFile(recordingPath, 'captured-media')
   harness.session.beginRecording(path.parse(recordingPath).name)
   harness.session.attachCapture({
-    recorder: {} as ScreenRecorder,
+    recorder: {} as ScreencastRecorder,
     segment: {
       ...createActiveSegment(recordingPath),
       outputFormat: 'mp4',
@@ -291,7 +291,7 @@ describe('RecordingController', () => {
     harness.session.setBrowser({} as Browser)
     harness.startCapture.mockImplementation(async () => {
       harness.session.attachCapture({
-        recorder: {} as ScreenRecorder,
+        recorder: {} as ScreencastRecorder,
         segment: createActiveSegment('active.webm'),
         windowHandle: 'window-1',
       })
@@ -689,7 +689,7 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('capture.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment,
       windowHandle: undefined,
     })
@@ -716,7 +716,7 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('incomplete.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment,
       windowHandle: undefined,
     })
@@ -742,7 +742,7 @@ describe('RecordingController', () => {
     const harness = createHarness()
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment: createActiveSegment('missing.webm'),
       windowHandle: undefined,
     })
