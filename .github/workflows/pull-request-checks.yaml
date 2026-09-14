@@ -25,6 +25,9 @@ jobs:
       - name: Install Dependencies Without Scripts
         run: corepack npm ci --ignore-scripts
 
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
+
       - name: Verify npm Signatures
         run: corepack npm audit signatures
 

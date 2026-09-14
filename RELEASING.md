@@ -86,8 +86,31 @@ reviewed.
 ```bash
 npm run release:check
 npm run changeset:status
+npm run check:install-scripts
 ```
 
 `release:check` regenerates `coverage/lcov.info`, validates the compiled ESM
 exports through a temporary packed consumer, and writes `sbom.cdx.json`. Both
 generated paths are ignored by Git.
+
+## Install scripts and fresh releases
+
+`.npmrc` enables `strict-allow-scripts` and `min-release-age=2`. CI installs
+without running scripts, then rebuilds only the approved binaries
+(`esbuild`, `ffmpeg-static`).
+
+- `npm run check:install-scripts` lists installed packages whose install scripts
+  `package.json` `allowScripts` does not cover, using npm's own policy matching,
+  and fails if there are any. Pull request checks run it on the lockfile, and
+  every release-validation job runs it after its lock-free install, before any
+  rebuild.
+- The `Install Script Drift` workflow resolves the minimum and latest supported
+  peer stacks every Monday, and on demand, without running scripts, so a new
+  upstream package with an install script is reported before a release.
+- When the check reports a package, review its script. Deny a script the project
+  does not need with a name-only entry such as `"edgedriver": false`, which also
+  covers future versions. Approve a required script only for the exact reviewed
+  version, such as `"esbuild@0.28.2": true`. Never approve all scripts.
+- Lock-free validation installs honor `min-release-age`, so "latest" means the
+  newest release that is at least two days old. A same-day upstream publish
+  cannot change results between validation jobs or reruns.
