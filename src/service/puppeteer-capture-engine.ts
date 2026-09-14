@@ -1,16 +1,10 @@
 import { finished } from 'node:stream/promises'
-import type {
-  Page,
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
-  observeScreencastFrames,
   primeScreencastFrames,
-  type ScreencastFrameObserver,
   type StartScreencastOptions,
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
@@ -32,6 +26,7 @@ import {
   type ProtocolBrowser,
   type SessionProtocol,
 } from './protocol.js'
+import type { ScreencastRecorder } from './screencast-recorder.js'
 
 export interface CaptureSegmentOutput {
   readonly outputFormat: OutputFormat
@@ -78,7 +73,7 @@ export interface PuppeteerCaptureEngineOptions {
   readonly startScreencast: (
     page: Page,
     options: StartScreencastOptions,
-  ) => Promise<ScreenRecorder>
+  ) => Promise<ScreencastRecorder>
   readonly uuid: () => string
 }
 
@@ -183,10 +178,9 @@ export class PuppeteerCaptureEngine {
   async startCapture(
     options: CaptureStartOptions,
   ): Promise<CaptureStartResult> {
-    let pendingRecorder: ScreenRecorder | undefined
+    let pendingRecorder: ScreencastRecorder | undefined
     let pendingSegment: ActiveSegment | undefined
     let pendingRecordingPath: string | undefined
-    let frameObserver: ScreencastFrameObserver | undefined
     try {
       const activePage = await this.preparePage()
       if (!activePage) {
@@ -196,10 +190,6 @@ export class PuppeteerCaptureEngine {
       const { page, windowHandle } = activePage
       const output = await options.createOutput()
       pendingRecordingPath = output.recordingPath
-      // Observe before starting so the screencast's first frame is counted.
-      if (this.capture.framePriming) {
-        frameObserver = observeScreencastFrames(page, this.capture.fps)
-      }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
         ffmpegPath: options.ffmpegPath,
@@ -221,11 +211,11 @@ export class PuppeteerCaptureEngine {
       recorder.pipe(segment.writeStream)
       if (
         this.capture.framePriming &&
-        !(await primeScreencastFrames(page, this.clock, frameObserver))
+        !(await primeScreencastFrames(page, this.clock, recorder))
       ) {
         this.log(
           'debug',
-          '[WdioPuppeteerVideoService] Screencast did not deliver enough frames for encoding after frame priming; this recording may be empty.',
+          '[WdioPuppeteerVideoService] Screencast delivered fewer than two frames after frame priming; the recording may show only its first frame.',
         )
       }
 
@@ -246,8 +236,6 @@ export class PuppeteerCaptureEngine {
           .catch(() => undefined)
       }
       throw error
-    } finally {
-      frameObserver?.dispose()
     }
   }
 
@@ -341,7 +329,7 @@ export class PuppeteerCaptureEngine {
   }
 
   private createActiveSegment(
-    recorder: ScreenRecorder,
+    recorder: ScreencastRecorder,
     output: CaptureSegmentOutput,
     transcodeOptions: ResolvedTranscodeOptions,
   ): ActiveSegment {
@@ -398,7 +386,7 @@ export class PuppeteerCaptureEngine {
   }
 
   private async cleanupPartialCapture(
-    recorder: ScreenRecorder | undefined,
+    recorder: ScreencastRecorder | undefined,
     segment: ActiveSegment | undefined,
   ): Promise<void> {
     if (recorder) {
@@ -419,7 +407,7 @@ export class PuppeteerCaptureEngine {
     await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
   }
 
-  private async stopRecorder(recorder: ScreenRecorder): Promise<void> {
+  private async stopRecorder(recorder: ScreencastRecorder): Promise<void> {
     const { promise: timeoutTask, reject: rejectTimeout } =
       Promise.withResolvers<never>()
     const timeout = this.clock.setTimeout(() => {

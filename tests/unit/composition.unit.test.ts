@@ -1,8 +1,4 @@
-import type {
-  Page,
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import { describe, expect, it, vi } from 'vitest'
 import {
   nodeFileSystem,
@@ -14,6 +10,7 @@ import {
   createWorkerCompositionRoot,
 } from '../../src/service/composition.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
+import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 
 describe('launcher and worker composition roots', () => {
   it('composes immutable launcher dependencies with narrow overrides', () => {
@@ -42,7 +39,7 @@ describe('launcher and worker composition roots', () => {
     const uuid = vi.fn(() => 'fixed-uuid')
     const puppeteerBrowser = { connected: true } as PuppeteerBrowser
     const connectPuppeteer = vi.fn(async () => puppeteerBrowser)
-    const recorder = { destroyed: false } as ScreenRecorder
+    const recorder = { destroyed: false } as ScreencastRecorder
     const startScreencast = vi.fn(async () => recorder)
     const runFfmpeg = vi.fn(async () => true)
     const writeLog = vi.fn()
