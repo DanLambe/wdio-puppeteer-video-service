@@ -22,6 +22,7 @@ import {
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 
 type FakeRecorder = PassThrough & {
+  ffmpegResult: { code: number | null; diagnostic: string }
   frameCount: number
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
@@ -36,7 +37,8 @@ const createTempDir = async (): Promise<string> => {
 
 const createRecorder = (): FakeRecorder => {
   const recorder = new PassThrough() as FakeRecorder
-  recorder.frameCount = 0
+  recorder.frameCount = 1
+  recorder.ffmpegResult = { code: 0, diagnostic: '' }
   recorder.stop = vi.fn(async () => {
     recorder.end()
   })
@@ -423,6 +425,53 @@ describe('Puppeteer capture engine', () => {
     ).toBe(false)
   })
 
+  it.each([
+    [
+      'no frames',
+      { frameCount: 0, code: 0, diagnostic: '' },
+      'delivered no frames before recording stopped',
+    ],
+    [
+      'an FFmpeg failure',
+      { frameCount: 12, code: 1, diagnostic: 'Invalid PNG signature' },
+      'FFmpeg exited with code 1 while recording: Invalid PNG signature',
+    ],
+  ])(
+    'explains an unusable recording caused by %s',
+    async (_label, result, message) => {
+      const tempDir = await createTempDir()
+      const harness = createHarness()
+      await expect(
+        startCapture(harness, path.join(tempDir, 'capture.webm')),
+      ).resolves.toEqual({ started: true })
+      harness.recorder.frameCount = result.frameCount
+      harness.recorder.ffmpegResult = {
+        code: result.code,
+        diagnostic: result.diagnostic,
+      }
+
+      await harness.engine.stopCapture()
+
+      expect(harness.logs).toContainEqual({
+        level: 'warn',
+        message: expect.stringContaining(message),
+      })
+    },
+  )
+
+  it('stays quiet about a recorder that captured frames and exited cleanly', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startCapture(harness, path.join(tempDir, 'capture.webm'))
+
+    await harness.engine.stopCapture()
+
+    expect(
+      harness.logs.filter(({ message }) =>
+        /no frames|FFmpeg exited/u.test(message),
+      ),
+    ).toEqual([])
+  })
   it('reports a screencast that never delivers a second frame', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
@@ -564,6 +613,8 @@ describe('Puppeteer capture engine', () => {
     const recorder = {
       destroyed: false,
       destroy: vi.fn(),
+      ffmpegResult: { code: 0, diagnostic: '' },
+      frameCount: 1,
       off: vi.fn(),
       stop: vi.fn(async () => {}),
     } as unknown as ScreencastRecorder
@@ -603,6 +654,8 @@ describe('Puppeteer capture engine', () => {
         recorder.destroyed = true
         destroy()
       },
+      ffmpegResult: { code: null, diagnostic: '' },
+      frameCount: 1,
       off: vi.fn(),
       stop,
     } as unknown as ScreencastRecorder
@@ -651,6 +704,8 @@ describe('Puppeteer capture engine', () => {
     const recorder = {
       destroyed: false,
       destroy: vi.fn(),
+      ffmpegResult: { code: 0, diagnostic: '' },
+      frameCount: 1,
       off: vi.fn(),
       stop: vi.fn(async () => {}),
     } as unknown as ScreencastRecorder

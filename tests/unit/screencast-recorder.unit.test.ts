@@ -34,6 +34,7 @@ const createFakeFfmpeg = (): {
     signalCode: NodeJS.Signals | null
   }
   const stdout = new PassThrough()
+  const stderr = new PassThrough()
   const stdin = new Writable({
     write(chunk: Buffer, _encoding, callback) {
       writes.push(chunk.toString())
@@ -62,6 +63,7 @@ const createFakeFfmpeg = (): {
     exitCode: null,
     kill,
     signalCode: null,
+    stderr,
     stdin,
     stdout,
   })
@@ -175,6 +177,11 @@ const startRecorder = async (
     advance: (milliseconds: number) => {
       monotonic += milliseconds
     },
+    // Deliver a frame that arrives when its timestamp says it was painted.
+    frame: (label: string, timestamp: number) => {
+      monotonic = (timestamp - startTimestamp) * 1_000
+      session.emitFrame(label, timestamp)
+    },
     recorder,
     session,
   }
@@ -263,7 +270,7 @@ describe('screencast recorder frame timing', () => {
     // Puppeteer rounds each 10 ms gap to zero at 24 FPS and writes nothing.
     const harness = await startRecorder({ fps: 24 }, 100)
     for (let frame = 1; frame <= 100; frame += 1) {
-      harness.session.emitFrame(`f${frame}`, 100 + frame * 0.01)
+      harness.frame(`f${frame}`, 100 + frame * 0.01)
     }
     expect(harness.writes).toHaveLength(24)
     // Distinct content survives rather than one frame repeated.
@@ -273,18 +280,37 @@ describe('screencast recorder frame timing', () => {
 
   it('duplicates sparse frames to fill the time between them', async () => {
     const harness = await startRecorder({ fps: 30 }, 100)
-    harness.session.emitFrame('half', 100.5)
-    harness.session.emitFrame('one', 101)
+    harness.frame('half', 100.5)
+    harness.frame('one', 101)
     expect(countWrites(harness.writes)).toEqual({ half: 15, start: 15 })
   })
 
+  it('does not stretch a recording whose first frame carries a stale timestamp', async () => {
+    // Chrome stamped the first frame with a paint from 10 s before capture.
+    const harness = await startRecorder({ fps: 10 }, 90)
+    harness.advance(100)
+    harness.session.emitFrame('next', 100.1)
+    // It arrived 0.1 s after the first frame, so it is shown 0.35 s in, not 10.1 s.
+    expect(countWrites(harness.writes)).toEqual({ start: 4 })
+
+    harness.advance(100)
+    harness.session.emitFrame('later', 100.2)
+    harness.advance(1_000)
+    await harness.recorder.stop()
+    // "later" is shown 0.45 s in and held for the 1 s until stop: 1.5 s in all.
+    expect(countWrites(harness.writes)).toEqual({
+      later: 10,
+      next: 1,
+      start: 4,
+    })
+  })
   it('ignores frames without a finite timestamp and never rewinds the grid', async () => {
     const harness = await startRecorder({ fps: 10 }, 100)
     harness.session.emitFrame('missing')
     harness.session.emitFrame('text', '101')
     harness.session.emitFrame('nan', Number.NaN)
     harness.session.emitFrame('backwards', 99)
-    harness.session.emitFrame('later', 101)
+    harness.frame('later', 101)
     expect(harness.recorder.frameCount).toBe(3)
     // The backwards frame is treated as simultaneous with the first one.
     expect(countWrites(harness.writes)).toEqual({ backwards: 10 })
@@ -303,8 +329,7 @@ describe('screencast recorder frame timing', () => {
 
   it('holds the last received frame until stop, measured on the local clock', async () => {
     const harness = await startRecorder({ fps: 10 }, 100)
-    harness.advance(200)
-    harness.session.emitFrame('last', 100.2)
+    harness.frame('last', 100.2)
     harness.advance(1_000)
 
     await harness.recorder.stop()
@@ -372,6 +397,26 @@ describe('screencast recorder frame timing', () => {
     expect(harness.writes).toEqual([])
     expect(harness.recorder.frameCount).toBe(1)
     expect(harness.session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+  it('keeps the end of FFmpeg error output for diagnosis', async () => {
+    const harness = await startRecorder()
+    const stderr = harness.child.stderr as PassThrough
+    stderr.write('x'.repeat(5_000))
+    stderr.write('\n[png @ 0] Invalid PNG signature\n')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(harness.recorder.ffmpegResult).toEqual({
+      code: null,
+      diagnostic: expect.stringMatching(
+        /^x+\n\[png @ 0\] Invalid PNG signature$/u,
+      ),
+    })
+    expect(harness.recorder.ffmpegResult.diagnostic.length).toBeLessThanOrEqual(
+      4_000,
+    )
+
+    await harness.recorder.stop()
+
+    expect(harness.recorder.ffmpegResult.code).toBe(0)
   })
   it('stops FFmpeg and the CDP session when destroyed', async () => {
     const harness = await startRecorder()

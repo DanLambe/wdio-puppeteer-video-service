@@ -9,6 +9,11 @@ import { type ClockBoundary, systemClock } from './boundaries.js'
 // Puppeteer resolves `page.screencast()` once the first frame arrives. Keep that
 // ordering, but do not wait indefinitely for a tab that never paints.
 const FIRST_FRAME_TIMEOUT_MS = 1_000
+// Chrome can stamp a screencast's first frame with the time the page last
+// painted, seconds before capture began. Never place a frame later than it
+// arrived, measured from the first frame's arrival, beyond this delivery slack.
+const TIMESTAMP_ARRIVAL_SLACK_SECONDS = 0.25
+const FFMPEG_DIAGNOSTIC_LIMIT = 4_000
 
 export interface ScreencastRecorderOptions {
   readonly crop?: Readonly<CaptureCrop>
@@ -23,7 +28,7 @@ export interface ScreencastRecorderOptions {
 export interface ScreencastRecorderDependencies {
   readonly clock?: ClockBoundary
   readonly cpuCount?: () => number
-  /** Monotonic milliseconds, used to measure how long the last frame is held. */
+  /** Monotonic milliseconds, used to bound frame timestamps and the final hold. */
   readonly monotonicNow?: () => number
   readonly spawnProcess?: (command: string, args: string[]) => ChildProcess
 }
@@ -36,6 +41,8 @@ interface ScreencastFrameEvent {
 
 interface ReceivedFrame {
   readonly buffer: Buffer
+  /** Seconds after the first frame at which this frame is shown. */
+  readonly elapsedSeconds: number
   readonly receivedAt: number
   readonly timestamp: number
 }
@@ -52,7 +59,8 @@ interface PixelDimensions {
  * `-framerate` after `-i`, so FFmpeg assumes 25 fps; it rounds each frame gap on
  * its own, dropping frames Chrome captures faster than `fps`; and its
  * `-avioflags direct` input makes FFmpeg discard the first two frames. Frames
- * are placed on a constant `fps` grid anchored at the first frame instead.
+ * are placed on a constant `fps` grid anchored at the first frame instead, using
+ * Chrome's timestamps bounded by when each frame actually arrived.
  */
 export class ScreencastRecorder extends PassThrough {
   private readonly ffmpeg: ChildProcess
@@ -60,7 +68,8 @@ export class ScreencastRecorder extends PassThrough {
   private readonly fps: number
   private readonly monotonicNow: () => number
   private readonly session: CDPSession
-  private firstTimestamp = 0
+  private ffmpegDiagnostic = ''
+  private first: ReceivedFrame | undefined
   private latest: ReceivedFrame | undefined
   private received = 0
   private stopping: Promise<void> | undefined
@@ -86,6 +95,11 @@ export class ScreencastRecorder extends PassThrough {
     // A write after FFmpeg exits must not crash the worker; the recording is
     // reported through the stream it produced.
     ffmpeg.stdin?.on('error', () => undefined)
+    ffmpeg.stderr?.on('data', (chunk: Buffer) => {
+      this.ffmpegDiagnostic = (this.ffmpegDiagnostic + chunk.toString()).slice(
+        -FFMPEG_DIAGNOSTIC_LIMIT,
+      )
+    })
     ffmpeg.stdout?.pipe(this)
     session.on('Page.screencastFrame', this.onFrame)
   }
@@ -93,6 +107,14 @@ export class ScreencastRecorder extends PassThrough {
   /** Frames Chrome has delivered with a timestamp since recording started. */
   get frameCount(): number {
     return this.received
+  }
+
+  /** FFmpeg's exit code and the end of its error output, once it has exited. */
+  get ffmpegResult(): { code: number | null; diagnostic: string } {
+    return {
+      code: this.ffmpeg.exitCode,
+      diagnostic: this.ffmpegDiagnostic.trim(),
+    }
   }
 
   /** Resolves once the first frame arrives or the wait for it times out. */
@@ -149,20 +171,32 @@ export class ScreencastRecorder extends PassThrough {
       return
     }
     const previous = this.latest
+    const receivedAt = this.monotonicNow()
+    const first = this.first
     const frame: ReceivedFrame = {
       buffer: Buffer.from(event.data, 'base64'),
-      receivedAt: this.monotonicNow(),
-      // A timestamp that runs backwards would otherwise rewind the grid.
-      timestamp: Math.max(timestamp, previous?.timestamp ?? timestamp),
+      elapsedSeconds: first
+        ? Math.max(
+            // A timestamp that runs backwards would otherwise rewind the grid.
+            previous?.elapsedSeconds ?? 0,
+            Math.min(
+              timestamp - first.timestamp,
+              (receivedAt - first.receivedAt) / 1_000 +
+                TIMESTAMP_ARRIVAL_SLACK_SECONDS,
+            ),
+          )
+        : 0,
+      receivedAt,
+      timestamp,
     }
     if (previous) {
       this.writeFrame(
         previous.buffer,
-        this.gridPosition(frame.timestamp) -
-          this.gridPosition(previous.timestamp),
+        this.gridPosition(frame.elapsedSeconds) -
+          this.gridPosition(previous.elapsedSeconds),
       )
     } else {
-      this.firstTimestamp = frame.timestamp
+      this.first = frame
     }
     this.latest = frame
     this.received += 1
@@ -179,12 +213,10 @@ export class ScreencastRecorder extends PassThrough {
       // Hold the final frame until now. Measure locally, so a remote browser's
       // clock cannot skew the recording's length.
       const heldSeconds = (this.monotonicNow() - latest.receivedAt) / 1_000
-      const end = Math.round(
-        (latest.timestamp - this.firstTimestamp + heldSeconds) * this.fps,
-      )
+      const end = this.gridPosition(latest.elapsedSeconds + heldSeconds)
       this.writeFrame(
         latest.buffer,
-        Math.max(1, end - this.gridPosition(latest.timestamp)),
+        Math.max(1, end - this.gridPosition(latest.elapsedSeconds)),
       )
     }
     this.ffmpeg.stdin?.end()
@@ -192,8 +224,8 @@ export class ScreencastRecorder extends PassThrough {
     await this.session.detach().catch(() => undefined)
   }
 
-  private gridPosition(timestamp: number): number {
-    return Math.round((timestamp - this.firstTimestamp) * this.fps)
+  private gridPosition(elapsedSeconds: number): number {
+    return Math.round(elapsedSeconds * this.fps)
   }
 
   private writeFrame(buffer: Buffer, copies: number): void {
@@ -293,7 +325,7 @@ export const createFfmpegArguments = (
 
 const spawnFfmpeg = (command: string, args: string[]): ChildProcess => {
   return spawn(command, args, {
-    stdio: ['pipe', 'pipe', 'ignore'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   })
 }

@@ -245,6 +245,7 @@ export class PuppeteerCaptureEngine {
       return { segment: undefined, streamOk: false }
     }
     await this.stopRecorder(recorder)
+    this.reportRecorderResult(recorder)
 
     try {
       const streamOk = await this.waitForWriteStream(segment)
@@ -431,6 +432,24 @@ export class PuppeteerCaptureEngine {
       }
     } finally {
       this.clock.clearTimeout(timeout)
+    }
+  }
+
+  // An empty recording is otherwise indistinguishable from an encoder failure.
+  private reportRecorderResult(recorder: ScreencastRecorder): void {
+    if (recorder.frameCount === 0) {
+      this.log(
+        'warn',
+        '[WdioPuppeteerVideoService] The screencast delivered no frames before recording stopped, so the recording is empty.',
+      )
+      return
+    }
+    const { code, diagnostic } = recorder.ffmpegResult
+    if (code !== null && code !== 0) {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] FFmpeg exited with code ${code.toString()} while recording${diagnostic ? `: ${diagnostic}` : '.'}`,
+      )
     }
   }
 
