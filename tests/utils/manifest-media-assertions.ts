@@ -44,7 +44,9 @@ export const assertManifestMediaDimensions = async (
 // The capture window runs from after startup (frame priming) until the segment
 // is finalized, while the video starts at the first screencast frame, so allow
 // the startup time above it. A recording that plays far longer than its capture
-// took has an inflated timeline; one far shorter has lost time.
+// took has an inflated timeline. The window also includes stream flushing and
+// media probing after stop, which can take seconds on a slow runner, so it is
+// no lower bound; wdio.capture.conf.ts checks the decoded frame rate instead.
 const PLAYBACK_STARTUP_ALLOWANCE_SECONDS = 2.5
 
 export const assertManifestPlaybackMatchesCapture = async (
@@ -77,9 +79,8 @@ export const assertManifestPlaybackMatchesCapture = async (
     )
     const playedSeconds = media.durationSeconds * speed
     assert.ok(
-      playedSeconds <= captureSeconds + PLAYBACK_STARTUP_ALLOWANCE_SECONDS &&
-        playedSeconds >= captureSeconds * 0.4,
-      `Expected ${segment.path} to play back for about its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
+      playedSeconds <= captureSeconds + PLAYBACK_STARTUP_ALLOWANCE_SECONDS,
+      `Expected ${segment.path} to play back no longer than its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
     )
     verified += 1
   }
