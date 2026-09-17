@@ -18,6 +18,7 @@ type CaptureMode =
   | 'filtered-mp4'
   | 'low-fps'
   | 'animation'
+  | 'unprimed'
 
 const requestedMode = process.argv[2] ?? 'all'
 const allModes: CaptureMode[] = [
@@ -31,6 +32,7 @@ const allModes: CaptureMode[] = [
   'filtered-mp4',
   'low-fps',
   'animation',
+  'unprimed',
 ]
 const modes = allModes.filter(
   (mode) =>

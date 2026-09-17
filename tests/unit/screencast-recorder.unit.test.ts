@@ -3,10 +3,14 @@ import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
 import type { CDPSession, Page, Viewport } from 'puppeteer-core'
 import { describe, expect, it, vi } from 'vitest'
-import type { ClockBoundary } from '../../src/service/boundaries.js'
+import {
+  type ClockBoundary,
+  systemClock,
+} from '../../src/service/boundaries.js'
 import {
   createFfmpegArguments,
   recordScreencast,
+  ScreencastRecorder,
   type ScreencastRecorderOptions,
 } from '../../src/service/screencast-recorder.js'
 
@@ -22,7 +26,9 @@ const options: ScreencastRecorderOptions = {
 const frameData = (label: string): string =>
   Buffer.from(label).toString('base64')
 
-const createFakeFfmpeg = (): {
+const createFakeFfmpeg = (
+  closeOnEnd = true,
+): {
   child: ChildProcess
   kill: ReturnType<typeof vi.fn>
   spawn: () => ChildProcess
@@ -54,7 +60,9 @@ const createFakeFfmpeg = (): {
       child.emit('close', 0)
     })
   }
-  stdin.on('finish', close)
+  if (closeOnEnd) {
+    stdin.on('finish', close)
+  }
   const kill = vi.fn(() => {
     close()
     return true
@@ -66,6 +74,7 @@ const createFakeFfmpeg = (): {
     stderr,
     stdin,
     stdout,
+    unref: vi.fn(),
   })
   // Like child_process.spawn, report the start after the process is created.
   const spawn = (): ChildProcess => {
@@ -153,8 +162,8 @@ const createClock = (): ClockBoundary & { expire: () => void } => {
 const startRecorder = async (
   recorderOptions: Partial<ScreencastRecorderOptions> = {},
   startTimestamp = 100,
+  ffmpeg = createFakeFfmpeg(),
 ) => {
-  const ffmpeg = createFakeFfmpeg()
   const session = createFakeSession((method, current) => {
     if (method === 'Page.startScreencast') {
       current.emitFrame('start', startTimestamp)
@@ -422,11 +431,91 @@ describe('screencast recorder frame timing', () => {
     const harness = await startRecorder()
 
     harness.recorder.destroy()
+    await harness.recorder.abort()
 
     expect(harness.kill).toHaveBeenCalledTimes(1)
     expect(harness.session.detach).toHaveBeenCalled()
     harness.session.emitFrame('ignored', 200)
     expect(harness.writes).toEqual([])
+  })
+
+  it('terminates the encoder when destroyed during a stalled CDP stop', async () => {
+    const harness = await startRecorder()
+    const { promise: stalledStop, resolve: finishLate } =
+      Promise.withResolvers<never>()
+    vi.mocked(harness.session.send).mockImplementation(() => stalledStop)
+    const stopping = harness.recorder.stop()
+
+    harness.recorder.destroy()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(harness.kill).toHaveBeenCalledOnce()
+    await expect(stopping).resolves.toBeUndefined()
+    expect(harness.session.listenerCount('Page.screencastFrame')).toBe(0)
+    finishLate({} as never)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(harness.writes).toEqual([])
+  })
+
+  it('aborts an encoder that never exits after input ends, exactly once', async () => {
+    const harness = await startRecorder({}, 100, createFakeFfmpeg(false))
+    const stopping = harness.recorder.stop()
+    await vi.waitFor(() => {
+      expect(harness.child.stdin?.writableEnded).toBe(true)
+    })
+
+    await Promise.all([harness.recorder.abort(), harness.recorder.abort()])
+
+    await expect(stopping).resolves.toBeUndefined()
+    expect(harness.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL')
+    expect(harness.session.detach).toHaveBeenCalledOnce()
+    expect(harness.child.unref).toHaveBeenCalledOnce()
+    expect(harness.child.stdout?.destroyed).toBe(true)
+    expect(harness.child.stderr?.destroyed).toBe(true)
+  })
+
+  it('settles cancellation even when session detach never replies', async () => {
+    const harness = await startRecorder()
+    vi.mocked(harness.session.detach).mockImplementation(
+      () => new Promise(() => {}),
+    )
+    const stopping = harness.recorder.stop()
+    await vi.waitFor(() => {
+      expect(harness.child.exitCode).toBe(0)
+    })
+
+    await harness.recorder.abort()
+
+    await expect(stopping).resolves.toBeUndefined()
+    expect(harness.kill).not.toHaveBeenCalled()
+  })
+
+  it('bounds cleanup when a terminated process never reports close', async () => {
+    vi.useFakeTimers()
+    const ffmpeg = createFakeFfmpeg(false)
+    const terminateProcessTree = vi.fn(async () => {})
+    const recorder = new ScreencastRecorder(
+      createFakeSession(),
+      ffmpeg.child,
+      30,
+      () => 0,
+      { clock: systemClock, terminateProcessTree },
+    )
+    try {
+      const aborted = recorder.abort()
+      await vi.advanceTimersByTimeAsync(500)
+      await expect(aborted).resolves.toBeUndefined()
+      expect(terminateProcessTree).toHaveBeenCalledExactlyOnceWith(
+        ffmpeg.child,
+        true,
+      )
+      expect(ffmpeg.child.unref).toHaveBeenCalledOnce()
+      expect(ffmpeg.child.stdout?.destroyed).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      recorder.destroy()
+    }
   })
 })
 

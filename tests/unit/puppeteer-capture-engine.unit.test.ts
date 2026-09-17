@@ -22,6 +22,7 @@ import {
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 
 type FakeRecorder = PassThrough & {
+  abort: ReturnType<typeof vi.fn<() => Promise<void>>>
   ffmpegResult: { code: number | null; diagnostic: string }
   frameCount: number
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
@@ -37,6 +38,9 @@ const createTempDir = async (): Promise<string> => {
 
 const createRecorder = (): FakeRecorder => {
   const recorder = new PassThrough() as FakeRecorder
+  recorder.abort = vi.fn(async () => {
+    recorder.destroy()
+  })
   recorder.frameCount = 1
   recorder.ffmpegResult = { code: 0, diagnostic: '' }
   recorder.stop = vi.fn(async () => {
@@ -643,12 +647,17 @@ describe('Puppeteer capture engine', () => {
     })
   })
 
-  it('destroys a recorder when stop does not settle', async () => {
+  it('aborts a stalled recorder and preserves the flushed file as unclean', async () => {
     vi.useFakeTimers()
     const harness = createHarness()
     const stop = vi.fn(() => new Promise<void>(() => {}))
     const destroy = vi.fn()
+    const { promise: writeStreamDone, resolve: finishFile } =
+      Promise.withResolvers<void>()
     const recorder = {
+      abort: vi.fn(async () => {
+        recorder.destroy()
+      }),
       destroyed: false,
       destroy() {
         recorder.destroyed = true
@@ -662,14 +671,14 @@ describe('Puppeteer capture engine', () => {
     const segment = {
       onRecorderError: vi.fn(),
       onWriteStreamError: vi.fn(),
-      outputFormat: 'webm',
-      outputPath: 'capture.webm',
+      outputFormat: 'mp4',
+      outputPath: 'capture.mp4',
       recordingFormat: 'webm',
       recordingPath: 'capture.webm',
-      transcode: false,
+      transcode: true,
       transcodeOptions: { deleteOriginal: true },
-      writeStream: { off: vi.fn() },
-      writeStreamDone: Promise.resolve(),
+      writeStream: { destroyed: false, end: vi.fn(finishFile), off: vi.fn() },
+      writeStreamDone,
       writeStreamErrored: false,
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
@@ -681,9 +690,18 @@ describe('Puppeteer capture engine', () => {
 
     const stopTask = harness.engine.stopCapture()
     await vi.advanceTimersByTimeAsync(5_000)
-    await expect(stopTask).resolves.toMatchObject({ streamOk: true })
+    await expect(stopTask).resolves.toMatchObject({
+      streamOk: false,
+      segment: {
+        outputFormat: 'webm',
+        outputPath: 'capture.webm',
+        transcode: false,
+      },
+    })
     expect(stop).toHaveBeenCalledOnce()
     expect(destroy).toHaveBeenCalledOnce()
+    expect(recorder.abort).toHaveBeenCalledOnce()
+    expect(segment.writeStream.end).toHaveBeenCalledOnce()
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {

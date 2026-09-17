@@ -5,6 +5,11 @@ import { PassThrough } from 'node:stream'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
+import { FFMPEG_TERMINATION_HELPER_TIMEOUT_MS } from './constants.js'
+import {
+  type TerminateFfmpegProcessTree,
+  terminateFfmpegProcessTree,
+} from './process-supervisor.js'
 
 // Puppeteer resolves `page.screencast()` once the first frame arrives. Keep that
 // ordering, but do not wait indefinitely for a tab that never paints.
@@ -31,6 +36,7 @@ export interface ScreencastRecorderDependencies {
   /** Monotonic milliseconds, used to bound frame timestamps and the final hold. */
   readonly monotonicNow?: () => number
   readonly spawnProcess?: (command: string, args: string[]) => ChildProcess
+  readonly terminateProcessTree?: TerminateFfmpegProcessTree
 }
 
 interface ScreencastFrameEvent {
@@ -68,6 +74,11 @@ export class ScreencastRecorder extends PassThrough {
   private readonly fps: number
   private readonly monotonicNow: () => number
   private readonly session: CDPSession
+  private readonly clock: ClockBoundary
+  private readonly terminateProcessTree: TerminateFfmpegProcessTree
+  private readonly cancelled = Promise.withResolvers<void>()
+  private aborting: Promise<void> | undefined
+  private detaching: Promise<void> | undefined
   private ffmpegDiagnostic = ''
   private first: ReceivedFrame | undefined
   private latest: ReceivedFrame | undefined
@@ -81,12 +92,19 @@ export class ScreencastRecorder extends PassThrough {
     ffmpeg: ChildProcess,
     fps: number,
     monotonicNow: () => number,
+    dependencies: Pick<
+      ScreencastRecorderDependencies,
+      'clock' | 'terminateProcessTree'
+    > = {},
   ) {
     super({ allowHalfOpen: false })
     this.session = session
     this.ffmpeg = ffmpeg
     this.fps = fps
     this.monotonicNow = monotonicNow
+    this.clock = dependencies.clock ?? systemClock
+    this.terminateProcessTree =
+      dependencies.terminateProcessTree ?? terminateFfmpegProcessTree
     this.ffmpegClosed = new Promise((resolve) => {
       ffmpeg.once('close', () => {
         resolve()
@@ -139,23 +157,65 @@ export class ScreencastRecorder extends PassThrough {
     await this.stopping
   }
 
+  /** Abandon a failed stop without leaving an encoder holding the worker open. */
+  abort(): Promise<void> {
+    this.aborting ??= Promise.resolve().then(() => this.abortRecording())
+    return this.aborting
+  }
+
   override _destroy(
     error: Error | null,
     callback: (error?: Error | null) => void,
   ): void {
     this.stopped = true
     this.session.off('Page.screencastFrame', this.onFrame)
-    // A graceful stop ends FFmpeg's output before the process reports its exit;
-    // only an abandoned recording needs the process killed.
-    if (
-      !this.stopping &&
-      this.ffmpeg.exitCode === null &&
-      this.ffmpeg.signalCode === null
-    ) {
-      this.ffmpeg.kill()
+    // Normal stream auto-destruction can precede FFmpeg's close event. An
+    // explicit destroy during stop is different: it must still cancel stop.
+    if (!this.readableEnded || !this.writableFinished) {
+      void this.abort()
     }
-    void this.session.detach().catch(() => undefined)
+    void this.detachSession()
     callback(error)
+  }
+
+  private async abortRecording(): Promise<void> {
+    this.stopped = true
+    this.session.off('Page.screencastFrame', this.onFrame)
+    this.cancelled.resolve()
+    this.ffmpeg.stdout?.unpipe(this)
+    this.ffmpeg.stdin?.destroy()
+    this.destroy()
+    try {
+      if (this.ffmpeg.exitCode === null && this.ffmpeg.signalCode === null) {
+        // The engine already allowed a graceful stop. Force only this owned
+        // encoder tree; never kill other workers' FFmpeg/browser processes.
+        await this.terminateProcessTree(this.ffmpeg, true)
+        await this.waitForEncoderClose()
+      }
+    } finally {
+      this.ffmpeg.stdout?.destroy()
+      this.ffmpeg.stderr?.destroy()
+      this.ffmpeg.unref()
+    }
+  }
+
+  private async waitForEncoderClose(): Promise<void> {
+    const { promise: expired, resolve } = Promise.withResolvers<void>()
+    const timer = this.clock.setTimeout(
+      resolve,
+      FFMPEG_TERMINATION_HELPER_TIMEOUT_MS,
+    )
+    timer.unref?.()
+    try {
+      await Promise.race([this.ffmpegClosed, expired])
+    } finally {
+      this.clock.clearTimeout(timer)
+    }
+  }
+
+  private detachSession(): Promise<void> {
+    this.detaching ??= this.session.detach().catch(() => undefined)
+    return this.detaching
   }
 
   private readonly onFrame = (event: ScreencastFrameEvent): void => {
@@ -205,7 +265,14 @@ export class ScreencastRecorder extends PassThrough {
 
   private async finish(): Promise<void> {
     // Stopping the screencast flushes frames already in flight.
-    await this.session.send('Page.stopScreencast').catch(() => undefined)
+    await Promise.race([
+      this.session.send('Page.stopScreencast').catch(() => undefined),
+      this.cancelled.promise,
+    ])
+    if (this.aborting) {
+      await this.aborting
+      return
+    }
     this.stopped = true
     this.session.off('Page.screencastFrame', this.onFrame)
     const latest = this.latest
@@ -220,8 +287,12 @@ export class ScreencastRecorder extends PassThrough {
       )
     }
     this.ffmpeg.stdin?.end()
-    await this.ffmpegClosed
-    await this.session.detach().catch(() => undefined)
+    await Promise.race([this.ffmpegClosed, this.cancelled.promise])
+    if (this.aborting) {
+      await this.aborting
+      return
+    }
+    await Promise.race([this.detachSession(), this.cancelled.promise])
   }
 
   private gridPosition(elapsedSeconds: number): number {
@@ -268,13 +339,14 @@ export const recordScreencast = async (
       ffmpeg,
       options.fps,
       dependencies.monotonicNow ?? (() => performance.now()),
+      dependencies,
     )
     await session.send('Page.startScreencast', { format: 'png' })
     await recorder.waitForFirstFrame(clock)
     return recorder
   } catch (error) {
     if (recorder) {
-      recorder.destroy()
+      await recorder.abort()
     } else {
       ffmpeg.kill()
       await session?.detach().catch(() => undefined)
@@ -326,6 +398,7 @@ export const createFfmpegArguments = (
 const spawnFfmpeg = (command: string, args: string[]): ChildProcess => {
   return spawn(command, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
     windowsHide: true,
   })
 }

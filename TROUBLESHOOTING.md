@@ -118,6 +118,36 @@ Set `processing.ffmpeg.path` or `FFMPEG_PATH`, or put `ffmpeg` on `PATH`.
 Development may install `ffmpeg-static`; it is deliberately not a production
 dependency. CI should not opt out of FFmpeg media assertions.
 
+## Recorder stop times out on a CI runner
+
+`Recorder stop timed out after 5000ms` means capture started, but the browser's
+stop command or the encoder's final flush did not finish within the shutdown
+deadline. It is not an npm installation error. Concurrent browser/encoder load,
+slow output storage, and a stalled browser connection are possible causes;
+the warning alone does not identify which one occurred.
+
+In `1.0.0-rc.3` and earlier, the timeout destroys Puppeteer's recorder stream but
+cannot terminate its private encoder process. A remaining process can keep the
+worker alive, and the destination file can incur another stream timeout. The
+replacement recorder explicitly terminates its owned encoder tree, closes the
+file, and preserves partial bytes as an unclean segment. Partial files are not
+guaranteed to decode. The normal five-second graceful-stop deadline is unchanged.
+
+`processing.ffmpeg.timeoutMs` applies to post-processing, not this capture-stop
+deadline. `failurePolicy: 'warn'` cannot make an abandoned operating-system
+process disappear in older versions. If video is blocking an essential pipeline,
+temporarily remove the service from that job until a corrected RC is installed;
+do not hide the test step's failure with `continue-on-error`.
+
+For diagnosis, save the final step error/exit code, service warnings, sanitized
+configuration, runner CPU/RAM, and Node, Chrome, Puppeteer and FFmpeg versions.
+Compare one worker with the configured concurrency before attributing the stall
+to Linux itself. Keep artifact upload separate from the test command and give
+it an explicit status condition, such as `if: ${{ !cancelled() }}`, so a failed
+test does not skip the upload. Upload only intended logs/media, not the entire
+workspace or credential files. GitHub documents these
+[status-check conditions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions).
+
 ## Merge or transcode fails
 
 The service preserves source recordings and removes unpublished temporary

@@ -73,6 +73,10 @@ if (mode === 'low-fps') {
 if (mode === 'animation') {
   capture.fps = 10
 }
+if (mode === 'unprimed') {
+  capture.framePriming = false
+  capture.fps = 10
+}
 if (mode !== 'controls' && expectedDimensions[mode]) {
   capture.viewport = { width: 960, height: 600 }
   capture.crop = { x: 10, y: 20, width: 801, height: 401 }

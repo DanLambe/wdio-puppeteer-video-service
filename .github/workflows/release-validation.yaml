@@ -158,6 +158,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:low-fps
 
+      - name: Verify Recording Without Frame Priming
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:unprimed
+
       - name: Verify Real-Time Animation Recording
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:animation

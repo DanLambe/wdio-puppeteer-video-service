@@ -244,11 +244,17 @@ export class PuppeteerCaptureEngine {
     if (!recorder) {
       return { segment: undefined, streamOk: false }
     }
-    await this.stopRecorder(recorder)
+    const recorderStopped = await this.stopRecorder(recorder)
+    if (!recorderStopped && !segment.writeStream.destroyed) {
+      // Destroying a pipe's source does not end its destination. Flush bytes
+      // already accepted by the file without waiting for an impossible EOF.
+      segment.writeStream.end()
+    }
     this.reportRecorderResult(recorder)
 
     try {
-      const streamOk = await this.waitForWriteStream(segment)
+      const streamFinished = await this.waitForWriteStream(segment)
+      const streamOk = recorderStopped && streamFinished
       if (!streamOk) {
         this.markSegmentAsUnclean(segment)
       }
@@ -408,7 +414,7 @@ export class PuppeteerCaptureEngine {
     await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
   }
 
-  private async stopRecorder(recorder: ScreencastRecorder): Promise<void> {
+  private async stopRecorder(recorder: ScreencastRecorder): Promise<boolean> {
     const { promise: timeoutTask, reject: rejectTimeout } =
       Promise.withResolvers<never>()
     const timeout = this.clock.setTimeout(() => {
@@ -421,15 +427,15 @@ export class PuppeteerCaptureEngine {
     timeout.unref()
     try {
       await Promise.race([recorder.stop(), timeoutTask])
+      return true
     } catch (error) {
       this.log(
         'warn',
         '[WdioPuppeteerVideoService] Error stopping recorder:',
         error,
       )
-      if (!recorder.destroyed) {
-        recorder.destroy()
-      }
+      await recorder.abort()
+      return false
     } finally {
       this.clock.clearTimeout(timeout)
     }
@@ -446,9 +452,10 @@ export class PuppeteerCaptureEngine {
     }
     const { code, diagnostic } = recorder.ffmpegResult
     if (code !== null && code !== 0) {
+      const details = diagnostic ? `: ${diagnostic}` : '.'
       this.log(
         'warn',
-        `[WdioPuppeteerVideoService] FFmpeg exited with code ${code.toString()} while recording${diagnostic ? `: ${diagnostic}` : '.'}`,
+        `[WdioPuppeteerVideoService] FFmpeg exited with code ${code.toString()} while recording${details}`,
       )
     }
   }
