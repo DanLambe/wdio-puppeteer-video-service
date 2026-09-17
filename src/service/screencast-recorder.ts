@@ -1,6 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import os from 'node:os'
 import { PassThrough } from 'node:stream'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
@@ -14,6 +13,12 @@ import {
 // Puppeteer resolves `page.screencast()` once the first frame arrives. Keep that
 // ordering, but do not wait indefinitely for a tab that never paints.
 const FIRST_FRAME_TIMEOUT_MS = 1_000
+// libvpx's fastest realtime speed. Puppeteer derives it from the host's CPU
+// count, so a 4-CPU CI runner encodes 1080p VP9 at about 7 frames per second on
+// one core: slower than the capture rate, so every stop has a backlog to drain.
+// Speed 8 encodes the same frames about ten times faster at equal SSIM, with
+// files up to 2.7 times larger.
+const VP9_REALTIME_SPEED = 8
 // Chrome can stamp a screencast's first frame with the time the page last
 // painted, seconds before capture began. Never place a frame later than it
 // arrived, measured from the first frame's arrival, beyond this delivery slack.
@@ -32,7 +37,6 @@ export interface ScreencastRecorderOptions {
 
 export interface ScreencastRecorderDependencies {
   readonly clock?: ClockBoundary
-  readonly cpuCount?: () => number
   /** Monotonic milliseconds, used to bound frame timestamps and the final hold. */
   readonly monotonicNow?: () => number
   readonly spawnProcess?: (command: string, args: string[]) => ChildProcess
@@ -322,12 +326,7 @@ export const recordScreencast = async (
     : undefined
   const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpeg)(
     options.ffmpegPath,
-    createFfmpegArguments(
-      options,
-      dimensions,
-      crop,
-      (dependencies.cpuCount ?? (() => os.cpus().length))(),
-    ),
+    createFfmpegArguments(options, dimensions, crop),
   )
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
@@ -360,7 +359,6 @@ export const createFfmpegArguments = (
     Partial<Pick<ScreencastRecorderOptions, 'scale' | 'speed'>>,
   dimensions: Pick<PixelDimensions, 'width' | 'height'>,
   crop: Readonly<CaptureCrop> | undefined,
-  cpuCount: number,
 ): string[] => {
   const { width, height } = dimensions
   const filters = [
@@ -386,7 +384,7 @@ export const createFfmpegArguments = (
     ['-an', '-threads', '1', '-b:v', '0'],
     ['-vcodec', 'vp9', '-crf', `${options.quality}`],
     ['-deadline', 'realtime'],
-    ['-cpu-used', `${Math.max(1, Math.min(Math.floor(cpuCount / 2), 8))}`],
+    ['-cpu-used', `${VP9_REALTIME_SPEED}`],
     options.format === 'mp4'
       ? ['-movflags', 'hybrid_fragmented', '-f', 'mp4']
       : ['-f', 'webm'],

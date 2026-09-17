@@ -175,7 +175,6 @@ const startRecorder = async (
     { ...options, ...recorderOptions },
     {
       clock: createClock(),
-      cpuCount: () => 8,
       monotonicNow: () => monotonic,
       spawnProcess: ffmpeg.spawn,
     },
@@ -210,7 +209,6 @@ describe('screencast recorder FFmpeg arguments', () => {
       options,
       { width: 1280, height: 720 },
       undefined,
-      8,
     )
     // FFmpeg ignores `-framerate` after `-i` and plays piped images at 25 fps.
     expect(args.indexOf('-framerate')).toBeLessThan(args.indexOf('-i'))
@@ -236,7 +234,6 @@ describe('screencast recorder FFmpeg arguments', () => {
       { ...options, format: 'mp4', scale: 0.5, speed: 2 },
       { width: 1600, height: 900 },
       { x: 20, y: 40, width: 800, height: 400 },
-      8,
     )
     expect(args[args.indexOf('-vf') + 1]).toBe(
       "crop='min(1600,iw):min(900,ih):0:0',pad=1600:900:0:0,setpts=0.5*PTS,crop=800:400:20:40,scale=iw*0.5:-1:flags=lanczos",
@@ -252,25 +249,21 @@ describe('screencast recorder FFmpeg arguments', () => {
       { format: 'webm', fps: 30, quality: 30 },
       { width: 1280, height: 720 },
       undefined,
-      8,
     )
     expect(args[args.indexOf('-vf') + 1]).toBe(
       "crop='min(1280,iw):min(720,ih):0:0',pad=1280:720:0:0",
     )
   })
-  it.each([
-    [1, '1'],
-    [3, '1'],
-    [8, '4'],
-    [64, '8'],
-  ])('uses a whole-number VP9 speed for %i CPUs', (cpus, expected) => {
+  it('encodes at the fastest realtime VP9 speed on every host', () => {
     const args = createFfmpegArguments(
       options,
       { width: 10, height: 10 },
       undefined,
-      cpus,
     )
-    expect(args[args.indexOf('-cpu-used') + 1]).toBe(expected)
+    // A speed derived from the CPU count fell behind real time on small hosts.
+    expect(
+      args.slice(args.indexOf('-deadline'), args.indexOf('-cpu-used') + 2),
+    ).toEqual(['-deadline', 'realtime', '-cpu-used', '8'])
   })
 })
 

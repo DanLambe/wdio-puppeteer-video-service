@@ -162,6 +162,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:unprimed
 
+      - name: Verify Sustained Full-HD Recording
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:sustained
+
       - name: Verify Real-Time Animation Recording
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:animation

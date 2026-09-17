@@ -122,22 +122,36 @@ dependency. CI should not opt out of FFmpeg media assertions.
 
 `Recorder stop timed out after 5000ms` means capture started, but the browser's
 stop command or the encoder's final flush did not finish within the shutdown
-deadline. It is not an npm installation error. Concurrent browser/encoder load,
-slow output storage, and a stalled browser connection are possible causes;
-the warning alone does not identify which one occurred.
+deadline. It is not an npm installation error.
 
-In `1.0.0-rc.3` and earlier, the timeout destroys Puppeteer's recorder stream but
-cannot terminate its private encoder process. A remaining process can keep the
-worker alive, and the destination file can incur another stream timeout. The
-replacement recorder explicitly terminates its owned encoder tree, closes the
-file, and preserves partial bytes as an unclean segment. Partial files are not
-guaranteed to decode. The normal five-second graceful-stop deadline is unchanged.
+In `1.0.0-rc.3` and earlier, the usual cause is an encoder slower than the
+capture. Puppeteer 24 chooses the VP9 encoding speed from the host's CPU count,
+so a 4-CPU runner encodes full-HD video at roughly 6-7 frames per second on one
+core. Below the capture rate, the encoder falls further behind for the whole
+test, and stop cannot drain that backlog in five seconds. Every test then waits
+about 35 more seconds, logs `Timed out waiting for recording stream to finish`
+and `Recording stream did not finish cleanly`, and keeps only the beginning of
+its video. Lowering `capture.fps` alone may not help. Until an RC with the
+replacement recorder is installed, reduce the encoded size with
+`capture.scale: 0.5` or a smaller browser window; in a 4-CPU reproduction of a
+four-worker, 1920x1080 suite, `scale: 0.5` removed every timeout.
+
+In `1.0.0-rc.3` and earlier, the timeout also destroys Puppeteer's recorder
+stream without terminating its private encoder process. A remaining process can
+keep the worker alive, and the destination file can incur another stream
+timeout. The replacement recorder always encodes at VP9's fastest realtime speed
+(the speed Puppeteer already used on hosts with 16 or more CPUs), which keeps up
+with full-HD capture on small runners. If a stop still times out, it terminates
+its owned encoder tree, closes the file, and preserves partial bytes as an
+unclean segment. Partial files are not guaranteed to decode. The normal
+five-second graceful-stop deadline is unchanged.
 
 `processing.ffmpeg.timeoutMs` applies to post-processing, not this capture-stop
 deadline. `failurePolicy: 'warn'` cannot make an abandoned operating-system
-process disappear in older versions. If video is blocking an essential pipeline,
-temporarily remove the service from that job until a corrected RC is installed;
-do not hide the test step's failure with `continue-on-error`.
+process disappear in older versions. If video is blocking an essential pipeline
+and the workaround above is not enough, temporarily remove the service from that
+job until a corrected RC is installed; do not hide the test step's failure with
+`continue-on-error`.
 
 For diagnosis, save the final step error/exit code, service warnings, sanitized
 configuration, runner CPU/RAM, and Node, Chrome, Puppeteer and FFmpeg versions.

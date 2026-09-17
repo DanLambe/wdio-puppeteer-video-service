@@ -88,7 +88,28 @@ describe('Puppeteer capture protocol and media controls', () => {
         requestAnimationFrame(step)
       `)
     }
-    const dwellMs = mode === 'animation' ? 3000 : 1500
+    if (mode === 'sustained') {
+      // A full-HD page whose table and moving box change continuously, like a
+      // busy application under test.
+      await browser.execute(`
+        const rows = Array.from({ length: 40 }, (_, i) => '<tr><td>Year ' + (i + 1) + '</td><td class="v">0</td><td>4.00%</td></tr>').join('')
+        const panel = document.createElement('div')
+        panel.innerHTML = '<table border="1" style="font:14px Arial;width:100%">' + rows + '</table>'
+        document.body.append(panel)
+        const box = document.createElement('div')
+        box.style.cssText = 'position:fixed;top:300px;left:0;width:160px;height:160px;background:#2563eb'
+        document.body.append(box)
+        setInterval(() => {
+          for (const cell of document.querySelectorAll('.v')) cell.textContent = (Math.random() * 100000).toFixed(2)
+        }, 500)
+        const step = (now) => {
+          box.style.transform = 'translateX(' + ((now / 3) % 1500) + 'px)'
+          requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      `)
+    }
+    const dwellMs = { animation: 3000, sustained: 15_000 }[mode] ?? 1500
     const recordingStartedAt = Number(await browser.execute(() => Date.now()))
     await browser.waitUntil(
       async () => {
@@ -102,7 +123,7 @@ describe('Puppeteer capture protocol and media controls', () => {
       },
       {
         interval: 100,
-        timeout: dwellMs + 1500,
+        timeout: dwellMs + 5000,
         timeoutMsg: `capture did not remain active for ${dwellMs.toString()} ms`,
       },
     )

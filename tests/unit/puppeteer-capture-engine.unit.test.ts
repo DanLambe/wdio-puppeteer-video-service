@@ -702,6 +702,12 @@ describe('Puppeteer capture engine', () => {
     expect(destroy).toHaveBeenCalledOnce()
     expect(recorder.abort).toHaveBeenCalledOnce()
     expect(segment.writeStream.end).toHaveBeenCalledOnce()
+    // One readable line per timeout; the logger receives no Error to print a stack for.
+    expect(harness.logs).toContainEqual({
+      level: 'warn',
+      message:
+        '[WdioPuppeteerVideoService] Error stopping recorder: Recorder stop timed out after 5000ms',
+    })
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {

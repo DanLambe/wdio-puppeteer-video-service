@@ -85,6 +85,9 @@ jobs:
       - name: Verify Recording Without Frame Priming
         run: corepack npm run test:e2e:capture:unprimed
 
+      - name: Verify Sustained Full-HD Recording
+        run: corepack npm run test:e2e:capture:sustained
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics

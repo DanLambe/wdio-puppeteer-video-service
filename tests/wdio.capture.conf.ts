@@ -15,7 +15,7 @@ const chromeArgs = [
   '--headless=new',
   '--disable-gpu',
   '--disable-dev-shm-usage',
-  '--window-size=1280,720',
+  mode === 'sustained' ? '--window-size=1920,1080' : '--window-size=1280,720',
   `--force-device-scale-factor=${mode === 'hidpi' ? '2' : '1'}`,
 ]
 
@@ -71,6 +71,12 @@ if (mode === 'low-fps') {
 // Continuous animation below 30 FPS: Puppeteer 24's recorder froze it on one
 // frame and always encoded at 25 fps.
 if (mode === 'animation') {
+  capture.fps = 10
+}
+// Fifteen seconds of busy full-HD capture. An encoder slower than the capture
+// rate falls further behind for the whole test and cannot finish within the
+// recorder's stop deadline, which cuts the end off the video.
+if (mode === 'sustained') {
   capture.fps = 10
 }
 if (mode === 'unprimed') {
@@ -168,6 +174,11 @@ export const config: WebdriverIO.Config = {
     ) {
       throw new Error(
         `Expected ${mode} dimensions ${expected.width}x${expected.height}, received ${media.width}x${media.height}`,
+      )
+    }
+    if (mode === 'sustained' && media.durationSeconds < 13) {
+      throw new Error(
+        `Expected the sustained capture to keep its 15 s of page activity; media plays ${media.durationSeconds.toFixed(2)}s`,
       )
     }
     if (mode === 'controls') {

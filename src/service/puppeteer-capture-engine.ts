@@ -429,10 +429,10 @@ export class PuppeteerCaptureEngine {
       await Promise.race([recorder.stop(), timeoutTask])
       return true
     } catch (error) {
+      // An expected deadline, not a crash: a stack trace only adds noise.
       this.log(
         'warn',
-        '[WdioPuppeteerVideoService] Error stopping recorder:',
-        error,
+        `[WdioPuppeteerVideoService] Error stopping recorder: ${describeError(error)}`,
       )
       await recorder.abort()
       return false
