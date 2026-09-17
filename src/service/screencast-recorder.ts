@@ -273,8 +273,7 @@ export class ScreencastRecorder extends PassThrough {
       this.session.send('Page.stopScreencast').catch(() => undefined),
       this.cancelled.promise,
     ])
-    if (this.aborting) {
-      await this.aborting
+    if (await this.wasAborted()) {
       return
     }
     this.stopped = true
@@ -292,11 +291,21 @@ export class ScreencastRecorder extends PassThrough {
     }
     this.ffmpeg.stdin?.end()
     await Promise.race([this.ffmpegClosed, this.cancelled.promise])
-    if (this.aborting) {
-      await this.aborting
+    if (await this.wasAborted()) {
       return
     }
     await Promise.race([this.detachSession(), this.cancelled.promise])
+  }
+
+  // Awaited between steps, so TypeScript would otherwise keep `aborting`
+  // narrowed to its value before the await.
+  private async wasAborted(): Promise<boolean> {
+    const aborting = this.aborting
+    if (!aborting) {
+      return false
+    }
+    await aborting
+    return true
   }
 
   private gridPosition(elapsedSeconds: number): number {
