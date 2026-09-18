@@ -388,7 +388,7 @@ describe('screencast recorder frame timing', () => {
     expect(countWrites(harness.writes)).toEqual({ active: 10, start: 100 })
   })
 
-  it('shows a frame that arrives behind the held timeline once, later', async () => {
+  it('keeps elapsed duration when a frame arrives behind the held timeline', async () => {
     const clock = createHoldClock()
     const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
     harness.advance(10_000)
@@ -399,8 +399,34 @@ describe('screencast recorder frame timing', () => {
 
     await harness.recorder.stop()
 
-    // It is shown from 9.5 s to 10 s: the timeline neither rewinds nor repeats.
-    expect(countWrites(harness.writes)).toEqual({ late: 5, start: 95 })
+    // It is shown from the first unwritten position through stop at 11 s.
+    // Delivery lag must not erase a second from the recording.
+    expect(countWrites(harness.writes)).toEqual({ late: 15, start: 95 })
+  })
+
+  it('keeps every frame of a busy page whose frames arrive late', async () => {
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    harness.advance(1_000)
+    const late: string[] = []
+    for (let frame = 1; frame <= 50; frame += 1) {
+      // Painted every 100 ms, each reaching the recorder a second late.
+      harness.advance(100)
+      harness.session.emitFrame(`f${frame}`, 100 + frame / 10)
+      late.push(`f${frame}`)
+      clock.tick()
+    }
+
+    await harness.recorder.stop()
+
+    // Holding to the local clock while capturing would run ahead of these
+    // frames and drop them; each is shown at its own time, and only the last
+    // one is held to the 6 s the capture lasted.
+    expect(harness.writes).toEqual([
+      'start',
+      ...late.slice(0, -1),
+      ...Array.from({ length: 10 }, () => 'f50'),
+    ])
   })
 
   it('leaves held frames for stop while the encoder is backed up', async () => {

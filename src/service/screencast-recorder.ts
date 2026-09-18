@@ -297,13 +297,17 @@ export class ScreencastRecorder extends PassThrough {
     this.stopped = true
     this.stopHolding()
     this.session.off('Page.screencastFrame', this.onFrame)
-    const latest = this.latest
-    if (latest) {
-      // Hold the final frame until now, and show it at least once.
+    const { first, latest } = this
+    if (first && latest) {
+      // Hold the final frame until now, and show it at least once. A frame
+      // Chrome delivered late must not end the video before the capture's
+      // elapsed time. Only stop uses that bound: applied while capturing, it
+      // would run the timeline ahead of late frames and drop them.
       this.fillTo(
         latest,
         Math.max(
           this.heldPosition(latest, 0),
+          this.heldPosition(first, 0),
           this.latestEmitted ? 0 : this.emitted + 1,
         ),
       )
