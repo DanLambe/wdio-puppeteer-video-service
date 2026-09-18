@@ -333,4 +333,32 @@ describe('recording policy', () => {
       processingOutcome: 'completed',
     })
   })
+
+  it.each([
+    { deferred: true, keepArtifacts: true, paths: ['partial.webm'] },
+    { deferred: false, keepArtifacts: false, paths: [] },
+  ])(
+    'records an incomplete capture as failed whatever the retention (retained=$keepArtifacts)',
+    ({ deferred, keepArtifacts, paths }) => {
+      expect(
+        createCompletedManifestOptions({
+          captureFailed: true,
+          deferred,
+          keepArtifacts,
+          result: 'failed',
+          paths,
+          processing: resolveServiceConfiguration({
+            processing: { transcode: { enabled: true } },
+          }).options.processing,
+        }),
+      ).toEqual({
+        decision: 'failed',
+        paths,
+        processingOperation: 'capture',
+        processingOutcome: 'failed',
+        reason: 'capture-incomplete',
+        result: 'failed',
+      })
+    },
+  )
 })

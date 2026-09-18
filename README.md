@@ -324,6 +324,15 @@ without mixing worker journals. Existing valid run records are retained whenever
 the manifest is aggregated; the service does not prune old runs, so archive or
 remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
+An incomplete capture (for example, an encoder error or a stop timeout) is
+recorded in the manifest as `failed` with reason `capture-incomplete`, even if
+it produced a nonempty file. Retained partial media is still listed, and
+attached to Allure when configured, for diagnosis, but it is not merged or
+otherwise processed; unretained media is discarded normally. The default
+`failurePolicy: 'warn'` logs one warning when the segment stops and does not
+fail the test. With `'error'`, the failure is raised after manifest
+finalization and recording cleanup.
+
 Optional artifact `width` and `height` describe the encoded retained file, not
 an estimate of the page's CSS viewport. A lightweight FFmpeg inspection reads
 each finalized artifact without decoding the full video; this accounts for

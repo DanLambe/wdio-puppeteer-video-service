@@ -147,8 +147,10 @@ at stop. If a stop still times out, the recorder terminates its owned encoder
 tree, closes the file, and preserves partial bytes as an unclean segment. An
 encoder that exits with an error or is killed is reported with its exit code or
 signal, and its file is likewise kept as an unclean segment rather than
-processed as a complete recording. Partial files are not guaranteed to decode. The normal
-five-second graceful-stop deadline is unchanged.
+processed as a complete recording. Either way the manifest entry is `failed`
+with reason `capture-incomplete`, and `failurePolicy: 'error'` raises it.
+Partial files are not guaranteed to decode. The normal five-second
+graceful-stop deadline is unchanged.
 
 `processing.ffmpeg.timeoutMs` applies to post-processing, not this capture-stop
 deadline. `failurePolicy: 'warn'` cannot make an abandoned operating-system
