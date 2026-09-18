@@ -157,12 +157,36 @@ const createClock = (): ClockBoundary & { expire: () => void } => {
   }
 }
 
+// A first-frame clock whose repeating hold timer the test fires by hand.
+const createHoldClock = (): ClockBoundary & {
+  cleared: () => boolean
+  tick: () => void
+} => {
+  let tick: (() => void) | undefined
+  let cleared = false
+  return {
+    ...createClock(),
+    clearInterval: () => {
+      cleared = true
+    },
+    cleared: () => cleared,
+    setInterval: (callback) => {
+      tick = callback
+      return {} as NodeJS.Timeout
+    },
+    tick: () => {
+      tick?.()
+    },
+  }
+}
+
 // Starts a recorder whose screencast delivers frame "start" at `timestamp` as
 // soon as it starts, with a controllable monotonic clock in milliseconds.
 const startRecorder = async (
   recorderOptions: Partial<ScreencastRecorderOptions> = {},
   startTimestamp = 100,
   ffmpeg = createFakeFfmpeg(),
+  clock: ClockBoundary = createClock(),
 ) => {
   const session = createFakeSession((method, current) => {
     if (method === 'Page.startScreencast') {
@@ -174,7 +198,7 @@ const startRecorder = async (
     createPage(session),
     { ...options, ...recorderOptions },
     {
-      clock: createClock(),
+      clock,
       monotonicNow: () => monotonic,
       spawnProcess: ffmpeg.spawn,
     },
@@ -329,6 +353,82 @@ describe('screencast recorder frame timing', () => {
     ).toHaveLength(3)
   })
 
+  it('feeds a long quiet tail to the encoder while recording, not at stop', async () => {
+    // Chrome sends nothing while a page is static. Writing the whole tail at
+    // stop left 60 s of full-HD video to encode inside a 5 s deadline.
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    for (let second = 1; second <= 60; second += 1) {
+      harness.advance(1_000)
+      clock.tick()
+    }
+    // Held half a second behind real time so late frames keep their place.
+    expect(harness.writes).toHaveLength(595)
+
+    await harness.recorder.stop()
+
+    expect(harness.writes).toHaveLength(600)
+    expect(new Set(harness.writes)).toEqual(new Set(['start']))
+    expect(clock.cleared()).toBe(true)
+  })
+
+  it('continues the timeline when a quiet page becomes active again', async () => {
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    harness.advance(10_000)
+    clock.tick()
+    expect(harness.writes).toHaveLength(95)
+
+    harness.frame('active', 110)
+    harness.advance(1_000)
+    clock.tick()
+    await harness.recorder.stop()
+
+    // No frame is repeated or rewound across the transition.
+    expect(countWrites(harness.writes)).toEqual({ active: 10, start: 100 })
+  })
+
+  it('shows a frame that arrives behind the held timeline once, later', async () => {
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    harness.advance(10_000)
+    clock.tick()
+    // Painted at 9 s, but the held first frame already reaches 9.5 s.
+    harness.session.emitFrame('late', 109)
+    harness.advance(1_000)
+
+    await harness.recorder.stop()
+
+    // It is shown from 9.5 s to 10 s: the timeline neither rewinds nor repeats.
+    expect(countWrites(harness.writes)).toEqual({ late: 5, start: 95 })
+  })
+
+  it('leaves held frames for stop while the encoder is backed up', async () => {
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    const stdin = harness.child.stdin as NonNullable<ChildProcess['stdin']>
+    Object.defineProperty(stdin, 'writableNeedDrain', { value: true })
+    harness.advance(10_000)
+    clock.tick()
+    expect(harness.writes).toEqual([])
+
+    await harness.recorder.stop()
+
+    expect(harness.writes).toHaveLength(100)
+  })
+
+  it('stops holding frames once the recording is aborted', async () => {
+    const clock = createHoldClock()
+    const harness = await startRecorder({ fps: 10 }, 100, undefined, clock)
+
+    await harness.recorder.abort()
+    harness.advance(10_000)
+    clock.tick()
+
+    expect(clock.cleared()).toBe(true)
+    expect(harness.writes).toEqual([])
+  })
+
   it('holds the last received frame until stop, measured on the local clock', async () => {
     const harness = await startRecorder({ fps: 10 }, 100)
     harness.frame('last', 100.2)
@@ -411,6 +511,7 @@ describe('screencast recorder frame timing', () => {
       diagnostic: expect.stringMatching(
         /^x+\n\[png @ 0\] Invalid PNG signature$/u,
       ),
+      signal: null,
     })
     expect(harness.recorder.ffmpegResult.diagnostic.length).toBeLessThanOrEqual(
       4_000,
@@ -420,6 +521,24 @@ describe('screencast recorder frame timing', () => {
 
     expect(harness.recorder.ffmpegResult.code).toBe(0)
   })
+  it('decodes a character split across FFmpeg error chunks', async () => {
+    const harness = await startRecorder()
+    const stderr = harness.child.stderr as PassThrough
+    const message = Buffer.from('encoder 日本語 error')
+    stderr.write(message.subarray(0, 9))
+    stderr.write(message.subarray(9))
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(harness.recorder.ffmpegResult.diagnostic).toBe(
+      'encoder 日本語 error',
+    )
+
+    await harness.recorder.stop()
+
+    expect(harness.recorder.ffmpegResult.diagnostic).toBe(
+      'encoder 日本語 error',
+    )
+  })
+
   it('stops FFmpeg and the CDP session when destroyed', async () => {
     const harness = await startRecorder()
 

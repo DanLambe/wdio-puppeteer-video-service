@@ -15,10 +15,9 @@ unsupported Puppeteer 25 installation. Do not bypass the conflict with
 `--force`, `--legacy-peer-deps`, or an override. Keep WebdriverIO on a supported
 9.x release and use Puppeteer Core `>=24.11.2 <25`.
 
-The lower bound is not only a peer-resolution preference. Puppeteer Core
-24.0.0 does not expose or apply the `format`, `fps`, and `quality` screencast
-controls required by the service, so widening the range to all 24.x releases
-would silently ignore configured capture behavior.
+The lower bound is the oldest Puppeteer Core release the service is validated
+with: release validation installs `24.11.2` and records through it. Earlier 24.x
+releases are untested, so do not widen the range to them.
 
 ## WDIO launcher context is missing or malformed
 
@@ -124,14 +123,14 @@ dependency. CI should not opt out of FFmpeg media assertions.
 stop command or the encoder's final flush did not finish within the shutdown
 deadline. It is not an npm installation error.
 
-In `1.0.0-rc.3` and earlier, the usual cause is an encoder slower than the
+In `1.0.0-rc.3` and earlier, one reproduced cause is an encoder slower than the
 capture. Puppeteer 24 chooses the VP9 encoding speed from the host's CPU count,
-so a 4-CPU runner encodes full-HD video at roughly 6-7 frames per second on one
-core. Below the capture rate, the encoder falls further behind for the whole
-test, and stop cannot drain that backlog in five seconds. Every test then waits
-about 35 more seconds, logs `Timed out waiting for recording stream to finish`
-and `Recording stream did not finish cleanly`, and keeps only the beginning of
-its video. Lowering `capture.fps` alone may not help. Until an RC with the
+so on a 4-CPU runner it encoded a full-HD test page at roughly 6-7 frames per
+second on one core. Below the capture rate, the encoder falls further behind
+for the whole test, and stop cannot drain that backlog in five seconds. Every
+test then waits about 35 more seconds, logs `Timed out waiting for recording
+stream to finish` and `Recording stream did not finish cleanly`, and keeps only
+the beginning of its video. Lowering `capture.fps` alone may not help. Until an RC with the
 replacement recorder is installed, reduce the encoded size with
 `capture.scale: 0.5` or a smaller browser window; in a 4-CPU reproduction of a
 four-worker, 1920x1080 suite, `scale: 0.5` removed every timeout.
@@ -140,10 +139,15 @@ In `1.0.0-rc.3` and earlier, the timeout also destroys Puppeteer's recorder
 stream without terminating its private encoder process. A remaining process can
 keep the worker alive, and the destination file can incur another stream
 timeout. The replacement recorder always encodes at VP9's fastest realtime speed
-(the speed Puppeteer already used on hosts with 16 or more CPUs), which keeps up
-with full-HD capture on small runners. If a stop still times out, it terminates
-its owned encoder tree, closes the file, and preserves partial bytes as an
-unclean segment. Partial files are not guaranteed to decode. The normal
+(the speed Puppeteer already used on hosts with 16 or more CPUs), which kept up
+with full-HD capture on 4-CPU runners in validation. It also encodes a static
+page's held frame while the test runs: Chrome sends no frames while nothing
+changes, and Puppeteer's recorder left that whole quiet period to be encoded
+at stop. If a stop still times out, the recorder terminates its owned encoder
+tree, closes the file, and preserves partial bytes as an unclean segment. An
+encoder that exits with an error or is killed is reported with its exit code or
+signal, and its file is likewise kept as an unclean segment rather than
+processed as a complete recording. Partial files are not guaranteed to decode. The normal
 five-second graceful-stop deadline is unchanged.
 
 `processing.ffmpeg.timeoutMs` applies to post-processing, not this capture-stop

@@ -23,7 +23,11 @@ import type { ScreencastRecorder } from '../../src/service/screencast-recorder.j
 
 type FakeRecorder = PassThrough & {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
-  ffmpegResult: { code: number | null; diagnostic: string }
+  ffmpegResult: {
+    code: number | null
+    diagnostic: string
+    signal: NodeJS.Signals | null
+  }
   frameCount: number
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
@@ -42,7 +46,7 @@ const createRecorder = (): FakeRecorder => {
     recorder.destroy()
   })
   recorder.frameCount = 1
-  recorder.ffmpegResult = { code: 0, diagnostic: '' }
+  recorder.ffmpegResult = { code: 0, diagnostic: '', signal: null }
   recorder.stop = vi.fn(async () => {
     recorder.end()
   })
@@ -432,34 +436,58 @@ describe('Puppeteer capture engine', () => {
   it.each([
     [
       'no frames',
-      { frameCount: 0, code: 0, diagnostic: '' },
+      { frameCount: 0, code: 0, diagnostic: '', signal: null },
       'delivered no frames before recording stopped',
     ],
     [
       'an FFmpeg failure',
-      { frameCount: 12, code: 1, diagnostic: 'Invalid PNG signature' },
+      {
+        frameCount: 12,
+        code: 1,
+        diagnostic: 'Invalid PNG signature',
+        signal: null,
+      },
       'FFmpeg exited with code 1 while recording: Invalid PNG signature',
     ],
+    [
+      'FFmpeg being killed',
+      {
+        frameCount: 12,
+        code: null,
+        diagnostic: '',
+        signal: 'SIGKILL' as const,
+      },
+      'FFmpeg was terminated by SIGKILL while recording.',
+    ],
   ])(
-    'explains an unusable recording caused by %s',
+    'keeps a recording unclean and explains it when caused by %s',
     async (_label, result, message) => {
       const tempDir = await createTempDir()
+      const outputPath = path.join(tempDir, 'capture.webm')
       const harness = createHarness()
-      await expect(
-        startCapture(harness, path.join(tempDir, 'capture.webm')),
-      ).resolves.toEqual({ started: true })
+      await expect(startCapture(harness, outputPath)).resolves.toEqual({
+        started: true,
+      })
+      const segment = harness.session.activeSegment
+      if (segment) {
+        // A clean segment would be transcoded; an unclean one keeps its bytes.
+        segment.transcode = true
+        segment.outputPath = path.join(tempDir, 'capture.mp4')
+      }
       harness.recorder.frameCount = result.frameCount
       harness.recorder.ffmpegResult = {
         code: result.code,
         diagnostic: result.diagnostic,
+        signal: result.signal,
       }
 
-      await harness.engine.stopCapture()
-
-      expect(harness.logs).toContainEqual({
-        level: 'warn',
-        message: expect.stringContaining(message),
+      await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+        streamOk: false,
+        segment: { outputPath, transcode: false },
       })
+      expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
+        { level: 'warn', message: expect.stringContaining(message) },
+      ])
     },
   )
 
@@ -468,11 +496,13 @@ describe('Puppeteer capture engine', () => {
     const harness = createHarness()
     await startCapture(harness, path.join(tempDir, 'capture.webm'))
 
-    await harness.engine.stopCapture()
+    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+      streamOk: true,
+    })
 
     expect(
       harness.logs.filter(({ message }) =>
-        /no frames|FFmpeg exited/u.test(message),
+        /no frames|FFmpeg (exited|was terminated)/u.test(message),
       ),
     ).toEqual([])
   })
@@ -663,7 +693,7 @@ describe('Puppeteer capture engine', () => {
         recorder.destroyed = true
         destroy()
       },
-      ffmpegResult: { code: null, diagnostic: '' },
+      ffmpegResult: { code: null, diagnostic: '', signal: 'SIGKILL' },
       frameCount: 1,
       off: vi.fn(),
       stop,
@@ -702,12 +732,15 @@ describe('Puppeteer capture engine', () => {
     expect(destroy).toHaveBeenCalledOnce()
     expect(recorder.abort).toHaveBeenCalledOnce()
     expect(segment.writeStream.end).toHaveBeenCalledOnce()
-    // One readable line per timeout; the logger receives no Error to print a stack for.
-    expect(harness.logs).toContainEqual({
-      level: 'warn',
-      message:
-        '[WdioPuppeteerVideoService] Error stopping recorder: Recorder stop timed out after 5000ms',
-    })
+    // One readable line per timeout; the logger receives no Error to print a
+    // stack for. The abort's own SIGKILL is not reported as an encoder failure.
+    expect(harness.logs).toEqual([
+      {
+        level: 'warn',
+        message:
+          '[WdioPuppeteerVideoService] Error stopping recorder: Recorder stop timed out after 5000ms',
+      },
+    ])
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {

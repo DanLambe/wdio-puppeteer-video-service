@@ -109,7 +109,8 @@ describe('Puppeteer capture protocol and media controls', () => {
         requestAnimationFrame(step)
       `)
     }
-    const dwellMs = { animation: 3000, sustained: 15_000 }[mode] ?? 1500
+    const dwellMs =
+      { animation: 3000, quiet: 45_000, sustained: 15_000 }[mode] ?? 1500
     const recordingStartedAt = Number(await browser.execute(() => Date.now()))
     await browser.waitUntil(
       async () => {

@@ -20,6 +20,7 @@ type CaptureMode =
   | 'animation'
   | 'unprimed'
   | 'sustained'
+  | 'quiet'
 
 const requestedMode = process.argv[2] ?? 'all'
 const allModes: CaptureMode[] = [
@@ -35,6 +36,7 @@ const allModes: CaptureMode[] = [
   'animation',
   'unprimed',
   'sustained',
+  'quiet',
 ]
 const modes = allModes.filter(
   (mode) =>

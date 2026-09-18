@@ -76,6 +76,7 @@
     "test:e2e:capture:animation": "tsx tests/scripts/run-e2e-capture-modes.ts animation",
     "test:e2e:capture:unprimed": "tsx tests/scripts/run-e2e-capture-modes.ts unprimed",
     "test:e2e:capture:sustained": "tsx tests/scripts/run-e2e-capture-modes.ts sustained",
+    "test:e2e:capture:quiet": "tsx tests/scripts/run-e2e-capture-modes.ts quiet",
     "test:e2e:advanced": "tsx tests/scripts/run-e2e-advanced-options.ts all",
     "test:e2e:advanced:windows": "tsx tests/scripts/run-e2e-advanced-options.ts windows",
     "test:e2e:advanced:retry": "tsx tests/scripts/run-e2e-advanced-options.ts retry",

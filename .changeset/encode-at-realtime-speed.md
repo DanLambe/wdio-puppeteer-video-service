@@ -9,6 +9,6 @@ The encoder fell further behind for the whole test, every recording stop timed
 out after five seconds, each test waited about 35 more seconds, and retained
 videos kept only the beginning of the test. Recordings now always use VP9's
 fastest realtime speed, which Puppeteer already used on hosts with 16 or more
-CPUs. Image quality is unchanged in measurement, and files can be up to about
-2.7 times larger. A recorder stop timeout is now logged as one line instead of
-a stack trace.
+CPUs. On a busy full-HD test page this encoded about 13 times faster with
+near-identical SSIM and a file about 2.7 times larger; other pages will differ.
+A recorder stop timeout is now logged as one line instead of a stack trace.

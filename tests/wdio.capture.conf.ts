@@ -15,7 +15,9 @@ const chromeArgs = [
   '--headless=new',
   '--disable-gpu',
   '--disable-dev-shm-usage',
-  mode === 'sustained' ? '--window-size=1920,1080' : '--window-size=1280,720',
+  mode === 'sustained' || mode === 'quiet'
+    ? '--window-size=1920,1080'
+    : '--window-size=1280,720',
   `--force-device-scale-factor=${mode === 'hidpi' ? '2' : '1'}`,
 ]
 
@@ -125,7 +127,7 @@ export const config: WebdriverIO.Config = {
   reporters: ['spec'],
   mochaOpts: {
     ui: 'bdd',
-    timeout: 30_000,
+    timeout: mode === 'quiet' ? 90_000 : 30_000,
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)
@@ -174,6 +176,15 @@ export const config: WebdriverIO.Config = {
     ) {
       throw new Error(
         `Expected ${mode} dimensions ${expected.width}x${expected.height}, received ${media.width}x${media.height}`,
+      )
+    }
+    // A full-HD page left static for 45 s at the default 30 FPS. Chrome sends no
+    // frames while nothing changes, so the recorder must feed the held frame to the
+    // encoder during the test; writing the whole tail at stop cannot be encoded
+    // within the stop deadline and cuts the video short.
+    if (mode === 'quiet' && media.durationSeconds < 42) {
+      throw new Error(
+        `Expected the quiet capture to keep its 45 s static tail; media plays ${media.durationSeconds.toFixed(2)}s`,
       )
     }
     if (mode === 'sustained' && media.durationSeconds < 13) {

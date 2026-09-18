@@ -88,6 +88,9 @@ jobs:
       - name: Verify Sustained Full-HD Recording
         run: corepack npm run test:e2e:capture:sustained
 
+      - name: Verify Quiet Full-HD Recording
+        run: corepack npm run test:e2e:capture:quiet
+
       - name: Collect Failure Diagnostics
         if: failure()
         uses: ./.github/actions/collect-browser-diagnostics

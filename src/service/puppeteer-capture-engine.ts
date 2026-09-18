@@ -250,11 +250,13 @@ export class PuppeteerCaptureEngine {
       // already accepted by the file without waiting for an impossible EOF.
       segment.writeStream.end()
     }
-    this.reportRecorderResult(recorder)
+    // A stop that missed its deadline was already reported and aborted; only
+    // a completed stop has an encoder result of its own to check.
+    const encoderOk = recorderStopped && this.checkEncoderResult(recorder)
 
     try {
       const streamFinished = await this.waitForWriteStream(segment)
-      const streamOk = recorderStopped && streamFinished
+      const streamOk = encoderOk && streamFinished
       if (!streamOk) {
         this.markSegmentAsUnclean(segment)
       }
@@ -441,23 +443,29 @@ export class PuppeteerCaptureEngine {
     }
   }
 
-  // An empty recording is otherwise indistinguishable from an encoder failure.
-  private reportRecorderResult(recorder: ScreencastRecorder): void {
+  // A file that finished writing is not a complete recording if the encoder
+  // failed: keep its bytes as an unclean segment instead of transcoding them.
+  private checkEncoderResult(recorder: ScreencastRecorder): boolean {
     if (recorder.frameCount === 0) {
       this.log(
         'warn',
         '[WdioPuppeteerVideoService] The screencast delivered no frames before recording stopped, so the recording is empty.',
       )
-      return
+      return false
     }
-    const { code, diagnostic } = recorder.ffmpegResult
-    if (code !== null && code !== 0) {
-      const details = diagnostic ? `: ${diagnostic}` : '.'
-      this.log(
-        'warn',
-        `[WdioPuppeteerVideoService] FFmpeg exited with code ${code.toString()} while recording${details}`,
-      )
+    const { code, diagnostic, signal } = recorder.ffmpegResult
+    if (code === 0 && signal === null) {
+      return true
     }
+    const exit = signal
+      ? `was terminated by ${signal}`
+      : `exited with code ${String(code)}`
+    const details = diagnostic ? `: ${diagnostic}` : '.'
+    this.log(
+      'warn',
+      `[WdioPuppeteerVideoService] FFmpeg ${exit} while recording${details}`,
+    )
+    return false
   }
 
   private async waitForWriteStream(segment: ActiveSegment): Promise<boolean> {
