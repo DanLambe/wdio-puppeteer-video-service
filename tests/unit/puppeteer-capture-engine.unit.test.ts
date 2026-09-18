@@ -991,3 +991,75 @@ describe('Puppeteer capture engine', () => {
     },
   )
 })
+
+describe('browser warm-up', () => {
+  it('waits for the session page to render before any test records', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const screenshot = vi.fn(async () => new Uint8Array())
+    Object.assign(harness.page, { screenshot })
+
+    await harness.engine.warmUp()
+
+    expect(harness.page.bringToFront).toHaveBeenCalledOnce()
+    expect(screenshot).toHaveBeenCalledOnce()
+    expect(harness.startScreencast).not.toHaveBeenCalled()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+    // The page marker is removed again, and the first recording reuses the
+    // connection.
+    expect(Reflect.has(globalThis, PAGE_MARKER_PROPERTY)).toBe(false)
+    await startCapture(harness, path.join(tempDir, 'capture.webm'))
+    expect(harness.connectPuppeteer).toHaveBeenCalledOnce()
+    harness.recorder.end()
+    await harness.engine.stopCapture()
+  })
+
+  it('warns when the browser draws nothing within its render budget', async () => {
+    const harness = createHarness({
+      clock: {
+        ...systemClock,
+        clearTimeout: () => {},
+        setTimeout: (callback) => {
+          queueMicrotask(callback)
+          return { unref: () => {} } as unknown as NodeJS.Timeout
+        },
+      },
+    })
+    Object.assign(harness.page, { screenshot: () => new Promise(() => {}) })
+
+    await harness.engine.warmUp()
+
+    expect(harness.logs).toContainEqual({
+      level: 'warn',
+      message:
+        '[WdioPuppeteerVideoService] The browser drew nothing within 20s of starting. Recordings stay empty until it does.',
+    })
+  })
+
+  it('leaves a page it cannot find for the first recording to report', async () => {
+    const harness = createHarness({ clock: createAdvancingClock() })
+    const screenshot = vi.fn(async () => new Uint8Array())
+    Object.assign(harness.page, { screenshot })
+    vi.mocked(harness.page.evaluate).mockResolvedValue('another-page')
+
+    await harness.engine.warmUp()
+
+    expect(screenshot).not.toHaveBeenCalled()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('leaves a connection failure for the first recording to report', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness({ connectError: new Error('refused') })
+
+    await harness.engine.warmUp()
+
+    expect(harness.failures).toEqual([])
+    expect(harness.page.bringToFront).not.toHaveBeenCalled()
+    await expect(
+      startCapture(harness, path.join(tempDir, 'capture.webm')),
+    ).resolves.toEqual({ started: false })
+    expect(harness.connectPuppeteer).toHaveBeenCalledTimes(2)
+    expect(harness.failures).toHaveLength(1)
+  })
+})

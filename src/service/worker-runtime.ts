@@ -307,6 +307,17 @@ export class WdioPuppeteerVideoWorkerRuntime
       )
       this._disableRecordingForWorker('output directory is unavailable')
     })
+    if (this._recordingDisabledReason !== undefined) {
+      return
+    }
+    // Wait here, outside every test's timeout, for a just-launched browser to
+    // render.
+    await this._captureEngine.warmUp().catch((error: unknown) => {
+      this._log(
+        'debug',
+        `[WdioPuppeteerVideoService] Browser warm-up skipped: ${normalization.describeError(error)}`,
+      )
+    })
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {

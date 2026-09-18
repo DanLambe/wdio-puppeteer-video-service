@@ -143,7 +143,7 @@ Top-level options:
 - `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters.
 - `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg.
 - `framePriming` (default `true`): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, priming retries within a 1.5-second budget. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
-- `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
+- `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection. The service connects when a Chromium session starts and waits there, once and outside every test's timeout, up to 20 seconds for a just-launched browser to draw its page, so the first test is recorded from its start. A connection that fails at that point is retried, and reported, at the first recording.
 
 `processing`:
 

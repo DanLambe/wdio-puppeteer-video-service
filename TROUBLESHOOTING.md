@@ -96,6 +96,17 @@ a positive duration and at least two frames. That is a test contract rather than
 proof that the file is corrupt — the recording really is that short. Keep the
 window under test open longer if a clip of usable length is expected.
 
+## The first recording on a fresh runner is late or empty
+
+A browser's first launch on a fresh machine can take seconds to draw anything:
+on hosted Windows runners the first frame took up to about 12 seconds. Nothing
+can be recorded before then. When a session starts, the service waits once,
+outside every test's timeout, up to 20 seconds for the browser to draw the page,
+so the first test is recorded from its start. If the service warns
+`The browser drew nothing within 20s of starting`, the browser is not drawing
+the tab, and recordings stay empty until it does; check that the browser runs
+headless or that its window is visible.
+
 ## A pending test appears as failed, or recording stops after closing a tab
 
 `1.0.0-rc.2` does not recognize Jasmine's runtime `pending()` hook result as

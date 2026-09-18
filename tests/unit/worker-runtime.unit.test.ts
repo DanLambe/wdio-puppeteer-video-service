@@ -325,6 +325,52 @@ describe('worker runtime hook sequencing', () => {
     expect(harness.release).toHaveBeenCalledOnce()
   })
 
+  it('waits for a just-launched browser to render before the first test', async () => {
+    const warmUp = vi
+      .spyOn(PuppeteerCaptureEngine.prototype, 'warmUp')
+      .mockResolvedValue(undefined)
+    const harness = createHarness()
+
+    await initializeWorker(harness.worker)
+
+    expect(warmUp).toHaveBeenCalledOnce()
+  })
+
+  it('starts the session when the browser warm-up fails', async () => {
+    vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp').mockRejectedValue(
+      new Error('execute failed'),
+    )
+    const harness = createHarness()
+
+    await expect(initializeWorker(harness.worker)).resolves.toBeUndefined()
+  })
+
+  it('does not warm up a browser that cannot record', async () => {
+    const warmUp = vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp')
+    const mkdir = vi.fn(async () => {
+      throw new Error('read-only file system')
+    })
+    const worker = new WdioPuppeteerVideoWorkerRuntime(
+      {},
+      undefined,
+      undefined,
+      { fileSystem: { ...nodeFileSystem, mkdir }, writeLog: vi.fn() },
+    )
+
+    await worker.before({}, [], {
+      sessionId: 'no-output',
+      capabilities: { browserName: 'chrome' },
+      isMultiremote: false,
+    } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
+    await worker.before({}, [], {
+      sessionId: 'firefox',
+      capabilities: { browserName: 'firefox' },
+      isMultiremote: false,
+    } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
+
+    expect(warmUp).not.toHaveBeenCalled()
+  })
+
   it('rejects multiremote capture without touching output files or capture commands', async () => {
     const mkdir = vi.fn(async () => {})
     const writeLog = vi.fn()

@@ -5,8 +5,10 @@ import {
   systemClock,
 } from '../../src/service/boundaries.js'
 import {
+  BROWSER_RENDER_TIMEOUT_MS,
   primeScreencastFrames,
   startScreencast,
+  waitForBrowserToRender,
 } from '../../src/service/capture.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import type {
@@ -467,5 +469,61 @@ describe('screencast frame recovery', () => {
 
     await expect(primeScreencastFrames(harness.page, clock)).resolves.toBe(true)
     expect(harness.warmups()).toBe(1)
+  })
+})
+
+describe('waiting for a just-launched browser to render', () => {
+  const createTimeoutClock = () => {
+    let expire: (() => void) | undefined
+    const timeouts: number[] = []
+    const clearTimeout = vi.fn()
+    const clock: ClockBoundary = {
+      ...systemClock,
+      clearTimeout,
+      setTimeout: (callback, milliseconds) => {
+        timeouts.push(milliseconds)
+        expire = callback
+        return { unref: () => {} } as unknown as NodeJS.Timeout
+      },
+    }
+    return { clearTimeout, clock, expire: () => expire?.(), timeouts }
+  }
+
+  it('resolves once a screenshot shows the browser has rendered', async () => {
+    const { clearTimeout, clock, timeouts } = createTimeoutClock()
+    const screenshot = vi.fn(async () => new Uint8Array())
+
+    await expect(
+      waitForBrowserToRender({ screenshot } as unknown as Page, clock),
+    ).resolves.toBe('rendered')
+    expect(screenshot).toHaveBeenCalledWith({
+      captureBeyondViewport: false,
+      quality: 1,
+      type: 'jpeg',
+    })
+    expect(timeouts).toEqual([20_000])
+    expect(clearTimeout).toHaveBeenCalledOnce()
+  })
+
+  it('does not wait out a screenshot that fails', async () => {
+    const { clock } = createTimeoutClock()
+    const screenshot = vi.fn(async () => {
+      throw new Error('Target closed')
+    })
+
+    await expect(
+      waitForBrowserToRender({ screenshot } as unknown as Page, clock),
+    ).resolves.toBe('failed')
+  })
+
+  it('stops waiting for a browser that draws nothing', async () => {
+    const { clock, expire } = createTimeoutClock()
+    const page = { screenshot: () => new Promise(() => {}) }
+
+    const waiting = waitForBrowserToRender(page as unknown as Page, clock)
+    expire()
+
+    await expect(waiting).resolves.toBe('timed-out')
+    expect(BROWSER_RENDER_TIMEOUT_MS).toBe(20_000)
   })
 })

@@ -14,6 +14,17 @@ const FRAME_PRIMING_PAINT_TIMEOUT_MS = 500
 const FRAME_PRIMING_RECOVERY_INTERVAL_MS = 100
 const FRAME_PRIMING_RECOVERY_TIMEOUT_MS = 1_500
 const FRAME_PRIMING_HOLD_MS = 50
+/**
+ * How long a new session waits for its browser to render before any test runs.
+ * A browser that has just launched can take seconds to composite anything: on
+ * fresh hosted Windows runners its first screencast frame took up to 9.4 s.
+ * Recording starts inside a test's timeout and waits about a second for its
+ * first frame, so a short first test could end before anything was rendered
+ * and record nothing.
+ */
+export const BROWSER_RENDER_TIMEOUT_MS = 20_000
+
+export type BrowserRenderResult = 'failed' | 'rendered' | 'timed-out'
 
 export interface ScreencastFrameSource {
   /** Timestamped screencast frames delivered since recording started. */
@@ -164,6 +175,36 @@ const waitForViewportPaint = async (
     ])
   } catch {
     /* best-effort priming if the page closes or navigates */
+  } finally {
+    clock.clearTimeout(timer)
+  }
+}
+
+/**
+ * Resolves once the browser has composited `page`: a screenshot waits for a
+ * rendered frame. A screenshot that fails is not a rendering delay, so it
+ * resolves `failed` at once.
+ */
+export const waitForBrowserToRender = async (
+  page: Page,
+  clock: ClockBoundary = systemClock,
+): Promise<BrowserRenderResult> => {
+  const { promise: expired, resolve } =
+    Promise.withResolvers<BrowserRenderResult>()
+  const timer = clock.setTimeout(() => {
+    resolve('timed-out')
+  }, BROWSER_RENDER_TIMEOUT_MS)
+  timer.unref?.()
+  try {
+    return await Promise.race([
+      expired,
+      page
+        .screenshot({ type: 'jpeg', quality: 1, captureBeyondViewport: false })
+        .then(
+          (): BrowserRenderResult => 'rendered',
+          (): BrowserRenderResult => 'failed',
+        ),
+    ])
   } finally {
     clock.clearTimeout(timer)
   }

@@ -4,8 +4,10 @@ import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
+  BROWSER_RENDER_TIMEOUT_MS,
   primeScreencastFrames,
   type StartScreencastOptions,
+  waitForBrowserToRender,
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
 import {
@@ -118,15 +120,7 @@ export class PuppeteerCaptureEngine {
       return undefined
     }
     const windowHandle = await browser.getWindowHandle().catch(() => undefined)
-    const markerId = this.nextPageMarkerId()
-
-    await this.markPageContext(browser, markerId)
-
-    const page = await findActivePage(puppeteerBrowser, markerId, {
-      clock: this.clock,
-    }).finally(async () => {
-      await this.removePageMarker(browser, markerId)
-    })
+    const page = await this.findSessionPage(browser, puppeteerBrowser)
     if (!page) {
       this.log(
         'warn',
@@ -137,6 +131,47 @@ export class PuppeteerCaptureEngine {
 
     await page.bringToFront().catch(() => undefined)
     return { page, windowHandle }
+  }
+
+  /**
+   * Waits, before any test runs, for a browser that has just launched to
+   * render, so its first recording does not start before anything is drawn.
+   * Best effort: a connection or page lookup failure is left for the first
+   * recording to report, as it would be without this wait.
+   */
+  async warmUp(): Promise<void> {
+    const browser = this.session.browser
+    if (!browser) {
+      return
+    }
+    const puppeteerBrowser = await this.getPuppeteerBrowser(browser, false)
+    if (!puppeteerBrowser) {
+      return
+    }
+    const page = await this.findSessionPage(browser, puppeteerBrowser)
+    if (!page) {
+      return
+    }
+    await page.bringToFront().catch(() => undefined)
+    if ((await waitForBrowserToRender(page, this.clock)) === 'timed-out') {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] The browser drew nothing within ${String(BROWSER_RENDER_TIMEOUT_MS / 1_000)}s of starting. Recordings stay empty until it does.`,
+      )
+    }
+  }
+
+  private async findSessionPage(
+    browser: Browser,
+    puppeteerBrowser: PuppeteerBrowser,
+  ): Promise<Page | undefined> {
+    const markerId = this.nextPageMarkerId()
+    await this.markPageContext(browser, markerId)
+    return findActivePage(puppeteerBrowser, markerId, {
+      clock: this.clock,
+    }).finally(async () => {
+      await this.removePageMarker(browser, markerId)
+    })
   }
 
   private async markPageContext(
@@ -310,6 +345,7 @@ export class PuppeteerCaptureEngine {
 
   private async getPuppeteerBrowser(
     browser: Browser,
+    reportFailure = true,
   ): Promise<PuppeteerBrowser | undefined> {
     const current = this.session.puppeteerBrowser
     if (current && current.connected !== false) {
@@ -330,9 +366,11 @@ export class PuppeteerCaptureEngine {
       return puppeteerBrowser
     } catch (error) {
       this.resetConnection()
-      this.onConnectionFailure(
-        describePuppeteerConnectionFailure(browser, error),
-      )
+      if (reportFailure) {
+        this.onConnectionFailure(
+          describePuppeteerConnectionFailure(browser, error),
+        )
+      }
       return undefined
     }
   }
