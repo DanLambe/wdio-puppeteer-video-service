@@ -52,6 +52,28 @@ describe('media probe', () => {
     })
   })
 
+  it('drops visually repeated frames when counting distinct frames', async () => {
+    const process = new FakeMediaProbeProcess()
+    const spawnProcess = vi.fn(
+      (_command: string, _args: string[]) => process as unknown as ChildProcess,
+    )
+    const result = probeMediaFile('ffmpeg', 'fixture.webm', {
+      distinctFrames: true,
+      spawnProcess,
+    })
+
+    process.stderr.write(validProbeOutput)
+    process.emit('close', 0)
+
+    await expect(result).resolves.toMatchObject({ frameCount: 38 })
+    const args = spawnProcess.mock.calls[0]?.[1] ?? []
+    expect(args.slice(args.indexOf('-vf'), args.indexOf('-vf') + 2)).toEqual([
+      '-vf',
+      'mpdecimate',
+    ])
+    expect(args.indexOf('-vf')).toBeLessThan(args.indexOf('null'))
+  })
+
   it('rejects corrupt media when FFmpeg cannot decode it', async () => {
     const process = new FakeMediaProbeProcess()
     const result = probeMediaFile('ffmpeg', 'corrupt.webm', {

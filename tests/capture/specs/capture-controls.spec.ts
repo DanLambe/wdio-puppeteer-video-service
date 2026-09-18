@@ -5,14 +5,13 @@ import { resolveServiceConfiguration } from '../../../src/service/options.js'
 const mode = process.env.WDIO_CAPTURE_MODE ?? 'bidi'
 
 /**
- * Pins the upstream crop-bound contract against the installed Puppeteer. The
- * service recognizes Puppeteer's crop errors by their message prefix, so a
- * reworded upstream error would silently drop the diagnostic while the unit
- * test — which uses a copy of that wording — kept passing. Puppeteer rejects an
- * out-of-bounds crop before it constructs a recorder, so this never disturbs
- * the capture already in progress.
+ * Pins the crop-bound contract in a real browser. The capture layer recognizes
+ * the recorder's crop errors by their message prefix, so a reworded error would
+ * silently drop the diagnostic. The recorder rejects an out-of-bounds crop
+ * before it starts FFmpeg or a screencast, so this never disturbs the capture
+ * already in progress.
  */
-const assertCropDiagnosticStillMatchesPuppeteer = async (): Promise<void> => {
+const assertCropDiagnosticIsRecognized = async (): Promise<void> => {
   const puppeteer = await browser.getPuppeteer()
   const [page] = await puppeteer.pages()
   if (!page) {
@@ -75,6 +74,43 @@ describe('Puppeteer capture protocol and media controls', () => {
       expect(viewport).not.toEqual({ width: 960, height: 600 })
     }
 
+    if (mode === 'animation') {
+      // A box that moves on every animation frame, so each captured frame differs.
+      await browser.execute(`
+        const box = document.createElement('div')
+        box.style.cssText = 'position:fixed;top:40px;left:0;width:120px;height:120px;background:#2563eb'
+        document.body.append(box)
+        const startedAt = performance.now()
+        const step = (now) => {
+          box.style.transform = 'translateX(' + (((now - startedAt) / 4) % 600) + 'px)'
+          requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      `)
+    }
+    if (mode === 'sustained') {
+      // A full-HD page whose table and moving box change continuously, like a
+      // busy application under test.
+      await browser.execute(`
+        const rows = Array.from({ length: 40 }, (_, i) => '<tr><td>Year ' + (i + 1) + '</td><td class="v">0</td><td>4.00%</td></tr>').join('')
+        const panel = document.createElement('div')
+        panel.innerHTML = '<table border="1" style="font:14px Arial;width:100%">' + rows + '</table>'
+        document.body.append(panel)
+        const box = document.createElement('div')
+        box.style.cssText = 'position:fixed;top:300px;left:0;width:160px;height:160px;background:#2563eb'
+        document.body.append(box)
+        setInterval(() => {
+          for (const cell of document.querySelectorAll('.v')) cell.textContent = (Math.random() * 100000).toFixed(2)
+        }, 500)
+        const step = (now) => {
+          box.style.transform = 'translateX(' + ((now / 3) % 1500) + 'px)'
+          requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      `)
+    }
+    const dwellMs =
+      { animation: 3000, quiet: 45_000, sustained: 15_000 }[mode] ?? 1500
     const recordingStartedAt = Number(await browser.execute(() => Date.now()))
     await browser.waitUntil(
       async () => {
@@ -84,15 +120,15 @@ describe('Puppeteer capture protocol and media controls', () => {
             recordingStartedAt,
           ),
         )
-        return elapsed >= 1500
+        return elapsed >= dwellMs
       },
       {
         interval: 100,
-        timeout: 3000,
-        timeoutMsg: 'static capture did not remain active for 1.5 seconds',
+        timeout: dwellMs + 5000,
+        timeoutMsg: `capture did not remain active for ${dwellMs.toString()} ms`,
       },
     )
 
-    await assertCropDiagnosticStillMatchesPuppeteer()
+    await assertCropDiagnosticIsRecognized()
   })
 })

@@ -1,9 +1,8 @@
-import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
-import type { Page, ScreenRecorder, Viewport } from 'puppeteer-core'
+import type { Page, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type ClockBoundary,
@@ -20,8 +19,16 @@ import {
   type CaptureWindowOperations,
   PuppeteerCaptureEngine,
 } from '../../src/service/puppeteer-capture-engine.js'
+import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 
 type FakeRecorder = PassThrough & {
+  abort: ReturnType<typeof vi.fn<() => Promise<void>>>
+  ffmpegResult: {
+    code: number | null
+    diagnostic: string
+    signal: NodeJS.Signals | null
+  }
+  frameCount: number
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
 
@@ -35,6 +42,11 @@ const createTempDir = async (): Promise<string> => {
 
 const createRecorder = (): FakeRecorder => {
   const recorder = new PassThrough() as FakeRecorder
+  recorder.abort = vi.fn(async () => {
+    recorder.destroy()
+  })
+  recorder.frameCount = 1
+  recorder.ffmpegResult = { code: 0, diagnostic: '', signal: null }
   recorder.stop = vi.fn(async () => {
     recorder.end()
   })
@@ -47,7 +59,6 @@ const createHarness = (
     connectError?: Error
     fileSystem?: FileSystemBoundary
     framePriming?: boolean
-    fps?: number
     recorder?: FakeRecorder
     sessionToken?: string
   } = {},
@@ -102,10 +113,7 @@ const createHarness = (
   const protocols: string[] = []
   let uuidIndex = 0
   const capture = resolveServiceConfiguration({
-    capture: {
-      framePriming: options.framePriming ?? false,
-      fps: options.fps ?? 30,
-    },
+    capture: { framePriming: options.framePriming ?? false },
   }).options.capture
   const startScreencast = vi.fn(
     async (_page: Page, _options: StartScreencastOptions) => recorder as never,
@@ -150,34 +158,29 @@ const createHarness = (
   }
 }
 
-const screencastFrame = { data: '', metadata: { timestamp: 1 }, sessionId: 1 }
-
-// Give the harness page the CDP session Puppeteer's recorder listens on. The
-// screencast delivers its initial frame on start; `onWarmup` decides which
-// priming warmups also produce one.
-const attachScreencastSession = (
+// Give the harness page what frame priming touches. The recorder has received
+// the screencast's initial frame when it starts; `onWarmup` decides which
+// priming warmups deliver another.
+const attachFramePage = (
   harness: ReturnType<typeof createHarness>,
-  onWarmup: (warmup: number, session: EventEmitter) => void,
-): { session: EventEmitter; warmups: () => number } => {
-  const session = new EventEmitter()
+  onWarmup: (warmup: number, recorder: FakeRecorder) => void,
+): { warmups: () => number } => {
   let warmups = 0
   Object.assign(harness.page, {
-    mainFrame: () => ({ client: session }),
     screenshot: async () => new Uint8Array(),
     setViewport: vi.fn(async (viewport: Viewport | null) => {
       if (viewport?.width === 801) {
         warmups += 1
-        onWarmup(warmups, session)
+        onWarmup(warmups, harness.recorder)
       }
     }),
   })
   harness.startScreencast.mockImplementation(async () => {
-    session.emit('Page.screencastFrame', screencastFrame)
+    harness.recorder.frameCount = 1
     return harness.recorder as never
   })
-  return { session, warmups: () => warmups }
+  return { warmups: () => warmups }
 }
-
 const createAdvancingClock = (): ClockBoundary => {
   let now = 0
   return {
@@ -407,14 +410,14 @@ describe('Puppeteer capture engine', () => {
     ).toBe(true)
   })
 
-  it('recovers a stalled screencast start and releases its frame listener', async () => {
+  it('recovers a stalled screencast start from the recorder frame count', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness({ framePriming: true })
-    const frames = attachScreencastSession(harness, (warmup, session) => {
+    const frames = attachFramePage(harness, (warmup, recorder) => {
       // A just-activated tab drops everything the first warmup produces.
       if (warmup === 2) {
-        session.emit('Page.screencastFrame', { metadata: { timestamp: 1.2 } })
+        recorder.frameCount += 1
       }
     })
 
@@ -425,47 +428,92 @@ describe('Puppeteer capture engine', () => {
     await harness.engine.stopCapture()
 
     expect(frames.warmups()).toBe(2)
-    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
     expect(
-      harness.logs.some(({ message }) =>
-        message.includes('enough frames for encoding'),
-      ),
+      harness.logs.some(({ message }) => message.includes('fewer than two')),
     ).toBe(false)
   })
 
-  it('uses the configured FPS when verifying recorder readiness', async () => {
-    const tempDir = await createTempDir()
-    const outputPath = path.join(tempDir, 'capture.webm')
-    const harness = createHarness({
-      framePriming: true,
-      fps: 1,
-      clock: createAdvancingClock(),
-    })
-    // The first warmup's 0.2 s gap is six frames at 30 FPS but none at 1 FPS,
-    // so only the configured rate makes recovery prime a second time.
-    const frames = attachScreencastSession(harness, (warmup, session) => {
-      session.emit('Page.screencastFrame', {
-        metadata: { timestamp: warmup === 1 ? 1.2 : 4.2 },
+  it.each([
+    [
+      'no frames',
+      { frameCount: 0, code: 0, diagnostic: '', signal: null },
+      'delivered no frames before recording stopped',
+    ],
+    [
+      'an FFmpeg failure',
+      {
+        frameCount: 12,
+        code: 1,
+        diagnostic: 'Invalid PNG signature',
+        signal: null,
+      },
+      'FFmpeg exited with code 1 while recording: Invalid PNG signature',
+    ],
+    [
+      'FFmpeg being killed',
+      {
+        frameCount: 12,
+        code: null,
+        diagnostic: '',
+        signal: 'SIGKILL' as const,
+      },
+      'FFmpeg was terminated by SIGKILL while recording.',
+    ],
+  ])(
+    'keeps a recording unclean and explains it when caused by %s',
+    async (_label, result, message) => {
+      const tempDir = await createTempDir()
+      const outputPath = path.join(tempDir, 'capture.webm')
+      const harness = createHarness()
+      await expect(startCapture(harness, outputPath)).resolves.toEqual({
+        started: true,
       })
-    })
-    await expect(startCapture(harness, outputPath)).resolves.toEqual({
-      started: true,
-    })
-    const { segment } = harness.session.detachCapture()
-    harness.recorder.end()
-    await segment?.writeStreamDone
-    expect(frames.warmups()).toBe(2)
-    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
-  })
+      const segment = harness.session.activeSegment
+      if (segment) {
+        // A clean segment would be transcoded; an unclean one keeps its bytes.
+        segment.transcode = true
+        segment.outputPath = path.join(tempDir, 'capture.mp4')
+      }
+      harness.recorder.frameCount = result.frameCount
+      harness.recorder.ffmpegResult = {
+        code: result.code,
+        diagnostic: result.diagnostic,
+        signal: result.signal,
+      }
 
-  it('reports a screencast that never delivers an encodable pair', async () => {
+      await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+        streamOk: false,
+        segment: { outputPath, transcode: false },
+      })
+      expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
+        { level: 'warn', message: expect.stringContaining(message) },
+      ])
+    },
+  )
+
+  it('stays quiet about a recorder that captured frames and exited cleanly', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startCapture(harness, path.join(tempDir, 'capture.webm'))
+
+    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
+      streamOk: true,
+    })
+
+    expect(
+      harness.logs.filter(({ message }) =>
+        /no frames|FFmpeg (exited|was terminated)/u.test(message),
+      ),
+    ).toEqual([])
+  })
+  it('reports a screencast that never delivers a second frame', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness({
       clock: createAdvancingClock(),
       framePriming: true,
     })
-    const frames = attachScreencastSession(harness, () => {})
+    attachFramePage(harness, () => {})
 
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
@@ -475,29 +523,11 @@ describe('Puppeteer capture engine', () => {
     harness.recorder.end()
     await segment?.writeStreamDone
 
-    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
     expect(harness.logs).toContainEqual({
       level: 'debug',
-      message: expect.stringContaining('enough frames for encoding'),
+      message: expect.stringContaining('fewer than two frames'),
     })
   })
-
-  it('releases its frame listener when screencast startup fails', async () => {
-    const tempDir = await createTempDir()
-    const outputPath = path.join(tempDir, 'capture.webm')
-    const harness = createHarness({ framePriming: true })
-    const frames = attachScreencastSession(harness, () => {})
-    harness.startScreencast.mockReset()
-    harness.startScreencast.mockRejectedValueOnce(
-      new Error('screencast unavailable'),
-    )
-
-    await expect(startCapture(harness, outputPath)).rejects.toThrow(
-      'screencast unavailable',
-    )
-    expect(frames.session.listenerCount('Page.screencastFrame')).toBe(0)
-  })
-
   it('cleans reserved output when screencast startup fails', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
@@ -617,9 +647,11 @@ describe('Puppeteer capture engine', () => {
     const recorder = {
       destroyed: false,
       destroy: vi.fn(),
+      ffmpegResult: { code: 0, diagnostic: '' },
+      frameCount: 1,
       off: vi.fn(),
       stop: vi.fn(async () => {}),
-    } as unknown as ScreenRecorder
+    } as unknown as ScreencastRecorder
     const segment = {
       onRecorderError: vi.fn(),
       onWriteStreamError: vi.fn(),
@@ -645,31 +677,38 @@ describe('Puppeteer capture engine', () => {
     })
   })
 
-  it('destroys a recorder when stop does not settle', async () => {
+  it('aborts a stalled recorder and preserves the flushed file as unclean', async () => {
     vi.useFakeTimers()
     const harness = createHarness()
     const stop = vi.fn(() => new Promise<void>(() => {}))
     const destroy = vi.fn()
+    const { promise: writeStreamDone, resolve: finishFile } =
+      Promise.withResolvers<void>()
     const recorder = {
+      abort: vi.fn(async () => {
+        recorder.destroy()
+      }),
       destroyed: false,
       destroy() {
         recorder.destroyed = true
         destroy()
       },
+      ffmpegResult: { code: null, diagnostic: '', signal: 'SIGKILL' },
+      frameCount: 1,
       off: vi.fn(),
       stop,
-    } as unknown as ScreenRecorder
+    } as unknown as ScreencastRecorder
     const segment = {
       onRecorderError: vi.fn(),
       onWriteStreamError: vi.fn(),
-      outputFormat: 'webm',
-      outputPath: 'capture.webm',
+      outputFormat: 'mp4',
+      outputPath: 'capture.mp4',
       recordingFormat: 'webm',
       recordingPath: 'capture.webm',
-      transcode: false,
+      transcode: true,
       transcodeOptions: { deleteOriginal: true },
-      writeStream: { off: vi.fn() },
-      writeStreamDone: Promise.resolve(),
+      writeStream: { destroyed: false, end: vi.fn(finishFile), off: vi.fn() },
+      writeStreamDone,
       writeStreamErrored: false,
     } as unknown as ActiveSegment
     harness.session.beginRecording('timeout')
@@ -681,9 +720,27 @@ describe('Puppeteer capture engine', () => {
 
     const stopTask = harness.engine.stopCapture()
     await vi.advanceTimersByTimeAsync(5_000)
-    await expect(stopTask).resolves.toMatchObject({ streamOk: true })
+    await expect(stopTask).resolves.toMatchObject({
+      streamOk: false,
+      segment: {
+        outputFormat: 'webm',
+        outputPath: 'capture.webm',
+        transcode: false,
+      },
+    })
     expect(stop).toHaveBeenCalledOnce()
     expect(destroy).toHaveBeenCalledOnce()
+    expect(recorder.abort).toHaveBeenCalledOnce()
+    expect(segment.writeStream.end).toHaveBeenCalledOnce()
+    // One readable line per timeout; the logger receives no Error to print a
+    // stack for. The abort's own SIGKILL is not reported as an encoder failure.
+    expect(harness.logs).toEqual([
+      {
+        level: 'warn',
+        message:
+          '[WdioPuppeteerVideoService] Error stopping recorder: Recorder stop timed out after 5000ms',
+      },
+    ])
   })
 
   it('destroys a write stream that exceeds the bounded completion timeout', async () => {
@@ -704,9 +761,11 @@ describe('Puppeteer capture engine', () => {
     const recorder = {
       destroyed: false,
       destroy: vi.fn(),
+      ffmpegResult: { code: 0, diagnostic: '' },
+      frameCount: 1,
       off: vi.fn(),
       stop: vi.fn(async () => {}),
-    } as unknown as ScreenRecorder
+    } as unknown as ScreencastRecorder
     const segment = {
       onRecorderError: vi.fn(),
       onWriteStreamError: vi.fn(),
@@ -931,4 +990,76 @@ describe('Puppeteer capture engine', () => {
       expect(harness.startScreencast).not.toHaveBeenCalled()
     },
   )
+})
+
+describe('browser warm-up', () => {
+  it('waits for the session page to render before any test records', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const screenshot = vi.fn(async () => new Uint8Array())
+    Object.assign(harness.page, { screenshot })
+
+    await harness.engine.warmUp()
+
+    expect(harness.page.bringToFront).toHaveBeenCalledOnce()
+    expect(screenshot).toHaveBeenCalledOnce()
+    expect(harness.startScreencast).not.toHaveBeenCalled()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+    // The page marker is removed again, and the first recording reuses the
+    // connection.
+    expect(Reflect.has(globalThis, PAGE_MARKER_PROPERTY)).toBe(false)
+    await startCapture(harness, path.join(tempDir, 'capture.webm'))
+    expect(harness.connectPuppeteer).toHaveBeenCalledOnce()
+    harness.recorder.end()
+    await harness.engine.stopCapture()
+  })
+
+  it('warns when the browser draws nothing within its render budget', async () => {
+    const harness = createHarness({
+      clock: {
+        ...systemClock,
+        clearTimeout: () => {},
+        setTimeout: (callback) => {
+          queueMicrotask(callback)
+          return { unref: () => {} } as unknown as NodeJS.Timeout
+        },
+      },
+    })
+    Object.assign(harness.page, { screenshot: () => new Promise(() => {}) })
+
+    await harness.engine.warmUp()
+
+    expect(harness.logs).toContainEqual({
+      level: 'warn',
+      message:
+        '[WdioPuppeteerVideoService] The browser drew nothing within 20s of starting. Recordings stay empty until it does.',
+    })
+  })
+
+  it('leaves a page it cannot find for the first recording to report', async () => {
+    const harness = createHarness({ clock: createAdvancingClock() })
+    const screenshot = vi.fn(async () => new Uint8Array())
+    Object.assign(harness.page, { screenshot })
+    vi.mocked(harness.page.evaluate).mockResolvedValue('another-page')
+
+    await harness.engine.warmUp()
+
+    expect(screenshot).not.toHaveBeenCalled()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('leaves a connection failure for the first recording to report', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness({ connectError: new Error('refused') })
+
+    await harness.engine.warmUp()
+
+    expect(harness.failures).toEqual([])
+    expect(harness.page.bringToFront).not.toHaveBeenCalled()
+    await expect(
+      startCapture(harness, path.join(tempDir, 'capture.webm')),
+    ).resolves.toEqual({ started: false })
+    expect(harness.connectPuppeteer).toHaveBeenCalledTimes(2)
+    expect(harness.failures).toHaveLength(1)
+  })
 })

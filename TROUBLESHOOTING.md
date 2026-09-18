@@ -15,10 +15,9 @@ unsupported Puppeteer 25 installation. Do not bypass the conflict with
 `--force`, `--legacy-peer-deps`, or an override. Keep WebdriverIO on a supported
 9.x release and use Puppeteer Core `>=24.11.2 <25`.
 
-The lower bound is not only a peer-resolution preference. Puppeteer Core
-24.0.0 does not expose or apply the `format`, `fps`, and `quality` screencast
-controls required by the service, so widening the range to all 24.x releases
-would silently ignore configured capture behavior.
+The lower bound is the oldest Puppeteer Core release the service is validated
+with: release validation installs `24.11.2` and records through it. Earlier 24.x
+releases are untested, so do not widen the range to them.
 
 ## WDIO launcher context is missing or malformed
 
@@ -97,6 +96,17 @@ a positive duration and at least two frames. That is a test contract rather than
 proof that the file is corrupt — the recording really is that short. Keep the
 window under test open longer if a clip of usable length is expected.
 
+## The first recording on a fresh runner is late or empty
+
+A browser's first launch on a fresh machine can take seconds to draw anything:
+on hosted Windows runners the first frame took up to about 12 seconds. Nothing
+can be recorded before then. When a session starts, the service waits once,
+outside every test's timeout, up to 20 seconds for the browser to draw the page,
+so the first test is recorded from its start. If the service warns
+`The browser drew nothing within 20s of starting`, the browser is not drawing
+the tab, and recordings stay empty until it does; check that the browser runs
+headless or that its window is visible.
+
 ## A pending test appears as failed, or recording stops after closing a tab
 
 `1.0.0-rc.2` does not recognize Jasmine's runtime `pending()` hook result as
@@ -117,6 +127,57 @@ tests, and inspect service warnings if expected window segments are missing.
 Set `processing.ffmpeg.path` or `FFMPEG_PATH`, or put `ffmpeg` on `PATH`.
 Development may install `ffmpeg-static`; it is deliberately not a production
 dependency. CI should not opt out of FFmpeg media assertions.
+
+## Recorder stop times out on a CI runner
+
+`Recorder stop timed out after 5000ms` means capture started, but the browser's
+stop command or the encoder's final flush did not finish within the shutdown
+deadline. It is not an npm installation error.
+
+In `1.0.0-rc.3` and earlier, one reproduced cause is an encoder slower than the
+capture. Puppeteer 24 chooses the VP9 encoding speed from the host's CPU count,
+so on a 4-CPU runner it encoded a full-HD test page at roughly 6-7 frames per
+second on one core. Below the capture rate, the encoder falls further behind
+for the whole test, and stop cannot drain that backlog in five seconds. Every
+test then waits about 35 more seconds, logs `Timed out waiting for recording
+stream to finish` and `Recording stream did not finish cleanly`, and keeps only
+the beginning of its video. Lowering `capture.fps` alone may not help. Until an RC with the
+replacement recorder is installed, reduce the encoded size with
+`capture.scale: 0.5` or a smaller browser window; in a 4-CPU reproduction of a
+four-worker, 1920x1080 suite, `scale: 0.5` removed every timeout.
+
+In `1.0.0-rc.3` and earlier, the timeout also destroys Puppeteer's recorder
+stream without terminating its private encoder process. A remaining process can
+keep the worker alive, and the destination file can incur another stream
+timeout. The replacement recorder always encodes at VP9's fastest realtime speed
+(the speed Puppeteer already used on hosts with 16 or more CPUs), which kept up
+with full-HD capture on 4-CPU runners in validation. It also encodes a static
+page's held frame while the test runs: Chrome sends no frames while nothing
+changes, and Puppeteer's recorder left that whole quiet period to be encoded
+at stop. If a stop still times out, the recorder terminates its owned encoder
+tree, closes the file, and preserves partial bytes as an unclean segment. An
+encoder that exits with an error or is killed is reported with its exit code or
+signal, and its file is likewise kept as an unclean segment rather than
+processed as a complete recording. Either way the manifest entry is `failed`
+with reason `capture-incomplete`, and `failurePolicy: 'error'` raises it.
+Partial files are not guaranteed to decode. The normal five-second
+graceful-stop deadline is unchanged.
+
+`processing.ffmpeg.timeoutMs` applies to post-processing, not this capture-stop
+deadline. `failurePolicy: 'warn'` cannot make an abandoned operating-system
+process disappear in older versions. If video is blocking an essential pipeline
+and the workaround above is not enough, temporarily remove the service from that
+job until a corrected RC is installed; do not hide the test step's failure with
+`continue-on-error`.
+
+For diagnosis, save the final step error/exit code, service warnings, sanitized
+configuration, runner CPU/RAM, and Node, Chrome, Puppeteer and FFmpeg versions.
+Compare one worker with the configured concurrency before attributing the stall
+to Linux itself. Keep artifact upload separate from the test command and give
+it an explicit status condition, such as `if: ${{ !cancelled() }}`, so a failed
+test does not skip the upload. Upload only intended logs/media, not the entire
+workspace or credential files. GitHub documents these
+[status-check conditions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions).
 
 ## Merge or transcode fails
 

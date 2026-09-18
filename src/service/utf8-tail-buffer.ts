@@ -14,6 +14,11 @@ export class Utf8TailBuffer {
     this.appendText(this.decoder.write(chunk))
   }
 
+  /** The text so far, without a character still split across chunks. */
+  peek(): string {
+    return this.parts.join('')
+  }
+
   finish(): string {
     this.appendText(this.decoder.end())
     return this.parts.join('')

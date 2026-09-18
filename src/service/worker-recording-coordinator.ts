@@ -44,6 +44,8 @@ export interface RecordingAllurePort {
 }
 
 export interface RecordingMediaFinalization {
+  /** Why a stopped segment is incomplete; its entry is recorded as failed. */
+  readonly captureFailure?: string
   readonly deferred: boolean
   readonly paths: readonly string[]
 }
@@ -339,10 +341,13 @@ export class WorkerRecordingCoordinator
       retryCount: this.activeRecordingRetryCount,
     })
     let allureError: Error | undefined
+    let captureFailure: string | undefined
     try {
       const finalized = await this.actions.finalizeMedia(passed, keepArtifacts)
+      captureFailure = finalized.captureFailure
       await this.manifest?.completeCurrent(
         createCompletedManifestOptions({
+          captureFailed: captureFailure !== undefined,
           deferred: finalized.deferred,
           keepArtifacts,
           result,
@@ -371,6 +376,11 @@ export class WorkerRecordingCoordinator
       this.activeRecordingRetryCount = 0
     }
 
+    // Already warned when the segment stopped; the partial file stays
+    // attached and in the manifest for diagnosis.
+    if (captureFailure && this.options.failurePolicy === 'error') {
+      throw new Error(`[WdioPuppeteerVideoService] ${captureFailure}`)
+    }
     if (allureError && this.options.failurePolicy === 'error') {
       throw allureError
     }

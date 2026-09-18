@@ -37,6 +37,9 @@ jobs:
       - name: Run Unit Tests
         run: corepack npm run test:coverage
 
+      - name: Verify Recorder Process Cleanup
+        run: corepack npm run test:integration:screencast
+
       - name: Run SonarQube PR Analysis
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
@@ -75,6 +78,18 @@ jobs:
 
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
+
+      - name: Verify Real-Time Animation Recording
+        run: corepack npm run test:e2e:capture:animation
+
+      - name: Verify Recording Without Frame Priming
+        run: corepack npm run test:e2e:capture:unprimed
+
+      - name: Verify Sustained Full-HD Recording
+        run: corepack npm run test:e2e:capture:sustained
+
+      - name: Verify Quiet Full-HD Recording
+        run: corepack npm run test:e2e:capture:quiet
 
       - name: Collect Failure Diagnostics
         if: failure()
@@ -117,6 +132,9 @@ jobs:
 
       - name: Verify Real Windows Process Tree Termination
         run: corepack npm run test:integration:windows-process
+
+      - name: Verify Recorder Process Cleanup
+        run: corepack npm run test:integration:screencast
 
       - name: Run Bounded Windows Advanced Tests
         run: corepack npm run test:e2e:advanced:windows

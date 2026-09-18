@@ -13,6 +13,8 @@ export interface MediaProbeResult {
 }
 
 export interface MediaProbeOptions {
+  /** Count only frames that differ visibly from the previous one. */
+  distinctFrames?: boolean
   timeoutMs?: number
   spawnProcess?: (command: string, args: string[]) => ChildProcess
 }
@@ -126,6 +128,7 @@ export const probeMediaFile = async (
     filePath,
     '-map',
     '0:v:0',
+    ...(options.distinctFrames ? ['-vf', 'mpdecimate'] : []),
     '-f',
     'null',
     '-',

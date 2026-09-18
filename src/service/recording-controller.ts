@@ -22,6 +22,7 @@ import type {
 import { RecordingLifecycle } from './recording-lifecycle.js'
 import type { RecordingMediaCoordinator } from './recording-media-coordinator.js'
 import type { RecordingSlotScheduler } from './recording-slots.js'
+import type { RecordingMediaFinalization } from './worker-recording-coordinator.js'
 
 type CaptureEnginePort = Pick<
   PuppeteerCaptureEngine,
@@ -58,6 +59,7 @@ export interface RecordingControllerOptions {
 export class RecordingController {
   private readonly captureEngine: CaptureEnginePort
   private readonly captureSession: CaptureSession
+  private captureFailure: string | undefined
   private readonly ffmpegRuntime: FfmpegRuntimePort
   private readonly getManifestRecorder: () => ManifestWorkerRecorder | undefined
   private readonly lifecycle = new RecordingLifecycle()
@@ -149,7 +151,7 @@ export class RecordingController {
   async finalizeMedia(
     passed: boolean,
     keepArtifacts: boolean,
-  ): Promise<{ deferred: boolean; paths: readonly string[] }> {
+  ): Promise<RecordingMediaFinalization> {
     if (!this.captureSession.currentTestSlug) {
       return { deferred: false, paths: [] }
     }
@@ -166,9 +168,14 @@ export class RecordingController {
         )
         if (!keepArtifacts) {
           await this.media.deleteRecordedSegments()
+        }
+        if (this.captureFailure) {
+          // A window change may have stopped the failed segment earlier. Keep
+          // retained bytes, but never merge or process them as healthy media.
+          this.media.dropTasksForPaths(this.captureSession.recordedPaths)
           return
         }
-        if (!this.options.processing.merge.enabled) {
+        if (!keepArtifacts || !this.options.processing.merge.enabled) {
           return
         }
         if (this.media.shouldDefer) {
@@ -180,6 +187,7 @@ export class RecordingController {
     })
 
     return {
+      ...(this.captureFailure ? { captureFailure: this.captureFailure } : {}),
       deferred: this.media.pendingTaskCount > deferredTaskCount,
       paths: this.captureSession.recordedPaths,
     }
@@ -213,10 +221,9 @@ export class RecordingController {
             return
           }
           if (!streamOk) {
-            this.log(
-              'warn',
-              `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`,
-            )
+            const message = `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`
+            this.captureFailure ??= message
+            this.log('warn', `[WdioPuppeteerVideoService] ${message}`)
           }
           await releaseRecordingSlot()
           await this.media.finalizeSegment(activeSegment, {
@@ -239,6 +246,7 @@ export class RecordingController {
 
   async reset(): Promise<void> {
     await this.lifecycle.reset(async () => {
+      this.captureFailure = undefined
       await this.captureEngine.resetRecording()
       await this.recordingSlotScheduler.release()
     })

@@ -191,12 +191,25 @@ export const shouldRetainRecording = (input: {
 }
 
 export const createCompletedManifestOptions = (input: {
+  readonly captureFailed?: boolean
   readonly deferred: boolean
   readonly keepArtifacts: boolean
   readonly result: CompleteManifestEntryOptions['result']
   readonly paths: readonly string[]
   readonly processing: ResolvedProcessingOptions
 }): CompleteManifestEntryOptions => {
+  if (input.captureFailed) {
+    // Any retained bytes are listed, but the capture is not a recording.
+    return {
+      decision: 'failed',
+      result: input.result,
+      paths: [...input.paths],
+      reason: 'capture-incomplete',
+      processingOutcome: 'failed',
+      processingOperation: 'capture',
+    }
+  }
+
   let decision: CompleteManifestEntryOptions['decision'] = 'discarded'
   if (input.keepArtifacts) {
     decision = input.paths.length > 0 ? 'recorded' : 'failed'
