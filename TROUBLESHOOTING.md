@@ -100,12 +100,15 @@ window under test open longer if a clip of usable length is expected.
 
 A browser's first launch on a fresh machine can take seconds to draw anything:
 on hosted Windows runners the first frame took up to about 12 seconds. Nothing
-can be recorded before then. When a session starts, the service waits once,
-outside every test's timeout, up to 20 seconds for the browser to draw the page,
-so the first test is recorded from its start. If the service warns
-`The browser drew nothing within 20s of starting`, the browser is not drawing
-the tab, and recordings stay empty until it does; check that the browser runs
-headless or that its window is visible.
+can be recorded before then. Before the first test in a worker, the service
+connects and locates its page, then allows up to 20 seconds for a paint request
+to confirm render readiness. This render budget is separate from connection
+and page lookup, and applies even with `capture.framePriming: false`. If the
+service warns `Timed out waiting 20s for browser render readiness`, readiness
+could not be confirmed; the first recordings may be empty. Check runner load
+and that the browser runs headless or its window is visible. Timed-out paint
+requests are detached from their dedicated CDP session; they do not keep
+Puppeteer's screenshot lock held and block later page or screenshot operations.
 
 ## A pending test appears as failed, or recording stops after closing a tab
 

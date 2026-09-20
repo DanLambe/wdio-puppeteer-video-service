@@ -1,4 +1,4 @@
-import type { Page, Viewport } from 'puppeteer-core'
+import type { CDPSession, Page, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type ClockBoundary,
@@ -19,6 +19,11 @@ import type {
 const createRecorder = (): ScreencastRecorder => {
   return { id: 'recorder' } as unknown as ScreencastRecorder
 }
+
+const createPaintSession = (send: () => Promise<unknown>) => ({
+  createCDPSession: async () =>
+    ({ send, detach: async () => {} }) as unknown as CDPSession,
+})
 
 describe('Puppeteer screencast capture controls', () => {
   afterEach(() => {
@@ -246,9 +251,9 @@ describe('Puppeteer screencast capture controls', () => {
       {
         viewport: () => ({ width: 800, height: 600 }),
         setViewport,
-        screenshot: async () => {
+        ...createPaintSession(async () => {
           throw new Error('document context destroyed')
-        },
+        }),
       } as unknown as Page,
       { ...systemClock, delay },
     )
@@ -264,16 +269,21 @@ describe('Puppeteer screencast capture controls', () => {
     const page = {
       viewport: () => ({ width: 800, height: 600 }),
       setViewport,
-      screenshot,
+      ...createPaintSession(screenshot),
     } as unknown as Page
     const priming = primeScreencastFrames(page)
     await vi.advanceTimersByTimeAsync(0)
     expect(setViewport).toHaveBeenCalledTimes(1)
-    expect(screenshot).toHaveBeenCalledExactlyOnceWith({
-      type: 'jpeg',
-      quality: 1,
-      captureBeyondViewport: false,
-    })
+    expect(screenshot).toHaveBeenCalledExactlyOnceWith(
+      'Page.captureScreenshot',
+      {
+        format: 'jpeg',
+        quality: 1,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      { timeout: 500 },
+    )
     resolve(new Uint8Array([1]))
     await vi.advanceTimersByTimeAsync(50)
     await priming
@@ -288,7 +298,7 @@ describe('Puppeteer screencast capture controls', () => {
     const page = {
       viewport: () => ({ width: 800, height: 600 }),
       setViewport,
-      screenshot: async () => promise,
+      ...createPaintSession(async () => promise),
     } as unknown as Page
     const priming = primeScreencastFrames(page)
     await vi.advanceTimersByTimeAsync(550)
@@ -306,9 +316,9 @@ describe('Puppeteer screencast capture controls', () => {
     const priming = primeScreencastFrames({
       viewport: () => ({ width: 800, height: 600 }),
       setViewport,
-      screenshot: async () => {
+      ...createPaintSession(async () => {
         throw new Error('target closed')
-      },
+      }),
     } as unknown as Page)
     await vi.advanceTimersByTimeAsync(50)
     await priming
@@ -323,7 +333,7 @@ describe('Puppeteer screencast capture controls', () => {
       {
         viewport: () => ({ width: 800, height: 600 }),
         setViewport,
-        screenshot: async () => new Uint8Array(),
+        ...createPaintSession(async () => new Uint8Array()),
       } as unknown as Page,
       {
         ...systemClock,
@@ -367,7 +377,7 @@ const createFramePage = (
   const frames = { frameCount: 1 }
   let warmups = 0
   const page = {
-    screenshot: async () => new Uint8Array(),
+    ...createPaintSession(async () => new Uint8Array()),
     setViewport: vi.fn(async (viewport: Viewport | null) => {
       if (viewport?.width === 801) {
         warmups += 1
@@ -494,13 +504,21 @@ describe('waiting for a just-launched browser to render', () => {
     const screenshot = vi.fn(async () => new Uint8Array())
 
     await expect(
-      waitForBrowserToRender({ screenshot } as unknown as Page, clock),
+      waitForBrowserToRender(
+        createPaintSession(screenshot) as unknown as Page,
+        clock,
+      ),
     ).resolves.toBe('rendered')
-    expect(screenshot).toHaveBeenCalledWith({
-      captureBeyondViewport: false,
-      quality: 1,
-      type: 'jpeg',
-    })
+    expect(screenshot).toHaveBeenCalledWith(
+      'Page.captureScreenshot',
+      {
+        format: 'jpeg',
+        quality: 1,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      { timeout: 20_000 },
+    )
     expect(timeouts).toEqual([20_000])
     expect(clearTimeout).toHaveBeenCalledOnce()
   })
@@ -512,13 +530,16 @@ describe('waiting for a just-launched browser to render', () => {
     })
 
     await expect(
-      waitForBrowserToRender({ screenshot } as unknown as Page, clock),
+      waitForBrowserToRender(
+        createPaintSession(screenshot) as unknown as Page,
+        clock,
+      ),
     ).resolves.toBe('failed')
   })
 
   it('stops waiting for a browser that draws nothing', async () => {
     const { clock, expire } = createTimeoutClock()
-    const page = { screenshot: () => new Promise(() => {}) }
+    const page = createPaintSession(() => new Promise(() => {}))
 
     const waiting = waitForBrowserToRender(page as unknown as Page, clock)
     expire()

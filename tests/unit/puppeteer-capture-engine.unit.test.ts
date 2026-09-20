@@ -997,7 +997,12 @@ describe('browser warm-up', () => {
     const tempDir = await createTempDir()
     const harness = createHarness()
     const screenshot = vi.fn(async () => new Uint8Array())
-    Object.assign(harness.page, { screenshot })
+    Object.assign(harness.page, {
+      createCDPSession: async () => ({
+        send: screenshot,
+        detach: async () => {},
+      }),
+    })
 
     await harness.engine.warmUp()
 
@@ -1025,21 +1030,49 @@ describe('browser warm-up', () => {
         },
       },
     })
-    Object.assign(harness.page, { screenshot: () => new Promise(() => {}) })
+    Object.assign(harness.page, {
+      createCDPSession: async () => ({
+        send: () => new Promise(() => {}),
+        detach: async () => {},
+      }),
+    })
 
     await harness.engine.warmUp()
 
     expect(harness.logs).toContainEqual({
       level: 'warn',
       message:
-        '[WdioPuppeteerVideoService] The browser drew nothing within 20s of starting. Recordings stay empty until it does.',
+        '[WdioPuppeteerVideoService] Timed out waiting 20s for browser render readiness. First recordings may be empty.',
     })
+  })
+
+  it('records a paint request that fails without warning about it', async () => {
+    const harness = createHarness()
+    Object.assign(harness.page, {
+      createCDPSession: async () => {
+        throw new Error('Session closed')
+      },
+    })
+
+    await harness.engine.warmUp()
+
+    expect(harness.logs).toContainEqual({
+      level: 'debug',
+      message:
+        '[WdioPuppeteerVideoService] Browser render readiness could not be confirmed: the paint request failed.',
+    })
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
   })
 
   it('leaves a page it cannot find for the first recording to report', async () => {
     const harness = createHarness({ clock: createAdvancingClock() })
     const screenshot = vi.fn(async () => new Uint8Array())
-    Object.assign(harness.page, { screenshot })
+    Object.assign(harness.page, {
+      createCDPSession: async () => ({
+        send: screenshot,
+        detach: async () => {},
+      }),
+    })
     vi.mocked(harness.page.evaluate).mockResolvedValue('another-page')
 
     await harness.engine.warmUp()

@@ -153,10 +153,18 @@ export class PuppeteerCaptureEngine {
       return
     }
     await page.bringToFront().catch(() => undefined)
-    if ((await waitForBrowserToRender(page, this.clock)) === 'timed-out') {
+    const rendered = await waitForBrowserToRender(page, this.clock)
+    if (rendered === 'timed-out') {
       this.log(
         'warn',
-        `[WdioPuppeteerVideoService] The browser drew nothing within ${String(BROWSER_RENDER_TIMEOUT_MS / 1_000)}s of starting. Recordings stay empty until it does.`,
+        `[WdioPuppeteerVideoService] Timed out waiting ${String(BROWSER_RENDER_TIMEOUT_MS / 1_000)}s for browser render readiness. First recordings may be empty.`,
+      )
+    } else if (rendered === 'failed') {
+      // A page that closed or a protocol error is not a rendering delay, and
+      // the first recording reports it. Leave a trace of the unconfirmed paint.
+      this.log(
+        'debug',
+        '[WdioPuppeteerVideoService] Browser render readiness could not be confirmed: the paint request failed.',
       )
     }
   }

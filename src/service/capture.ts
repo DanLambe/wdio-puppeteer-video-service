@@ -1,4 +1,4 @@
-import type { Page, Viewport } from 'puppeteer-core'
+import type { CDPSession, Page, Viewport } from 'puppeteer-core'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import {
@@ -146,7 +146,7 @@ const warmViewport = async (
     // A timer or animation callback alone does not ensure a compositor frame.
     // Request a paint before restoring the viewport; a static tab may otherwise
     // emit just its initial frame.
-    await waitForViewportPaint(page, clock)
+    await waitForPagePaint(page, clock, FRAME_PRIMING_PAINT_TIMEOUT_MS)
     await clock.delay(FRAME_PRIMING_HOLD_MS)
   } finally {
     await page.setViewport(currentViewport).catch(() => {
@@ -155,58 +155,72 @@ const warmViewport = async (
   }
 }
 
-const waitForViewportPaint = async (
-  page: Page,
-  clock: ClockBoundary,
-): Promise<void> => {
-  const { promise: expired, resolve } = Promise.withResolvers<void>()
-  const timer = clock.setTimeout(resolve, FRAME_PRIMING_PAINT_TIMEOUT_MS)
-  timer.unref?.()
-  try {
-    await Promise.race([
-      expired,
-      // Discard this low-quality snapshot. Do not clip it: Chromium can expose
-      // the clip's temporary viewport to the simultaneously running screencast.
-      page.screenshot({
-        type: 'jpeg',
-        quality: 1,
-        captureBeyondViewport: false,
-      }),
-    ])
-  } catch {
-    /* best-effort priming if the page closes or navigates */
-  } finally {
-    clock.clearTimeout(timer)
-  }
-}
-
 /**
- * Resolves once the browser has composited `page`: a screenshot waits for a
- * rendered frame. A screenshot that fails is not a rendering delay, so it
- * resolves `failed` at once.
+ * Resolves once the browser has composited `page`: a paint request completes
+ * only after a rendered frame. A request that fails is not a rendering delay,
+ * so it resolves `failed` at once.
  */
 export const waitForBrowserToRender = async (
   page: Page,
   clock: ClockBoundary = systemClock,
 ): Promise<BrowserRenderResult> => {
+  return waitForPagePaint(page, clock, BROWSER_RENDER_TIMEOUT_MS)
+}
+
+const waitForPagePaint = async (
+  page: Page,
+  clock: ClockBoundary,
+  timeoutMs: number,
+): Promise<BrowserRenderResult> => {
+  let completed = false
+  let session: CDPSession | undefined
+  const detach = (): void => {
+    const owned = session
+    session = undefined
+    // Do not let an unresponsive target's detach extend the render budget.
+    void owned?.detach().catch(() => undefined)
+  }
+  const paint = async (): Promise<BrowserRenderResult> => {
+    try {
+      session = await page.createCDPSession()
+      if (completed) {
+        return 'timed-out'
+      }
+      // page.screenshot holds Puppeteer's browser/context screenshot locks.
+      // Racing it with a timer leaves newPage/close/screenshots blocked after
+      // timeout. Use a disposable session, never the shared page session.
+      // No clip: it can expose a temporary viewport to an active screencast.
+      await session.send(
+        'Page.captureScreenshot',
+        {
+          format: 'jpeg',
+          quality: 1,
+          fromSurface: true,
+          captureBeyondViewport: false,
+        },
+        { timeout: timeoutMs },
+      )
+      return 'rendered'
+    } catch {
+      return 'failed'
+    } finally {
+      // Also releases a session whose creation completed after our deadline.
+      detach()
+    }
+  }
   const { promise: expired, resolve } =
     Promise.withResolvers<BrowserRenderResult>()
   const timer = clock.setTimeout(() => {
+    completed = true
     resolve('timed-out')
-  }, BROWSER_RENDER_TIMEOUT_MS)
+  }, timeoutMs)
   timer.unref?.()
   try {
-    return await Promise.race([
-      expired,
-      page
-        .screenshot({ type: 'jpeg', quality: 1, captureBeyondViewport: false })
-        .then(
-          (): BrowserRenderResult => 'rendered',
-          (): BrowserRenderResult => 'failed',
-        ),
-    ])
+    return await Promise.race([expired, paint()])
   } finally {
+    completed = true
     clock.clearTimeout(timer)
+    detach()
   }
 }
 
