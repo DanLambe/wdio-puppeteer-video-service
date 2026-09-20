@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.0.0-rc.4
+
+### Patch Changes
+
+- cdde62d: Cancel stalled recording shutdown without leaving the encoder running. After
+  the existing five-second graceful-stop deadline, terminate the recording's
+  owned FFmpeg process tree and settle pending recorder work. Close the output
+  file while preserving bytes already written, and mark the segment unclean so
+  it is not transcoded as a completed capture. This avoids a redundant stream
+  completion timeout and prevents an abandoned encoder from keeping a worker
+  alive. Normal recording shutdown and the public configuration are unchanged.
+- cdde62d: Keep video encoding faster than the capture on small CI runners. Puppeteer 24
+  chose FFmpeg's VP9 encoding speed from the host's CPU count, so a 4-CPU runner
+  encoded full-HD video at about 6-7 frames per second: slower than the capture.
+  The encoder fell further behind for the whole test, every recording stop timed
+  out after five seconds, each test waited about 35 more seconds, and retained
+  videos kept only the beginning of the test. Recordings now always use VP9's
+  fastest realtime speed, which Puppeteer already used on hosts with 16 or more
+  CPUs. On a busy full-HD test page this encoded about 13 times faster with
+  near-identical SSIM and a file about 2.7 times larger; other pages will differ.
+  A recorder stop timeout is now logged as one line instead of a stack trace.
+- cdde62d: Encode a static page's video while the test runs instead of at stop. Chrome
+  sends no screencast frames while nothing on the page changes, so the recorder
+  only wrote the held frame's repetitions when the next frame arrived or the
+  recording stopped. A test that left a full-HD page unchanged for a minute at
+  30 FPS therefore had about 1,800 frames to encode inside the five-second stop
+  deadline; the stop timed out and the video kept about 34 of its 60 seconds. The
+  held frame is now fed to the encoder every 250 ms, half a second behind real
+  time so a late frame still starts at its own timestamp, and not while the
+  encoder is backed up. The same test now stops in about 0.3 seconds with all 60
+  seconds.
+
+  A recording whose encoder exits with an error or is killed by a signal is no
+  longer treated as complete: the service reports the exit code or signal with
+  the end of FFmpeg's error output, keeps the file's bytes as an unclean segment,
+  and does not transcode it. Error output split across a multibyte character is
+  now decoded correctly.
+
+- cdde62d: Keep a recording as long as its capture when Chrome delivers screencast frames
+  late. The final frame was held only until its own timestamp plus the time since
+  it arrived, so a frame delivered a second late ended the video a second early.
+  At stop, the final frame is now also held until the time elapsed since the
+  first frame arrived. Frames are still placed at their own timestamps while
+  recording, so late frames on a busy page are not dropped.
+- cdde62d: Record videos that play back in real time at the configured `capture.fps`.
+  Puppeteer 24's screen recorder, which the service used until now, encoded every
+  video at 25 fps whatever `capture.fps` was: at the default 30 FPS playback ran
+  about 20% slow, and at 10 FPS it ran about 2.5 times too fast. It also rounded
+  each gap between captured frames on its own, so a page that repaints faster
+  than `capture.fps` lost most of its frames: at the `ci` and `parallel` profiles'
+  24 FPS a continuously animated page could be recorded as a single frozen frame.
+  Its FFmpeg input settings also discarded the first two frames of every
+  recording, and it dropped the last frame received before stopping.
+
+  The service now records the screencast itself. Frames are placed on a
+  constant-frame-rate timeline, FFmpeg receives the frame rate as an input option
+  and keeps every frame, and the final page state is held until the recording
+  stops. Crop, scale, speed, quality, output formats and the public configuration
+  are unchanged, and Puppeteer Core remains the CDP connection. Frame priming now
+  retries only when the screencast has delivered just its first frame.
+
+- cdde62d: Record an incomplete capture (an encoder error, a killed encoder or a stop
+  timeout) in the manifest as `failed` with reason `capture-incomplete` instead
+  of as a successful recording. Retained partial media is still listed and
+  attached to Allure for diagnosis, but is not merged or queued for other
+  processing; media the retention policy discards is deleted as before. The
+  default `failurePolicy: 'warn'` keeps the single warning logged when the
+  segment stops and does not fail the test; `failurePolicy: 'error'` raises the
+  failure after manifest finalization and recording cleanup. The failure is
+  remembered across window segments of the same test and cleared before the next
+  recording.
+- cdde62d: Wait for a just-launched browser to draw before its first test is recorded. On
+  a fresh machine a browser's first launch can take seconds to draw anything: on
+  hosted Windows runners the first frame took up to about 12 seconds. Recording
+  waits only about a second for a first frame, so a short first test could end
+  before anything was drawn and leave an empty recording. When a Chromium session
+  starts, after connecting and locating its page, the service now waits once,
+  before the first test, up to 20 seconds for a paint request to confirm render
+  readiness, and warns if it times out. Both warm-up and frame-priming paint
+  requests use disposable CDP sessions so timeouts do not leave Puppeteer's
+  shared screenshot lock blocking later test operations. Puppeteer's
+  recorder in earlier releases instead waited without limit for the first frame
+  inside the first test, where the delay counted toward that test's timeout.
+
 ## 1.0.0-rc.3
 
 ### Patch Changes
