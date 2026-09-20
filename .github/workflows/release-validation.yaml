@@ -15,6 +15,11 @@ permissions:
 # `@wdio/globals` back in and conflicts with the minimum `expect-webdriverio`.
 # The whole supported floor is therefore declared once and used by every job
 # that installs it, so the lists cannot drift apart again.
+#
+# Lock-free installs follow the repository's min-release-age policy: "latest"
+# means the newest release at least two days old, so a same-day upstream
+# publish cannot change results between jobs or reruns. Each job checks the
+# resolved tree against allowScripts before rebuilding anything.
 env:
   MINIMUM_SUPPORTED_PEERS: >-
     webdriverio@9.29.1 puppeteer-core@24.11.2
@@ -59,12 +64,12 @@ jobs:
         if: matrix.dependencies == 'minimum'
         run: >-
           corepack npm install --no-save --ignore-scripts --no-package-lock
-          --min-release-age=0 ${{ env.MINIMUM_SUPPORTED_PEERS }}
+          ${{ env.MINIMUM_SUPPORTED_PEERS }}
 
       - name: Install Latest Supported Peers
         if: matrix.dependencies == 'latest'
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          corepack npm install --no-save --ignore-scripts
           webdriverio@9 puppeteer-core@24
           @wdio/allure-reporter@9 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
@@ -93,6 +98,9 @@ jobs:
             case "${wdio}" in 9.*) ;; *) echo 'expected webdriverio 9.x'; exit 1;; esac
             case "${puppeteer}" in 24.*) ;; *) echo 'expected puppeteer-core 24.x'; exit 1;; esac
           fi
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
 
       - name: Rebuild Required Binary Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -139,10 +147,13 @@ jobs:
 
       - name: Install Latest Supported Browser Stack
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          corepack npm install --no-save --ignore-scripts
           webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
           @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -200,7 +211,10 @@ jobs:
       - name: Install Minimum Supported Stack
         run: >-
           corepack npm install --no-save --ignore-scripts --no-package-lock
-          --min-release-age=0 ${{ env.MINIMUM_SUPPORTED_PEERS }}
+          ${{ env.MINIMUM_SUPPORTED_PEERS }}
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -250,12 +264,15 @@ jobs:
 
       - name: Install Latest Supported Framework Stack
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          corepack npm install --no-save --ignore-scripts
           webdriverio@9 puppeteer-core@24 @wdio/cli@9
           @wdio/cucumber-framework@9 @wdio/globals@9
           @wdio/jasmine-framework@9 @wdio/local-runner@9
           @wdio/mocha-framework@9 @wdio/reporter@9
           @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
 
       - name: Rebuild Browser Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
@@ -329,10 +346,13 @@ jobs:
 
       - name: Install Latest Supported Edge Stack
         run: >-
-          corepack npm install --no-save --ignore-scripts --min-release-age=0
+          corepack npm install --no-save --ignore-scripts
           webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
           @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
           @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+
+      - name: Check Install Script Approvals
+        run: corepack npm run check:install-scripts
 
       - name: Rebuild Edge Test Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static

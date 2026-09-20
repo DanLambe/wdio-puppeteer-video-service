@@ -109,6 +109,7 @@
     "audit:signatures": "corepack npm audit signatures",
     "audit:fix": "corepack npm audit fix --package-lock-only --ignore-scripts",
     "audit:fix:latest": "corepack npm audit fix --package-lock-only --ignore-scripts --min-release-age=0",
+    "check:install-scripts": "tsx scripts/check-install-scripts.ts",
     "lint": "biome check",
     "format": "biome format --write"
   },
