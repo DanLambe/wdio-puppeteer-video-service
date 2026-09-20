@@ -137,13 +137,13 @@ Top-level options:
 
 `capture`:
 
-- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while Puppeteer establishes the recorder canvas, then the original viewport mode is restored immediately after `page.screencast()` starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
-- `fps` (default `30`; `24` for the `parallel` and `ci` profiles).
+- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while the recorder establishes its canvas, then the original viewport mode is restored immediately after the screencast starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
+- `fps` (default `30`; `24` for the `parallel` and `ci` profiles): the encoded frame rate. Captured frames are placed on this frame-rate timeline, so recordings play back in real time (before `speed`) whether the page repaints faster or slower than `fps`.
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
-- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers passed directly to Puppeteer.
-- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or Puppeteer rejects the recording. Puppeteer crops before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by Puppeteer and FFmpeg.
-- `framePriming` (default `true`): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. When Puppeteer's recorder session is observable, priming verifies enough timestamp-separated input frames for encoding and retries only if needed. Recovery scheduling has a 1.5-second budget at normal frame rates; very low FPS extends it to allow three frame intervals plus 550 ms (3.55 seconds at 1 FPS). An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes, and falls back to one warmup if the recorder session cannot be observed.
-- `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection.
+- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters.
+- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg.
+- `framePriming` (default `true`): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, priming retries within a 1.5-second budget. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
+- `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection. Before the first test, the service connects when a Chromium worker session starts and finds its page, then allows up to 20 seconds for a disposable paint request to confirm that the browser is ready to render. This separate render budget does not include connection or page lookup. Warm-up is best-effort, runs even with `framePriming: false`, and also runs for workers whose tests are filtered out or record only retries. Paint requests use a dedicated CDP session that is detached on completion or timeout, without taking Puppeteer's shared screenshot lock. A connection that fails at warm-up is retried, and reported, at the first recording.
 
 `processing`:
 
@@ -324,6 +324,15 @@ without mixing worker journals. Existing valid run records are retained whenever
 the manifest is aggregated; the service does not prune old runs, so archive or
 remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
+An incomplete capture (for example, an encoder error or a stop timeout) is
+recorded in the manifest as `failed` with reason `capture-incomplete`, even if
+it produced a nonempty file. Retained partial media is still listed, and
+attached to Allure when configured, for diagnosis, but it is not merged or
+otherwise processed; unretained media is discarded normally. The default
+`failurePolicy: 'warn'` logs one warning when the segment stops and does not
+fail the test. With `'error'`, the failure is raised after manifest
+finalization and recording cleanup.
+
 Optional artifact `width` and `height` describe the encoded retained file, not
 an estimate of the page's CSS viewport. A lightweight FFmpeg inspection reads
 each finalized artifact without decoding the full video; this accounts for
@@ -423,8 +432,8 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 
 WDIO v9 attempts WebDriver BiDi for supported browsers by default. This service
 classifies a successful recording session as `bidi+cdp` or `classic+cdp`:
-WDIO may issue automation commands through BiDi, while Puppeteer still attaches
-to Chrome or Edge through CDP for `page.screencast()`.
+WDIO may issue automation commands through BiDi, while the service still attaches
+to Chrome or Edge through Puppeteer's CDP connection to record the screencast.
 
 Set `'wdio:enforceWebDriverClassic': true` in the browser capability when a
 classic-only validation run is required. Both modes use the same CDP capture

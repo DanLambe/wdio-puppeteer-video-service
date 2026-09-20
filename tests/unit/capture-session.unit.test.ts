@@ -1,10 +1,8 @@
-import type {
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Browser as PuppeteerBrowser } from 'puppeteer-core'
 import { describe, expect, it } from 'vitest'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type { ActiveSegment } from '../../src/service/constants.js'
+import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
 
 const createSegment = (recordingPath = 'capture.webm') =>
   ({ recordingPath }) as ActiveSegment
@@ -30,7 +28,7 @@ describe('capture session', () => {
 
   it('enforces one attached capture for an initialized recording', () => {
     const session = new CaptureSession()
-    const recorder = { id: 'recorder' } as unknown as ScreenRecorder
+    const recorder = { id: 'recorder' } as unknown as ScreencastRecorder
     const segment = createSegment()
 
     expect(() =>
@@ -89,7 +87,7 @@ describe('capture session', () => {
 
   it('resets all recording invariants and returns any detached capture', () => {
     const session = new CaptureSession()
-    const recorder = {} as ScreenRecorder
+    const recorder = {} as ScreencastRecorder
     const segment = createSegment()
     session.beginRecording('checkout')
     session.attachCapture({

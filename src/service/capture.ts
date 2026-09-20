@@ -1,33 +1,40 @@
-import type {
-  Page,
-  ScreencastOptions,
-  ScreenRecorder,
-  Viewport,
-} from 'puppeteer-core'
+import type { CDPSession, Page, Viewport } from 'puppeteer-core'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
+import {
+  recordScreencast,
+  type ScreencastRecorder,
+  type ScreencastRecorderOptions,
+} from './screencast-recorder.js'
 
 const FRAME_PRIMING_PAINT_TIMEOUT_MS = 500
 // A screencast started just after its tab's activation changes can drop the
 // frames priming produces, and a static page then never emits another. Retry
-// priming on this cadence, within this budget, until an encodable pair arrives.
+// priming on this cadence, within this budget, until a second frame arrives.
 const FRAME_PRIMING_RECOVERY_INTERVAL_MS = 100
 const FRAME_PRIMING_RECOVERY_TIMEOUT_MS = 1_500
 const FRAME_PRIMING_HOLD_MS = 50
-// Puppeteer's FFmpeg probing can consume two input frames. Confirm three here;
-// ScreenRecorder.stop() supplies at least one more, leaving decodable output.
-const MINIMUM_ENCODER_FRAMES = 3
+/**
+ * How long a new session waits for its browser to render before any test runs.
+ * A browser that has just launched can take seconds to composite anything: on
+ * fresh hosted Windows runners its first screencast frame took up to 9.4 s.
+ * Recording starts inside a test's timeout and waits about a second for its
+ * first frame, so a short first test could end before anything was rendered
+ * and record nothing.
+ */
+export const BROWSER_RENDER_TIMEOUT_MS = 20_000
 
-export interface ScreencastFrameObserver {
-  readonly hasEncodableFrames: boolean
-  readonly recoveryIntervalMs: number
-  dispose(): void
+export type BrowserRenderResult = 'failed' | 'rendered' | 'timed-out'
+
+export interface ScreencastFrameSource {
+  /** Timestamped screencast frames delivered since recording started. */
+  readonly frameCount: number
 }
 
-interface ScreencastEventSource {
-  on(event: string, listener: (event: unknown) => void): unknown
-  off(event: string, listener: (event: unknown) => void): unknown
-}
+export type ScreencastRecordFunction = (
+  page: Page,
+  options: ScreencastRecorderOptions,
+) => Promise<ScreencastRecorder>
 
 export interface StartScreencastOptions {
   capture: ResolvedCaptureOptions
@@ -39,14 +46,15 @@ export interface StartScreencastOptions {
 export const startScreencast = async (
   page: Page,
   options: StartScreencastOptions,
-): Promise<ScreenRecorder> => {
+  record: ScreencastRecordFunction = recordScreencast,
+): Promise<ScreencastRecorder> => {
   const originalViewport = page.viewport()
   if (options.capture.viewport !== 'current') {
     await page.setViewport(options.capture.viewport)
   }
 
   try {
-    return await page.screencast(createScreencastOptions(options))
+    return await record(page, createScreencastOptions(options))
   } catch (error) {
     if (
       options.capture.crop &&
@@ -70,7 +78,7 @@ export const startScreencast = async (
 
 export const createScreencastOptions = (
   options: Pick<StartScreencastOptions, 'capture' | 'ffmpegPath' | 'format'>,
-): ScreencastOptions => {
+): ScreencastRecorderOptions => {
   const { capture } = options
   return {
     format: options.format,
@@ -84,66 +92,16 @@ export const createScreencastOptions = (
 }
 
 /**
- * Observe whether Puppeteer's recorder has enough input frames to encode. Listen on
- * the main frame's CDP session, the channel `ScreenRecorder` itself uses. That
- * session is not public API, so when it is unreachable frame verification is
- * skipped rather than failing capture.
- */
-export const observeScreencastFrames = (
-  page: Page,
-  fps: number,
-): ScreencastFrameObserver | undefined => {
-  let source: unknown
-  try {
-    source = Reflect.get(page.mainFrame(), 'client')
-  } catch {
-    return undefined
-  }
-  if (!isScreencastEventSource(source)) {
-    return undefined
-  }
-  const events = source
-  let previousTimestamp: number | undefined
-  let encoderFrames = 0
-  const onFrame = (event: unknown): void => {
-    const timestamp = readFrameTimestamp(event)
-    if (timestamp === undefined) {
-      return
-    }
-    // ScreenRecorder rounds each consecutive timestamp gap independently. Two
-    // frames alone are insufficient: at low FPS that gap can round to zero.
-    if (previousTimestamp !== undefined) {
-      encoderFrames += Math.round(
-        fps * Math.max(timestamp - previousTimestamp, 0),
-      )
-    }
-    previousTimestamp = timestamp
-  }
-  events.on('Page.screencastFrame', onFrame)
-  return {
-    recoveryIntervalMs: Math.max(
-      FRAME_PRIMING_RECOVERY_INTERVAL_MS,
-      Math.ceil((MINIMUM_ENCODER_FRAMES * 1_000) / fps),
-    ),
-    get hasEncodableFrames(): boolean {
-      return encoderFrames >= MINIMUM_ENCODER_FRAMES
-    },
-    dispose: () => {
-      events.off('Page.screencastFrame', onFrame)
-    },
-  }
-}
-
-/**
- * Prime the screencast so Puppeteer has frames to encode. Resolves `false` only
- * when an observed screencast still had insufficient input frames once recovery ran
- * out of time. Recovery scheduling is bounded; an in-flight viewport/paint
- * operation and its restoration are always awaited before returning.
+ * Prime the screencast so the recording starts from the page's current state.
+ * Resolves `false` only when an observed screencast still had fewer than two
+ * frames once recovery ran out of time, which means the screencast stalled
+ * after its first frame. Recovery scheduling is bounded; an in-flight
+ * viewport/paint operation and its restoration are always awaited.
  */
 export const primeScreencastFrames = async (
   page: Page,
   clock: ClockBoundary = systemClock,
-  frames?: ScreencastFrameObserver,
+  frames?: ScreencastFrameSource,
 ): Promise<boolean> => {
   const currentViewport = page.viewport()
   const targetViewport = currentViewport ?? (await readCurrentViewport(page))
@@ -158,23 +116,18 @@ export const primeScreencastFrames = async (
   // A tab whose activation just changed can swallow every frame priming
   // produced. Give an in-flight frame time to land, then prime again once the
   // tab has settled.
-  const interval = frames.recoveryIntervalMs
-  const deadline =
-    clock.now() +
-    Math.max(
-      FRAME_PRIMING_RECOVERY_TIMEOUT_MS,
-      interval + FRAME_PRIMING_PAINT_TIMEOUT_MS + FRAME_PRIMING_HOLD_MS,
+  const deadline = clock.now() + FRAME_PRIMING_RECOVERY_TIMEOUT_MS
+  while (frames.frameCount < 2 && clock.now() < deadline) {
+    await clock.delay(
+      Math.min(FRAME_PRIMING_RECOVERY_INTERVAL_MS, deadline - clock.now()),
     )
-  while (!frames.hasEncodableFrames && clock.now() < deadline) {
-    await clock.delay(Math.min(interval, deadline - clock.now()))
-    if (frames.hasEncodableFrames || clock.now() >= deadline) {
+    if (frames.frameCount >= 2 || clock.now() >= deadline) {
       break
     }
     await warmViewport(page, clock, currentViewport, targetViewport)
   }
-  return frames.hasEncodableFrames
+  return frames.frameCount >= 2
 }
-
 const warmViewport = async (
   page: Page,
   clock: ClockBoundary,
@@ -192,8 +145,8 @@ const warmViewport = async (
       })
     // A timer or animation callback alone does not ensure a compositor frame.
     // Request a paint before restoring the viewport; a static tab may otherwise
-    // emit just the initial frame, which Puppeteer cannot encode alone.
-    await waitForViewportPaint(page, clock)
+    // emit just its initial frame.
+    await waitForPagePaint(page, clock, FRAME_PRIMING_PAINT_TIMEOUT_MS)
     await clock.delay(FRAME_PRIMING_HOLD_MS)
   } finally {
     await page.setViewport(currentViewport).catch(() => {
@@ -202,28 +155,72 @@ const warmViewport = async (
   }
 }
 
-const waitForViewportPaint = async (
+/**
+ * Resolves once the browser has composited `page`: a paint request completes
+ * only after a rendered frame. A request that fails is not a rendering delay,
+ * so it resolves `failed` at once.
+ */
+export const waitForBrowserToRender = async (
+  page: Page,
+  clock: ClockBoundary = systemClock,
+): Promise<BrowserRenderResult> => {
+  return waitForPagePaint(page, clock, BROWSER_RENDER_TIMEOUT_MS)
+}
+
+const waitForPagePaint = async (
   page: Page,
   clock: ClockBoundary,
-): Promise<void> => {
-  const { promise: expired, resolve } = Promise.withResolvers<void>()
-  const timer = clock.setTimeout(resolve, FRAME_PRIMING_PAINT_TIMEOUT_MS)
+  timeoutMs: number,
+): Promise<BrowserRenderResult> => {
+  let completed = false
+  let session: CDPSession | undefined
+  const detach = (): void => {
+    const owned = session
+    session = undefined
+    // Do not let an unresponsive target's detach extend the render budget.
+    void owned?.detach().catch(() => undefined)
+  }
+  const paint = async (): Promise<BrowserRenderResult> => {
+    try {
+      session = await page.createCDPSession()
+      if (completed) {
+        return 'timed-out'
+      }
+      // page.screenshot holds Puppeteer's browser/context screenshot locks.
+      // Racing it with a timer leaves newPage/close/screenshots blocked after
+      // timeout. Use a disposable session, never the shared page session.
+      // No clip: it can expose a temporary viewport to an active screencast.
+      await session.send(
+        'Page.captureScreenshot',
+        {
+          format: 'jpeg',
+          quality: 1,
+          fromSurface: true,
+          captureBeyondViewport: false,
+        },
+        { timeout: timeoutMs },
+      )
+      return 'rendered'
+    } catch {
+      return 'failed'
+    } finally {
+      // Also releases a session whose creation completed after our deadline.
+      detach()
+    }
+  }
+  const { promise: expired, resolve } =
+    Promise.withResolvers<BrowserRenderResult>()
+  const timer = clock.setTimeout(() => {
+    completed = true
+    resolve('timed-out')
+  }, timeoutMs)
   timer.unref?.()
   try {
-    await Promise.race([
-      expired,
-      // Discard this low-quality snapshot. Do not clip it: Chromium can expose
-      // the clip's temporary viewport to the simultaneously running screencast.
-      page.screenshot({
-        type: 'jpeg',
-        quality: 1,
-        captureBeyondViewport: false,
-      }),
-    ])
-  } catch {
-    /* best-effort priming if the page closes or navigates */
+    return await Promise.race([expired, paint()])
   } finally {
+    completed = true
     clock.clearTimeout(timer)
+    detach()
   }
 }
 
@@ -244,29 +241,4 @@ const readCurrentViewport = async (
   } catch {
     return undefined
   }
-}
-
-const isScreencastEventSource = (
-  value: unknown,
-): value is ScreencastEventSource => {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof Reflect.get(value, 'on') === 'function' &&
-    typeof Reflect.get(value, 'off') === 'function'
-  )
-}
-
-const readFrameTimestamp = (event: unknown): number | undefined => {
-  if (typeof event !== 'object' || event === null) {
-    return undefined
-  }
-  const metadata: unknown = Reflect.get(event, 'metadata')
-  if (typeof metadata !== 'object' || metadata === null) {
-    return undefined
-  }
-  const timestamp: unknown = Reflect.get(metadata, 'timestamp')
-  return typeof timestamp === 'number' && Number.isFinite(timestamp)
-    ? timestamp
-    : undefined
 }

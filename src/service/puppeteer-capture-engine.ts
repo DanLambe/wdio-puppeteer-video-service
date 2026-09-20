@@ -1,17 +1,13 @@
 import { finished } from 'node:stream/promises'
-import type {
-  Page,
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
-  observeScreencastFrames,
+  BROWSER_RENDER_TIMEOUT_MS,
   primeScreencastFrames,
-  type ScreencastFrameObserver,
   type StartScreencastOptions,
+  waitForBrowserToRender,
 } from './capture.js'
 import type { CaptureSession } from './capture-session.js'
 import {
@@ -32,6 +28,7 @@ import {
   type ProtocolBrowser,
   type SessionProtocol,
 } from './protocol.js'
+import type { ScreencastRecorder } from './screencast-recorder.js'
 
 export interface CaptureSegmentOutput {
   readonly outputFormat: OutputFormat
@@ -78,7 +75,7 @@ export interface PuppeteerCaptureEngineOptions {
   readonly startScreencast: (
     page: Page,
     options: StartScreencastOptions,
-  ) => Promise<ScreenRecorder>
+  ) => Promise<ScreencastRecorder>
   readonly uuid: () => string
 }
 
@@ -123,15 +120,7 @@ export class PuppeteerCaptureEngine {
       return undefined
     }
     const windowHandle = await browser.getWindowHandle().catch(() => undefined)
-    const markerId = this.nextPageMarkerId()
-
-    await this.markPageContext(browser, markerId)
-
-    const page = await findActivePage(puppeteerBrowser, markerId, {
-      clock: this.clock,
-    }).finally(async () => {
-      await this.removePageMarker(browser, markerId)
-    })
+    const page = await this.findSessionPage(browser, puppeteerBrowser)
     if (!page) {
       this.log(
         'warn',
@@ -142,6 +131,55 @@ export class PuppeteerCaptureEngine {
 
     await page.bringToFront().catch(() => undefined)
     return { page, windowHandle }
+  }
+
+  /**
+   * Waits, before any test runs, for a browser that has just launched to
+   * render, so its first recording does not start before anything is drawn.
+   * Best effort: a connection or page lookup failure is left for the first
+   * recording to report, as it would be without this wait.
+   */
+  async warmUp(): Promise<void> {
+    const browser = this.session.browser
+    if (!browser) {
+      return
+    }
+    const puppeteerBrowser = await this.getPuppeteerBrowser(browser, false)
+    if (!puppeteerBrowser) {
+      return
+    }
+    const page = await this.findSessionPage(browser, puppeteerBrowser)
+    if (!page) {
+      return
+    }
+    await page.bringToFront().catch(() => undefined)
+    const rendered = await waitForBrowserToRender(page, this.clock)
+    if (rendered === 'timed-out') {
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Timed out waiting ${String(BROWSER_RENDER_TIMEOUT_MS / 1_000)}s for browser render readiness. First recordings may be empty.`,
+      )
+    } else if (rendered === 'failed') {
+      // A page that closed or a protocol error is not a rendering delay, and
+      // the first recording reports it. Leave a trace of the unconfirmed paint.
+      this.log(
+        'debug',
+        '[WdioPuppeteerVideoService] Browser render readiness could not be confirmed: the paint request failed.',
+      )
+    }
+  }
+
+  private async findSessionPage(
+    browser: Browser,
+    puppeteerBrowser: PuppeteerBrowser,
+  ): Promise<Page | undefined> {
+    const markerId = this.nextPageMarkerId()
+    await this.markPageContext(browser, markerId)
+    return findActivePage(puppeteerBrowser, markerId, {
+      clock: this.clock,
+    }).finally(async () => {
+      await this.removePageMarker(browser, markerId)
+    })
   }
 
   private async markPageContext(
@@ -183,10 +221,9 @@ export class PuppeteerCaptureEngine {
   async startCapture(
     options: CaptureStartOptions,
   ): Promise<CaptureStartResult> {
-    let pendingRecorder: ScreenRecorder | undefined
+    let pendingRecorder: ScreencastRecorder | undefined
     let pendingSegment: ActiveSegment | undefined
     let pendingRecordingPath: string | undefined
-    let frameObserver: ScreencastFrameObserver | undefined
     try {
       const activePage = await this.preparePage()
       if (!activePage) {
@@ -196,10 +233,6 @@ export class PuppeteerCaptureEngine {
       const { page, windowHandle } = activePage
       const output = await options.createOutput()
       pendingRecordingPath = output.recordingPath
-      // Observe before starting so the screencast's first frame is counted.
-      if (this.capture.framePriming) {
-        frameObserver = observeScreencastFrames(page, this.capture.fps)
-      }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
         ffmpegPath: options.ffmpegPath,
@@ -221,11 +254,11 @@ export class PuppeteerCaptureEngine {
       recorder.pipe(segment.writeStream)
       if (
         this.capture.framePriming &&
-        !(await primeScreencastFrames(page, this.clock, frameObserver))
+        !(await primeScreencastFrames(page, this.clock, recorder))
       ) {
         this.log(
           'debug',
-          '[WdioPuppeteerVideoService] Screencast did not deliver enough frames for encoding after frame priming; this recording may be empty.',
+          '[WdioPuppeteerVideoService] Screencast delivered fewer than two frames after frame priming; the recording may show only its first frame.',
         )
       }
 
@@ -246,8 +279,6 @@ export class PuppeteerCaptureEngine {
           .catch(() => undefined)
       }
       throw error
-    } finally {
-      frameObserver?.dispose()
     }
   }
 
@@ -256,10 +287,19 @@ export class PuppeteerCaptureEngine {
     if (!recorder) {
       return { segment: undefined, streamOk: false }
     }
-    await this.stopRecorder(recorder)
+    const recorderStopped = await this.stopRecorder(recorder)
+    if (!recorderStopped && !segment.writeStream.destroyed) {
+      // Destroying a pipe's source does not end its destination. Flush bytes
+      // already accepted by the file without waiting for an impossible EOF.
+      segment.writeStream.end()
+    }
+    // A stop that missed its deadline was already reported and aborted; only
+    // a completed stop has an encoder result of its own to check.
+    const encoderOk = recorderStopped && this.checkEncoderResult(recorder)
 
     try {
-      const streamOk = await this.waitForWriteStream(segment)
+      const streamFinished = await this.waitForWriteStream(segment)
+      const streamOk = encoderOk && streamFinished
       if (!streamOk) {
         this.markSegmentAsUnclean(segment)
       }
@@ -313,6 +353,7 @@ export class PuppeteerCaptureEngine {
 
   private async getPuppeteerBrowser(
     browser: Browser,
+    reportFailure = true,
   ): Promise<PuppeteerBrowser | undefined> {
     const current = this.session.puppeteerBrowser
     if (current && current.connected !== false) {
@@ -333,15 +374,17 @@ export class PuppeteerCaptureEngine {
       return puppeteerBrowser
     } catch (error) {
       this.resetConnection()
-      this.onConnectionFailure(
-        describePuppeteerConnectionFailure(browser, error),
-      )
+      if (reportFailure) {
+        this.onConnectionFailure(
+          describePuppeteerConnectionFailure(browser, error),
+        )
+      }
       return undefined
     }
   }
 
   private createActiveSegment(
-    recorder: ScreenRecorder,
+    recorder: ScreencastRecorder,
     output: CaptureSegmentOutput,
     transcodeOptions: ResolvedTranscodeOptions,
   ): ActiveSegment {
@@ -398,7 +441,7 @@ export class PuppeteerCaptureEngine {
   }
 
   private async cleanupPartialCapture(
-    recorder: ScreenRecorder | undefined,
+    recorder: ScreencastRecorder | undefined,
     segment: ActiveSegment | undefined,
   ): Promise<void> {
     if (recorder) {
@@ -419,7 +462,7 @@ export class PuppeteerCaptureEngine {
     await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
   }
 
-  private async stopRecorder(recorder: ScreenRecorder): Promise<void> {
+  private async stopRecorder(recorder: ScreencastRecorder): Promise<boolean> {
     const { promise: timeoutTask, reject: rejectTimeout } =
       Promise.withResolvers<never>()
     const timeout = this.clock.setTimeout(() => {
@@ -432,18 +475,43 @@ export class PuppeteerCaptureEngine {
     timeout.unref()
     try {
       await Promise.race([recorder.stop(), timeoutTask])
+      return true
     } catch (error) {
+      // An expected deadline, not a crash: a stack trace only adds noise.
       this.log(
         'warn',
-        '[WdioPuppeteerVideoService] Error stopping recorder:',
-        error,
+        `[WdioPuppeteerVideoService] Error stopping recorder: ${describeError(error)}`,
       )
-      if (!recorder.destroyed) {
-        recorder.destroy()
-      }
+      await recorder.abort()
+      return false
     } finally {
       this.clock.clearTimeout(timeout)
     }
+  }
+
+  // A file that finished writing is not a complete recording if the encoder
+  // failed: keep its bytes as an unclean segment instead of transcoding them.
+  private checkEncoderResult(recorder: ScreencastRecorder): boolean {
+    if (recorder.frameCount === 0) {
+      this.log(
+        'warn',
+        '[WdioPuppeteerVideoService] The screencast delivered no frames before recording stopped, so the recording is empty.',
+      )
+      return false
+    }
+    const { code, diagnostic, signal } = recorder.ffmpegResult
+    if (code === 0 && signal === null) {
+      return true
+    }
+    const exit = signal
+      ? `was terminated by ${signal}`
+      : `exited with code ${String(code)}`
+    const details = diagnostic ? `: ${diagnostic}` : '.'
+    this.log(
+      'warn',
+      `[WdioPuppeteerVideoService] FFmpeg ${exit} while recording${details}`,
+    )
+    return false
   }
 
   private async waitForWriteStream(segment: ActiveSegment): Promise<boolean> {

@@ -15,7 +15,9 @@ const chromeArgs = [
   '--headless=new',
   '--disable-gpu',
   '--disable-dev-shm-usage',
-  '--window-size=1280,720',
+  mode === 'sustained' || mode === 'quiet'
+    ? '--window-size=1920,1080'
+    : '--window-size=1280,720',
   `--force-device-scale-factor=${mode === 'hidpi' ? '2' : '1'}`,
 ]
 
@@ -68,6 +70,21 @@ const expectedDimensions: Record<string, { width: number; height: number }> = {
 if (mode === 'low-fps') {
   capture.fps = 1
 }
+// Continuous animation below 30 FPS: Puppeteer 24's recorder froze it on one
+// frame and always encoded at 25 fps.
+if (mode === 'animation') {
+  capture.fps = 10
+}
+// Fifteen seconds of busy full-HD capture. An encoder slower than the capture
+// rate falls further behind for the whole test and cannot finish within the
+// recorder's stop deadline, which cuts the end off the video.
+if (mode === 'sustained') {
+  capture.fps = 10
+}
+if (mode === 'unprimed') {
+  capture.framePriming = false
+  capture.fps = 10
+}
 if (mode !== 'controls' && expectedDimensions[mode]) {
   capture.viewport = { width: 960, height: 600 }
   capture.crop = { x: 10, y: 20, width: 801, height: 401 }
@@ -110,7 +127,7 @@ export const config: WebdriverIO.Config = {
   reporters: ['spec'],
   mochaOpts: {
     ui: 'bdd',
-    timeout: 30_000,
+    timeout: mode === 'quiet' ? 90_000 : 30_000,
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)
@@ -139,6 +156,19 @@ export const config: WebdriverIO.Config = {
         `Expected a decodable, primed ${format} for ${mode}; container=${media.container}, frames=${media.frameCount.toString()}`,
       )
     }
+    assertRealTimePlayback(media)
+    if (mode === 'animation') {
+      const distinct = await probeMediaFile(
+        ffmpegPath,
+        path.join(resultsDir, artifact),
+        { distinctFrames: true },
+      )
+      if (distinct.frameCount < media.frameCount * 0.5) {
+        throw new Error(
+          `Expected continuous animation to keep distinct frames; ${distinct.frameCount.toString()} of ${media.frameCount.toString()} frames differ`,
+        )
+      }
+    }
     const expected = expectedDimensions[mode]
     if (
       expected &&
@@ -146,6 +176,20 @@ export const config: WebdriverIO.Config = {
     ) {
       throw new Error(
         `Expected ${mode} dimensions ${expected.width}x${expected.height}, received ${media.width}x${media.height}`,
+      )
+    }
+    // A full-HD page left static for 45 s at the default 30 FPS. Chrome sends no
+    // frames while nothing changes, so the recorder must feed the held frame to the
+    // encoder during the test; writing the whole tail at stop cannot be encoded
+    // within the stop deadline and cuts the video short.
+    if (mode === 'quiet' && media.durationSeconds < 42) {
+      throw new Error(
+        `Expected the quiet capture to keep its 45 s static tail; media plays ${media.durationSeconds.toFixed(2)}s`,
+      )
+    }
+    if (mode === 'sustained' && media.durationSeconds < 13) {
+      throw new Error(
+        `Expected the sustained capture to keep its 15 s of page activity; media plays ${media.durationSeconds.toFixed(2)}s`,
       )
     }
     if (mode === 'controls') {
@@ -159,4 +203,31 @@ export const config: WebdriverIO.Config = {
       `[wdio:e2e:capture] Verified ${mode}: ${media.width.toString()}x${media.height.toString()}, ${media.durationSeconds.toFixed(2)}s, ${media.frameCount.toString()} frames.`,
     )
   },
+}
+
+// Encoded frames must follow the configured rate and playback must last about
+// as long as the spec kept the page open. Puppeteer 24's recorder encoded every
+// video at 25 fps regardless of `capture.fps`, stretching or compressing it.
+const assertRealTimePlayback = (media: {
+  durationSeconds: number
+  frameCount: number
+}): void => {
+  const speed = capture.speed ?? 1
+  // speed retimes frames and FFmpeg keeps the configured output rate.
+  const expectedFps = capture.fps ?? 30
+  if (media.frameCount >= 15) {
+    const effectiveFps = media.frameCount / media.durationSeconds
+    if (Math.abs(effectiveFps - expectedFps) > expectedFps * 0.12) {
+      throw new Error(
+        `Expected ${mode} media near ${expectedFps.toString()} fps; decoded ${effectiveFps.toFixed(1)} fps`,
+      )
+    }
+    return
+  }
+  // Too few frames to measure a rate: the spec dwells at least 1.5 seconds.
+  if (media.durationSeconds * speed < 0.5) {
+    throw new Error(
+      `Expected ${mode} playback to cover its 1.5 second capture; media plays ${media.durationSeconds.toFixed(2)}s`,
+    )
+  }
 }

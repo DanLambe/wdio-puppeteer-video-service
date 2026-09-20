@@ -1,9 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type {
-  Page,
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import { generateVideoReportForRun } from '../reporter/report-generator.js'
 import type { ResolvedWdioPuppeteerVideoServiceOptions } from '../types.js'
 import { AllureVideoIntegration } from './allure-integration.js'
@@ -37,6 +33,7 @@ import {
   PostProcessSlotScheduler,
   RecordingSlotScheduler,
 } from './recording-slots.js'
+import type { ScreencastRecorder } from './screencast-recorder.js'
 import {
   createWorkerRecordingCoordinator,
   type RecordingCoordinatorFactory,
@@ -50,7 +47,7 @@ export type PuppeteerConnector = (
 export type ScreencastStarter = (
   page: Page,
   options: StartScreencastOptions,
-) => Promise<ScreenRecorder>
+) => Promise<ScreencastRecorder>
 export type WorkerFfmpegRunner = (
   options: RunFfmpegOptions,
   processRegistry: FfmpegProcessRegistry,

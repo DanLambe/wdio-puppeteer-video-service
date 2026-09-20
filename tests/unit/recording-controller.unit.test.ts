@@ -2,7 +2,6 @@ import type { WriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { ScreenRecorder } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
 import { nodeFileSystem } from '../../src/service/boundaries.js'
@@ -16,6 +15,8 @@ import {
   type RecordingControllerOptions,
 } from '../../src/service/recording-controller.js'
 import { RecordingMediaCoordinator } from '../../src/service/recording-media-coordinator.js'
+import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
+import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 
@@ -181,7 +182,7 @@ const attachTranscodedSegment = async (
   await fs.writeFile(recordingPath, 'captured-media')
   harness.session.beginRecording(path.parse(recordingPath).name)
   harness.session.attachCapture({
-    recorder: {} as ScreenRecorder,
+    recorder: {} as ScreencastRecorder,
     segment: {
       ...createActiveSegment(recordingPath),
       outputFormat: 'mp4',
@@ -291,7 +292,7 @@ describe('RecordingController', () => {
     harness.session.setBrowser({} as Browser)
     harness.startCapture.mockImplementation(async () => {
       harness.session.attachCapture({
-        recorder: {} as ScreenRecorder,
+        recorder: {} as ScreencastRecorder,
         segment: createActiveSegment('active.webm'),
         windowHandle: 'window-1',
       })
@@ -689,7 +690,7 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('capture.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment,
       windowHandle: undefined,
     })
@@ -716,7 +717,7 @@ describe('RecordingController', () => {
     const segment = createActiveSegment('incomplete.webm')
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment,
       windowHandle: undefined,
     })
@@ -742,7 +743,7 @@ describe('RecordingController', () => {
     const harness = createHarness()
     harness.session.beginRecording('capture')
     harness.session.attachCapture({
-      recorder: {} as ScreenRecorder,
+      recorder: {} as ScreencastRecorder,
       segment: createActiveSegment('missing.webm'),
       windowHandle: undefined,
     })
@@ -759,6 +760,180 @@ describe('RecordingController', () => {
     expect(harness.media.pendingTaskCount).toBe(0)
     expect(harness.releaseSlot).toHaveBeenCalledOnce()
   })
+
+  it.each([
+    { failurePolicy: 'warn', keepArtifacts: true },
+    { failurePolicy: 'error', keepArtifacts: true },
+    { failurePolicy: 'warn', keepArtifacts: false },
+    { failurePolicy: 'error', keepArtifacts: false },
+  ] as const)(
+    'records an incomplete capture as failed with $failurePolicy and retention=$keepArtifacts',
+    async ({ failurePolicy, keepArtifacts }) => {
+      await withTempDir(async (tempDir) => {
+        const options = { failurePolicy, outputDir: tempDir }
+        const harness = createHarness(options)
+        const recordingPath = path.join(tempDir, 'partial.webm')
+        await fs.writeFile(recordingPath, 'recoverable-partial-media')
+        harness.session.beginRecording('partial')
+        harness.session.attachCapture({
+          recorder: {} as ScreencastRecorder,
+          segment: createActiveSegment(recordingPath),
+          windowHandle: undefined,
+        })
+        harness.setSlotOwned(true)
+        vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
+          async () => ({ ...harness.session.detachCapture(), streamOk: false }),
+        )
+        const completeCurrent = vi.fn(async () => 'entry')
+        const attachRetainedVideos = vi.fn(async () => ({ attachedPaths: [] }))
+        const coordinator = new WorkerRecordingCoordinator({
+          actions: {
+            finalizeMedia: (passed, keep) =>
+              harness.controller.finalizeMedia(passed, keep),
+            getAvailability: () => ({ available: true }),
+            getRecordedPaths: () => harness.session.recordedPaths,
+            isRecordingActive: () => harness.session.isRecordingActive,
+            resetRecording: () => harness.controller.reset(),
+            runSerialized: (task) => harness.controller.runSerialized(task),
+            startRecording: (metadata, retry) =>
+              harness.controller.startForMetadata(metadata, retry),
+          },
+          allure: { attachRetainedVideos },
+          getLogLevel: () => 'warn',
+          log: vi.fn(),
+          options: resolveServiceConfiguration(options).options,
+        })
+        coordinator.configureSession({
+          framework: 'mocha',
+          specFileRetryAttempt: 0,
+          manifest: {
+            currentEntryId: 'entry',
+            beginEntity: async () => 'entry',
+            completeCurrent,
+            recordResult: async () => {},
+            setCurrentAttempt: () => {},
+          },
+        })
+        const outcome = coordinator.endEntity({
+          manifestResult: keepArtifacts ? 'failed' : 'passed',
+          passed: !keepArtifacts,
+        })
+        if (failurePolicy === 'error') {
+          await expect(outcome).rejects.toThrow(
+            `Recording stream did not finish cleanly for: ${recordingPath}`,
+          )
+        } else {
+          await expect(outcome).resolves.toBeUndefined()
+        }
+        const paths = keepArtifacts ? [recordingPath] : []
+        expect(completeCurrent).toHaveBeenCalledWith({
+          decision: 'failed',
+          paths,
+          processingOperation: 'capture',
+          processingOutcome: 'failed',
+          reason: 'capture-incomplete',
+          result: keepArtifacts ? 'failed' : 'passed',
+        })
+        // The partial file is still what a failing test's report should show.
+        expect(attachRetainedVideos).toHaveBeenCalledWith(paths, !keepArtifacts)
+        // One warning when the segment stopped; no error-level duplicate.
+        expect(harness.logs.filter((entry) => entry.level !== 'debug')).toEqual(
+          [
+            expect.objectContaining({
+              level: 'warn',
+              message: `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${recordingPath}`,
+            }),
+            ...(failurePolicy === 'error'
+              ? [expect.objectContaining({ level: 'error' })]
+              : []),
+          ],
+        )
+        expect(harness.releaseSlot.mock.invocationCallOrder[0]).toBeLessThan(
+          completeCurrent.mock.invocationCallOrder[0] as number,
+        )
+        expect(completeCurrent.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(harness.captureEngine.resetRecording).mock
+            .invocationCallOrder[0] as number,
+        )
+        expect(harness.session.isRecordingActive).toBe(false)
+        expect(harness.media.pendingTaskCount).toBe(0)
+        if (keepArtifacts) {
+          expect(await fs.readFile(recordingPath, 'utf8')).toBe(
+            'recoverable-partial-media',
+          )
+        } else {
+          await expect(fs.stat(recordingPath)).rejects.toMatchObject({
+            code: 'ENOENT',
+          })
+        }
+
+        // Failure state must not leak into the next entity after reset.
+        harness.session.beginRecording('next')
+        await expect(
+          harness.controller.finalizeMedia(true, false),
+        ).resolves.toEqual({ deferred: false, paths: [] })
+      })
+    },
+  )
+
+  it.each(['after-test', 'after-worker'] as const)(
+    'does not merge or queue incomplete media after a mid-test stop with timing=%s',
+    async (timing) => {
+      await withTempDir(async (tempDir) => {
+        const harness = createHarness({
+          processing: { timing, merge: { enabled: true } },
+        })
+        const recordingPath = path.join(tempDir, 'partial.webm')
+        await fs.writeFile(recordingPath, 'partial-media')
+        harness.session.beginRecording('partial')
+        harness.session.attachCapture({
+          recorder: {} as ScreencastRecorder,
+          segment: createActiveSegment(recordingPath),
+          windowHandle: undefined,
+        })
+        vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
+          async () => ({ ...harness.session.detachCapture(), streamOk: false }),
+        )
+        const merge = vi.spyOn(harness.media, 'mergeCurrentSegments')
+        const queue = vi.spyOn(harness.media, 'queueDeferredMerge')
+        await harness.controller.stopRecording()
+        const healthyPath = path.join(tempDir, 'healthy.webm')
+        await fs.writeFile(healthyPath, 'healthy-media')
+        harness.session.advanceSegment()
+        harness.session.attachCapture({
+          recorder: {} as ScreencastRecorder,
+          segment: createActiveSegment(healthyPath),
+          windowHandle: undefined,
+        })
+        vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
+          async () => ({ ...harness.session.detachCapture(), streamOk: true }),
+        )
+        harness.media.enqueue({
+          kind: 'transcode',
+          inputPath: recordingPath,
+          outputPath: 'partial.mp4',
+          deleteOriginal: true,
+        })
+
+        await expect(
+          harness.controller.finalizeMedia(false, true),
+        ).resolves.toEqual({
+          captureFailure: `Recording stream did not finish cleanly for: ${recordingPath}`,
+          deferred: false,
+          paths: [recordingPath, healthyPath],
+        })
+        expect(merge).not.toHaveBeenCalled()
+        expect(queue).not.toHaveBeenCalled()
+        expect(harness.media.pendingTaskCount).toBe(0)
+        expect(harness.session.recordedPaths).toEqual([
+          recordingPath,
+          healthyPath,
+        ])
+        expect(await fs.readFile(recordingPath, 'utf8')).toBe('partial-media')
+        expect(await fs.readFile(healthyPath, 'utf8')).toBe('healthy-media')
+      })
+    },
+  )
 
   it('reset clears recording state and releases held slots', async () => {
     const harness = createHarness()

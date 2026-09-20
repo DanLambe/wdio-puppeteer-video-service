@@ -1,14 +1,12 @@
-import type {
-  Browser as PuppeteerBrowser,
-  ScreenRecorder,
-} from 'puppeteer-core'
+import type { Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { ActiveSegment } from './constants.js'
 import type { SessionProtocol } from './protocol.js'
+import type { ScreencastRecorder } from './screencast-recorder.js'
 
 export type DetachedCapture =
   | Readonly<{
-      recorder: ScreenRecorder
+      recorder: ScreencastRecorder
       segment: ActiveSegment
     }>
   | Readonly<{
@@ -17,7 +15,7 @@ export type DetachedCapture =
     }>
 
 export interface AttachCaptureOptions {
-  readonly recorder: ScreenRecorder
+  readonly recorder: ScreencastRecorder
   readonly segment: ActiveSegment
   readonly windowHandle: string | undefined
 }
@@ -25,7 +23,7 @@ export interface AttachCaptureOptions {
 export class CaptureSession {
   private wdioBrowser: Browser | undefined
   private connectedPuppeteerBrowser: PuppeteerBrowser | undefined
-  private captureRecorder: ScreenRecorder | undefined
+  private captureRecorder: ScreencastRecorder | undefined
   private captureSegment: ActiveSegment | undefined
   private segmentNumber = 0
   private recordingSlug = ''
@@ -41,7 +39,7 @@ export class CaptureSession {
     return this.connectedPuppeteerBrowser
   }
 
-  get recorder(): ScreenRecorder | undefined {
+  get recorder(): ScreencastRecorder | undefined {
     return this.captureRecorder
   }
 
