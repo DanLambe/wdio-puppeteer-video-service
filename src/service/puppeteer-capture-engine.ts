@@ -282,10 +282,21 @@ export class PuppeteerCaptureEngine {
     }
   }
 
-  async stopCapture(): Promise<CaptureStopResult> {
+  async stopCapture(
+    options: Readonly<{ discard?: boolean }> = {},
+  ): Promise<CaptureStopResult> {
     const { recorder, segment } = this.session.detachCapture()
     if (!recorder) {
       return { segment: undefined, streamOk: false }
+    }
+    if (options.discard) {
+      // Retention already decided this recording is not being kept. Frames are
+      // encoded as they are captured, so the encoding already done cannot be
+      // reclaimed; stopping gracefully would additionally drain whatever is
+      // still queued, flush, and finish writing a file that is deleted moments
+      // later. That tail is largest on a host whose encoder has fallen behind.
+      await this.discardCapture(recorder, segment)
+      return { segment: undefined, streamOk: true }
     }
     const recorderStopped = await this.stopRecorder(recorder)
     if (!recorderStopped && !segment.writeStream.destroyed) {
@@ -454,6 +465,25 @@ export class PuppeteerCaptureEngine {
       return
     }
     recorder?.off('error', segment.onRecorderError)
+    segment.writeStream.off('error', segment.onWriteStreamError)
+    if (!segment.writeStream.destroyed) {
+      segment.writeStream.destroy()
+    }
+    await segment.writeStreamDone.catch(() => undefined)
+    await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
+  }
+
+  // Like `cleanupPartialCapture`, but never waits for a graceful stop: the
+  // encoder's remaining output is unwanted, so it is terminated outright.
+  private async discardCapture(
+    recorder: ScreencastRecorder,
+    segment: ActiveSegment,
+  ): Promise<void> {
+    await recorder.abort()
+    if (!recorder.destroyed) {
+      recorder.destroy()
+    }
+    recorder.off('error', segment.onRecorderError)
     segment.writeStream.off('error', segment.onWriteStreamError)
     if (!segment.writeStream.destroyed) {
       segment.writeStream.destroy()

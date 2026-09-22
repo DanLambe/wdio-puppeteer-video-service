@@ -144,6 +144,8 @@ const validateCapture = (value: unknown): void => {
     'viewport',
     'fps',
     'quality',
+    'maxWidth',
+    'maxHeight',
     'scale',
     'speed',
     'crop',
@@ -153,15 +155,53 @@ const validateCapture = (value: unknown): void => {
   validateCaptureViewport(capture.viewport)
   assertOptionalInteger(capture.fps, 'capture.fps', 1)
   assertOptionalInteger(capture.quality, 'capture.quality', 0, 63)
+  // Chrome rejects a zero or negative cap, and an odd cap would force the
+  // encoder to pad every frame, so require an even value of at least two.
+  assertOptionalEvenInteger(capture.maxWidth, 'capture.maxWidth')
+  assertOptionalEvenInteger(capture.maxHeight, 'capture.maxHeight')
   assertOptionalPositiveNumber(capture.scale, 'capture.scale')
   assertOptionalPositiveNumber(capture.speed, 'capture.speed')
   validateCaptureCrop(capture.crop)
+  assertCropWithoutCaptureBounds(capture)
   assertOptionalBoolean(capture.framePriming, 'capture.framePriming')
   assertOptionalInteger(
     capture.connectionTimeoutMs,
     'capture.connectionTimeoutMs',
     1,
   )
+}
+
+// A crop rectangle is expressed in viewport coordinates, but Chrome recomputes
+// a capture bound against whatever the viewport is when it composites each
+// frame. The recorder's FFmpeg filter chain is fixed when capture starts, so a
+// crop scaled for the start-time viewport silently selects the wrong region the
+// moment the viewport changes — including the restore that `capture.viewport`
+// performs immediately after capture begins. Reject the pair instead.
+const assertCropWithoutCaptureBounds = (capture: OptionRecord): void => {
+  if (capture.crop === undefined) {
+    return
+  }
+  const bound =
+    capture.maxWidth !== undefined
+      ? 'capture.maxWidth'
+      : capture.maxHeight !== undefined
+        ? 'capture.maxHeight'
+        : undefined
+  if (bound === undefined) {
+    return
+  }
+  throw new TypeError(
+    `Configuration option "capture.crop" cannot be combined with "${bound}". A capture bound is applied by Chrome against the viewport of each frame, so a crop rectangle cannot stay on the requested region. Use "capture.scale" to resize a cropped recording, or remove the crop.`,
+  )
+}
+
+const assertOptionalEvenInteger = (value: unknown, name: string): void => {
+  assertOptionalInteger(value, name, 2)
+  if (typeof value === 'number' && value % 2 !== 0) {
+    throw new TypeError(
+      `Configuration option "${name}" must be an even number of pixels.`,
+    )
+  }
 }
 
 const validateCaptureViewport = (value: unknown): void => {

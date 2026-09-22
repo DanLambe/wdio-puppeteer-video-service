@@ -54,11 +54,21 @@ export interface CaptureOptions {
   fps?: number
   /** FFmpeg constant-rate factor from 0 (best) to 63 (smallest). @default 30 */
   quality?: number
-  /** Output dimension multiplier. @default 1 */
+  /**
+   * Bound screencast frame dimensions before transfer and encoding, without
+   * resizing the test viewport or changing page layout. Chrome scales frames
+   * down to fit while preserving aspect ratio. Frames already inside the bound
+   * are untouched. Requires an even integer of at least 2; cannot be combined
+   * with `crop`. The `ci` profile defaults to 1280 unless a bound or crop is set.
+   */
+  maxWidth?: number
+  /** See `maxWidth`. */
+  maxHeight?: number
+  /** Output dimension multiplier, applied after capture. @default 1 */
   scale?: number
   /** Playback-speed multiplier. @default 1 */
   speed?: number
-  /** Crop applied by Puppeteer before scaling. */
+  /** Crop applied before scaling; cannot be combined with maxWidth/maxHeight. */
   crop?: CaptureCrop
   /** Whether to prime early screencast frames with the viewport warmup. @default true */
   framePriming?: boolean
@@ -185,6 +195,8 @@ export interface ResolvedCaptureOptions {
   readonly viewport: 'current' | Readonly<CaptureViewport>
   readonly fps: number
   readonly quality: number
+  readonly maxWidth?: number
+  readonly maxHeight?: number
   readonly scale: number
   readonly speed: number
   readonly crop?: Readonly<CaptureCrop>

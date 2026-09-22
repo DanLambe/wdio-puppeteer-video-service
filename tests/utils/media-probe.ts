@@ -211,3 +211,84 @@ export const probeMediaFile = async (
     }
   })
 }
+
+export interface FramePixelCounts {
+  readonly total: number
+  readonly green: number
+  readonly red: number
+}
+
+/**
+ * Decodes one frame to raw RGB and classifies its pixels. Dimension assertions
+ * cannot tell a correct crop from a wrong region of the same size, so a
+ * colored-region fixture plus these counts is what pins crop geometry.
+ */
+export const countFrameColors = async (
+  ffmpegPath: string,
+  filePath: string,
+  atSeconds = 0.5,
+  options: Pick<MediaProbeOptions, 'spawnProcess' | 'timeoutMs'> = {},
+): Promise<FramePixelCounts> => {
+  // Seek rather than use a `select` filter: a filtergraph argument has to
+  // escape its own commas, which is easy to get subtly wrong when the command
+  // is spawned without a shell and fails as "No such filter".
+  const args = [
+    '-v',
+    'error',
+    '-i',
+    filePath,
+    '-ss',
+    atSeconds.toFixed(3),
+    '-frames:v',
+    '1',
+    '-f',
+    'rawvideo',
+    '-pix_fmt',
+    'rgb24',
+    'pipe:1',
+  ]
+  const pixels = await new Promise<Buffer>((resolve, reject) => {
+    const child = options.spawnProcess
+      ? options.spawnProcess(ffmpegPath, args)
+      : spawn(ffmpegPath, args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+          timeout: options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        })
+    const chunks: Buffer[] = []
+    let stderr = ''
+    child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8')
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(`ffmpeg pixel decode exited ${String(code)}: ${stderr}`),
+        )
+        return
+      }
+      resolve(Buffer.concat(chunks))
+    })
+  })
+
+  if (pixels.length === 0 || pixels.length % 3 !== 0) {
+    throw new Error(
+      `FFmpeg did not return a complete RGB frame for ${filePath}`,
+    )
+  }
+  let green = 0
+  let red = 0
+  for (let index = 0; index + 2 < pixels.length; index += 3) {
+    const r = pixels[index] ?? 0
+    const g = pixels[index + 1] ?? 0
+    if (g > r * 2) {
+      green += 1
+    } else if (r > g * 2) {
+      red += 1
+    }
+  }
+  return { total: Math.floor(pixels.length / 3), green, red }
+}

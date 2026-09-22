@@ -1,5 +1,6 @@
 import type {
   AllureIntegrationOptions,
+  CaptureOptions,
   LogLevel,
   ProcessingMergeOptions,
   ProcessingOptions,
@@ -85,6 +86,7 @@ export const resolveServiceConfiguration = (
       viewport: capture.viewport ?? 'current',
       fps: capture.fps ?? resolveProfileFps(profile),
       quality: capture.quality ?? 30,
+      ...resolveCaptureBounds(capture, profile),
       scale: capture.scale ?? 1,
       speed: capture.speed ?? 1,
       framePriming: capture.framePriming ?? profile !== 'ci',
@@ -164,6 +166,34 @@ const resolvePlatformMaxFilenameLength = (
 
 const resolveProfileFps = (profile: ServiceProfile): number => {
   return profile === 'default' ? 30 : 24
+}
+
+// Encoding cost scales with pixels, and a shared CI runner is the host least
+// able to absorb it: full HD costs about 2.2 times as much per frame as 720p.
+// The `ci` profile therefore caps capture width unless the user chose their
+// own bound. A viewport already narrower than this is left alone.
+const CI_PROFILE_MAX_CAPTURE_WIDTH = 1280
+
+const resolveCaptureBounds = (
+  capture: CaptureOptions,
+  profile: ServiceProfile,
+): { maxWidth?: number; maxHeight?: number } => {
+  const explicit =
+    capture.maxWidth !== undefined || capture.maxHeight !== undefined
+  // A bound cannot hold a crop rectangle on its region across a viewport
+  // change, so the profile must not introduce one behind a cropped recording's
+  // back. An explicit bound alongside a crop is rejected during validation.
+  const profileDefault =
+    profile === 'ci' && !explicit && capture.crop === undefined
+      ? CI_PROFILE_MAX_CAPTURE_WIDTH
+      : undefined
+  const maxWidth = capture.maxWidth ?? profileDefault
+  return {
+    ...(maxWidth === undefined ? {} : { maxWidth }),
+    ...(capture.maxHeight === undefined
+      ? {}
+      : { maxHeight: capture.maxHeight }),
+  }
 }
 
 const resolveWindowChanges = (

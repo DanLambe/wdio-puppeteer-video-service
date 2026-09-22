@@ -74,6 +74,18 @@ describe('Puppeteer capture protocol and media controls', () => {
       expect(viewport).not.toEqual({ width: 960, height: 600 })
     }
 
+    if (mode === 'cropped-region') {
+      // A green rectangle at exactly the cropped CSS region on a red page. The
+      // crop is applied against the viewport capture started with, which this
+      // mode then restores, so decoding the frame proves the recorder kept the
+      // requested region rather than a same-sized rectangle somewhere else.
+      await browser.execute(`
+        document.body.style.cssText = 'margin:0;background:#ff0000'
+        const target = document.createElement('div')
+        target.style.cssText = 'position:fixed;left:80px;top:60px;width:800px;height:400px;background:#00ff00'
+        document.body.append(target)
+      `)
+    }
     if (mode === 'animation') {
       // A box that moves on every animation frame, so each captured frame differs.
       await browser.execute(`

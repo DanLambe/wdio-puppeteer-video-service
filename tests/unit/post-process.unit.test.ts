@@ -106,7 +106,37 @@ describe('post-process helpers', () => {
       '-vf',
       'pad=ceil(iw/2)*2:ceil(ih/2)*2',
       '-preset',
+      'veryfast',
+      '-crf',
+      '23',
+      // Configured arguments come last, so FFmpeg resolves this to `slow`.
+      '-preset',
       'slow',
+      'output.mp4',
+    ])
+  })
+
+  it('applies a fast preset and CRF when nothing is configured', () => {
+    // Otherwise libx264 falls back to `preset medium` at `crf 23`: the most
+    // expensive single step in the pipeline, for quality a test recording
+    // does not need. Only the `ci` profile used to avoid it.
+    expect(
+      buildH264TranscodeArgs('input.webm', 'output.mp4', undefined),
+    ).toEqual([
+      '-n',
+      '-i',
+      'input.webm',
+      '-an',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      '-vf',
+      'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '23',
       'output.mp4',
     ])
   })

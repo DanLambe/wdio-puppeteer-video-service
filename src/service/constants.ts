@@ -98,14 +98,11 @@ export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 
-export const CI_TRANSCODE_FFMPEG_ARGS = [
-  '-preset',
-  'veryfast',
-  '-crf',
-  '28',
-  '-threads',
-  '1',
-] as const
+// The fast preset now applies to every profile. The `ci` profile additionally
+// trades quality for smaller artifacts at CRF 28, and pins threads because
+// several workers may transcode at once and libx264's default would let each
+// one claim every core. These are appended after the defaults, so they win.
+export const CI_TRANSCODE_FFMPEG_ARGS = ['-crf', '28', '-threads', '1'] as const
 
 export const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   silent: 0,

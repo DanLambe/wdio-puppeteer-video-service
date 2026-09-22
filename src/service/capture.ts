@@ -87,6 +87,10 @@ export const createScreencastOptions = (
     scale: capture.scale,
     speed: capture.speed,
     ffmpegPath: options.ffmpegPath,
+    ...(capture.maxWidth === undefined ? {} : { maxWidth: capture.maxWidth }),
+    ...(capture.maxHeight === undefined
+      ? {}
+      : { maxHeight: capture.maxHeight }),
     ...(capture.crop ? { crop: capture.crop } : {}),
   }
 }

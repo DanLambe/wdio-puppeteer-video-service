@@ -2,7 +2,7 @@ import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import type { CaptureOptions } from '../src/index.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
-import { probeMediaFile } from './utils/media-probe.js'
+import { countFrameColors, probeMediaFile } from './utils/media-probe.js'
 import { videoServiceModulePath } from './utils/service-module.js'
 import { listVideoArtifacts } from './utils/video-artifact-assertions.js'
 
@@ -79,6 +79,19 @@ if (mode === 'animation') {
 // rate falls further behind for the whole test and cannot finish within the
 // recorder's stop deadline, which cuts the end off the video.
 if (mode === 'sustained') {
+  capture.fps = 10
+}
+// Chrome scales the frame to fit this bound before it leaves the browser, so
+// the encoded video must come out exactly this wide however large the window is.
+const BOUNDED_CAPTURE_MAX_WIDTH = 480
+if (mode === 'cropped-region') {
+  capture.viewport = { width: 960, height: 600 }
+  capture.crop = { x: 80, y: 60, width: 800, height: 400 }
+  capture.scale = 1
+  capture.fps = 10
+}
+if (mode === 'bounded') {
+  capture.maxWidth = BOUNDED_CAPTURE_MAX_WIDTH
   capture.fps = 10
 }
 if (mode === 'unprimed') {
@@ -191,6 +204,49 @@ export const config: WebdriverIO.Config = {
       throw new Error(
         `Expected the sustained capture to keep its 15 s of page activity; media plays ${media.durationSeconds.toFixed(2)}s`,
       )
+    }
+    if (mode === 'cropped-region') {
+      const colors = await countFrameColors(
+        ffmpegPath,
+        path.join(resultsDir, artifact),
+        // Sample the settled tail, not browser startup/navigation/priming.
+        Math.max(0, media.durationSeconds - 0.5),
+      )
+      const greenPercent = (100 * colors.green) / colors.total
+      // Dimension assertions cannot distinguish the requested region from a
+      // same-sized rectangle elsewhere on the page.
+      if (greenPercent < 99) {
+        throw new Error(
+          `Expected the crop to keep its requested region; ${greenPercent.toFixed(2)}% of ${colors.total.toString()} pixels are green and ${colors.red.toString()} are red`,
+        )
+      }
+      if (media.width !== 800 || media.height !== 400) {
+        throw new Error(
+          `Expected the cropped region at native scale; received ${media.width.toString()}x${media.height.toString()}`,
+        )
+      }
+    }
+    if (mode === 'bounded') {
+      // Exactly the bound: the recorder's crop/pad filter pins the canvas to
+      // the size it computed for Chrome, so a mismatch means the two disagree.
+      if (media.width !== BOUNDED_CAPTURE_MAX_WIDTH) {
+        throw new Error(
+          `Expected the capture bound to produce a ${BOUNDED_CAPTURE_MAX_WIDTH.toString()}px wide video; received ${media.width.toString()}x${media.height.toString()}`,
+        )
+      }
+      // Odd dimensions would make the encoder pad every frame.
+      if (media.width % 2 !== 0 || media.height % 2 !== 0) {
+        throw new Error(
+          `Expected even bounded dimensions; received ${media.width.toString()}x${media.height.toString()}`,
+        )
+      }
+      // Shrinking to fit preserves aspect ratio, so a landscape viewport must
+      // not come back square or taller than it is wide.
+      if (media.height >= media.width) {
+        throw new Error(
+          `Expected the bounded capture to keep its aspect ratio; received ${media.width.toString()}x${media.height.toString()}`,
+        )
+      }
     }
     if (mode === 'controls') {
       if (media.durationSeconds < 0.4 || media.durationSeconds > 1.3) {
