@@ -132,7 +132,7 @@ Top-level options:
 - `scope` (`'test' | 'spec'`, default `'test'`).
 - `attempts` (`'all' | 'retries'`, default `'all'`). WDIO `specFileRetries` worker retries count as retry attempts.
 - `retain` (`'failures' | 'retries' | 'all'`, default `'failures'`).
-- `windowChanges` (`'segment' | 'ignore'`, default `'segment'`).
+- `windowChanges` (`'segment' | 'ignore'`, default `'segment'`; `'ignore'` on the `ci` profile).
 - `filters.includeSpecs`, `filters.excludeSpecs`, `filters.includeTags`, and `filters.excludeTags`: case-insensitive patterns supporting `*` wildcards.
 
 `capture`:
@@ -140,25 +140,26 @@ Top-level options:
 - `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while the recorder establishes its canvas, then the original viewport mode is restored immediately after the screencast starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
 - `fps` (default `30`; `24` for the `parallel` and `ci` profiles): the encoded frame rate. Captured frames are placed on this frame-rate timeline, so recordings play back in real time (before `speed`) whether the page repaints faster or slower than `fps`.
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
-- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters.
-- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg.
-- `framePriming` (default `true`): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, priming retries within a 1.5-second budget. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
+- `maxWidth` and `maxHeight` (no default; `maxWidth: 1280` on the `ci` profile unless either bound is set or `crop` is used): cap the dimensions Chrome is asked to produce for each screencast frame. Chrome scales the frame to fit, preserving aspect ratio, before it leaves the browser, so a smaller frame is encoded, transferred, and decoded. This bounds the frame, not the page: layout and paint are unchanged and the viewport is not resized. A frame already inside the bound is untouched. Both must be even integers of at least 2. Encoding a real captured page at 720p rather than 1080p measured about 2.2 times the throughput with output about 47% smaller, under a two-CPU quota with four concurrent encoders; that is an encoder-only figure using a repeated still frame, not a whole-suite measurement. **Cannot be combined with `crop`** (see below).
+- `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters. `scale` resizes precisely after capture using a Lanczos filter, so prefer `maxWidth`/`maxHeight` when the goal is cost rather than an exact size.
+- `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg. A crop cannot be combined with `maxWidth` or `maxHeight`: Chrome applies a bound against the viewport of each frame, so a crop rectangle fixed when capture starts would select the wrong region as soon as the viewport changes — including the restore that `capture.viewport` performs. The combination is rejected before capture starts, and the `ci` profile's default bound is not applied to a cropped recording. Use `scale` to resize a cropped recording.
+- `framePriming` (default `true`; `false` on the `ci` profile): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, priming retries within a 1.5-second budget. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection. Before the first test, the service connects when a Chromium worker session starts and finds its page, then allows up to 20 seconds for a disposable paint request to confirm that the browser is ready to render. This separate render budget does not include connection or page lookup. Warm-up is best-effort, runs even with `framePriming: false`, and also runs for workers whose tests are filtered out or record only retries. Paint requests use a dedicated CDP session that is detached on completion or timeout, without taking Puppeteer's shared screenshot lock. A connection that fails at warm-up is retried, and reported, at the first recording.
 
 `processing`:
 
 - `format` (`'webm' | 'mp4'`, default `'webm'`).
 - `mp4Mode` (`'auto' | 'direct' | 'transcode'`, default `'auto'`).
-- `timing` (`'after-test' | 'after-worker'`, default `'after-test'`).
+- `timing` (`'after-test' | 'after-worker'`, default `'after-test'`; `'after-worker'` on the `ci` profile). The Allure integration requires `'after-test'`, so `profile: 'ci'` plus `integrations.allure` is rejected at startup unless `timing` is set back.
 - `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the processing timeout). Retained-video metadata inspection is always bounded to 5 seconds, or this timeout when it is shorter and positive.
-- `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`.
+- `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`. Transcoding defaults to `-preset veryfast -crf 23` in every profile. The `ci` profile adds `-crf 28` for smaller artifacts and `-threads 1` so concurrent transcodes do not each claim every core. `ffmpegArgs` is appended last, so anything set there wins.
 - `merge.enabled` (default `false`) and `deleteSegments` (default `true`).
 
 `concurrency`:
 
 - `maxRecordingsPerProcess` (default `0`, unlimited).
 - `maxRecordingsGlobal` (default `0`, disabled).
-- `startMode` (`'blocking' | 'fast-fail'`, default `'blocking'`).
+- `startMode` (`'blocking' | 'fast-fail'`, default `'blocking'`; `'fast-fail'` on the `ci` profile).
 - `startTimeoutMs` (default `2500`) and optional `lockDir`.
 - `maxPostProcessesPerProcess` (default `1`): positive integer limiting
   concurrent post-processing operations in each worker. With
@@ -426,7 +427,25 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
-- The `parallel` profile defaults to 24 fps. The `ci` profile additionally disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
+- Bound frame size with `capture.maxWidth` when the viewport is larger than the video needs to be. Encoding cost scales with pixels, so this is usually the largest single lever on a constrained runner.
+- The `parallel` profile defaults to 24 fps. The `ci` profile additionally bounds capture width at 1280 (except for cropped recordings), transcodes at CRF 28, disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
+
+### Measuring
+
+`npm run bench:encoder` measures encoder throughput on its own, with no browser
+or WDIO involved, and reports frames per second against a capture rate. A
+`realtime` figure below `1.0x` means the encoder cannot keep up with capture on
+that host, so every stop inherits a backlog. Pass `--frame` to use a real
+captured PNG, and `--size`, `--fps`, and `--encoders` to match the workload:
+
+```bash
+npm run bench:encoder -- --size=1920x1080 --frames=100 --fps=24
+```
+
+Recordings are not throttled by default: `concurrency.maxRecordingsPerProcess`
+and `maxRecordingsGlobal` are both unlimited, so WDIO `maxInstances: 4` means
+four browsers and four encoders competing for the same cores. Set one of them
+when workers outnumber the cores available.
 
 ## WDIO Protocol Compatibility
 
@@ -459,7 +478,7 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
 - `npm run test:e2e:both`: multipart and merged Mocha runs.
 - `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
-- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, Edge smoke, and retained-file metadata checks.
+- `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, Edge smoke, bounded capture width, decoded-pixel crop region, and retained-file metadata checks.
 - `npm run test:e2e:capture:metadata`: high-DPI, odd-size fractional scaling, H264 padding, and custom-filter dimensions compared with Manifest v1.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.

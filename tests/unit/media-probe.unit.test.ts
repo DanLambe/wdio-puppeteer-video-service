@@ -2,10 +2,15 @@ import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
-import { parseFfmpegProbeOutput, probeMediaFile } from '../utils/media-probe.js'
+import {
+  countFrameColors,
+  parseFfmpegProbeOutput,
+  probeMediaFile,
+} from '../utils/media-probe.js'
 
 class FakeMediaProbeProcess extends EventEmitter {
   stderr = new PassThrough()
+  stdout = new PassThrough()
   kill = vi.fn(() => true)
 }
 
@@ -105,5 +110,67 @@ describe('media probe', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('frame pixel probe', () => {
+  it('counts RGB pixels across chunks at the requested recording time', async () => {
+    const process = new FakeMediaProbeProcess()
+    const spawnProcess = vi.fn(
+      (_command: string, _args: string[]) => process as unknown as ChildProcess,
+    )
+    const result = countFrameColors('ffmpeg', 'fixture.webm', 4.5, {
+      spawnProcess,
+    })
+    process.stdout.write(Buffer.from([0, 255]))
+    process.stdout.write(Buffer.from([0, 255, 0, 0, 30, 30, 30]))
+    process.emit('close', 0)
+
+    await expect(result).resolves.toEqual({ total: 3, green: 1, red: 1 })
+    const args = spawnProcess.mock.calls[0]?.[1] ?? []
+    expect(args.slice(args.indexOf('-ss'), args.indexOf('-ss') + 2)).toEqual([
+      '-ss',
+      '4.500',
+    ])
+  })
+
+  it.each([{ bytes: [] }, { bytes: [0, 255] }])(
+    'rejects missing or incomplete RGB pixels: $bytes',
+    async ({ bytes }) => {
+      const process = new FakeMediaProbeProcess()
+      const result = countFrameColors('ffmpeg', 'fixture.webm', 0.5, {
+        spawnProcess: () => process as unknown as ChildProcess,
+      })
+      process.stdout.write(Buffer.from(bytes))
+      process.emit('close', 0)
+
+      await expect(result).rejects.toThrow(
+        'did not return a complete RGB frame',
+      )
+    },
+  )
+
+  it('reports a failed pixel decode even when partial pixels were returned', async () => {
+    const process = new FakeMediaProbeProcess()
+    const result = countFrameColors('ffmpeg', 'fixture.webm', 0.5, {
+      spawnProcess: () => process as unknown as ChildProcess,
+    })
+    process.stdout.write(Buffer.from([0, 255, 0]))
+    process.stderr.write('invalid input')
+    process.emit('close', 1)
+
+    await expect(result).rejects.toThrow(
+      'ffmpeg pixel decode exited 1: invalid input',
+    )
+  })
+
+  it('reports a pixel decoder startup failure', async () => {
+    const process = new FakeMediaProbeProcess()
+    const result = countFrameColors('missing-ffmpeg', 'fixture.webm', 0.5, {
+      spawnProcess: () => process as unknown as ChildProcess,
+    })
+    process.emit('error', new Error('ENOENT'))
+
+    await expect(result).rejects.toThrow('ENOENT')
   })
 })

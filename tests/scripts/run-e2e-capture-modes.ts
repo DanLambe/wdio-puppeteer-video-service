@@ -21,6 +21,8 @@ type CaptureMode =
   | 'unprimed'
   | 'sustained'
   | 'quiet'
+  | 'bounded'
+  | 'cropped-region'
 
 const requestedMode = process.argv[2] ?? 'all'
 const allModes: CaptureMode[] = [
@@ -37,6 +39,8 @@ const allModes: CaptureMode[] = [
   'unprimed',
   'sustained',
   'quiet',
+  'bounded',
+  'cropped-region',
 ]
 const modes = allModes.filter(
   (mode) =>

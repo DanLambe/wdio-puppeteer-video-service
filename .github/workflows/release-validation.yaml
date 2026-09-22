@@ -169,6 +169,10 @@ jobs:
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:low-fps
 
+      - name: Verify Bounded Capture And Crop Content
+        if: matrix.protocol == 'controls'
+        run: corepack npm run test:e2e:capture:bounded && corepack npm run test:e2e:capture:cropped-region
+
       - name: Verify Recording Without Frame Priming
         if: matrix.protocol == 'controls'
         run: corepack npm run test:e2e:capture:unprimed
@@ -224,6 +228,9 @@ jobs:
 
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
+
+      - name: Verify Bounded Capture And Crop Content
+        run: corepack npm run test:e2e:capture:bounded && corepack npm run test:e2e:capture:cropped-region
 
       - name: Collect Failure Diagnostics
         if: failure()

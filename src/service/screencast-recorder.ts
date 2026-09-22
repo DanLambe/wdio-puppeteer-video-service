@@ -38,9 +38,55 @@ export interface ScreencastRecorderOptions {
   readonly ffmpegPath: string
   readonly format: OutputFormat
   readonly fps: number
+  /** Bounds the dimensions Chrome is asked to produce for each frame. */
+  readonly maxWidth?: number
+  readonly maxHeight?: number
   readonly quality: number
   readonly scale: number
   readonly speed: number
+}
+
+/** The frame size Chrome is asked to deliver. */
+export interface CaptureCanvas {
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * Chrome's `maxWidth`/`maxHeight` shrink a frame to fit inside the box while
+ * preserving its aspect ratio, and never enlarge one. Mirror that here so the
+ * encoder's canvas matches what Chrome will actually send. Dimensions are
+ * rounded to even numbers because odd ones force the encoder to pad; the
+ * recorder's `crop`/`pad` filter absorbs any remaining pixel of disagreement.
+ *
+ * Chrome recomputes the bound against whatever the viewport is when it composites
+ * each frame, so the scale factor is not fixed for the recording. The FFmpeg
+ * filter chain is built once at spawn time, which is why `capture.crop` cannot be
+ * combined with a bound: a crop rectangle scaled for the start-time viewport
+ * selects the wrong region as soon as the viewport changes. Option validation
+ * rejects that pair rather than publishing a healthy recording of a different
+ * region.
+ */
+export const resolveCaptureCanvas = (
+  dimensions: Pick<PixelDimensions, 'width' | 'height'>,
+  maxWidth: number | undefined,
+  maxHeight: number | undefined,
+): CaptureCanvas => {
+  const ratio = Math.min(
+    1,
+    maxWidth === undefined || dimensions.width <= 0
+      ? 1
+      : maxWidth / dimensions.width,
+    maxHeight === undefined || dimensions.height <= 0
+      ? 1
+      : maxHeight / dimensions.height,
+  )
+  if (ratio >= 1 || Number.isNaN(ratio)) {
+    return { width: dimensions.width, height: dimensions.height }
+  }
+  const toEven = (value: number): number =>
+    Math.max(2, Math.round((value * ratio) / 2) * 2)
+  return { width: toEven(dimensions.width), height: toEven(dimensions.height) }
 }
 
 export interface FfmpegResult {
@@ -65,11 +111,24 @@ interface ScreencastFrameEvent {
 }
 
 interface ReceivedFrame {
-  readonly buffer: Buffer
+  /** Chrome's base64 payload, released once decoded. */
+  data: string | undefined
+  /** The decoded PNG, produced the first time the frame is written. */
+  encoded: Buffer | undefined
   /** Seconds after the first frame at which this frame is shown. */
   readonly elapsedSeconds: number
   readonly receivedAt: number
   readonly timestamp: number
+}
+
+// Chrome delivers frames faster than `fps` on a busy page, and only the frames
+// that land on a new grid position are ever written. Decoding on first write
+// keeps the base64 of a superseded frame from being turned into a buffer that
+// nothing consumes.
+const frameBytes = (frame: ReceivedFrame): Buffer => {
+  frame.encoded ??= Buffer.from(frame.data ?? '', 'base64')
+  frame.data = undefined
+  return frame.encoded
 }
 
 interface PixelDimensions {
@@ -258,7 +317,8 @@ export class ScreencastRecorder extends PassThrough {
     const receivedAt = this.monotonicNow()
     const first = this.first
     const frame: ReceivedFrame = {
-      buffer: Buffer.from(event.data, 'base64'),
+      data: event.data,
+      encoded: undefined,
       elapsedSeconds: first
         ? Math.max(
             // A timestamp that runs backwards would otherwise rewind the grid.
@@ -372,8 +432,9 @@ export class ScreencastRecorder extends PassThrough {
     if (!stdin || stdin.writableEnded || copies <= 0) {
       return
     }
+    const bytes = frameBytes(frame)
     for (let copy = 0; copy < copies; copy += 1) {
-      stdin.write(frame.buffer)
+      stdin.write(bytes)
     }
     this.emitted = position
     if (frame === this.latest) {
@@ -389,12 +450,17 @@ export const recordScreencast = async (
 ): Promise<ScreencastRecorder> => {
   const clock = dependencies.clock ?? systemClock
   const dimensions = await readNativePixelDimensions(page)
+  const canvas = resolveCaptureCanvas(
+    dimensions,
+    options.maxWidth,
+    options.maxHeight,
+  )
   const crop = options.crop
     ? toDevicePixelCrop(options.crop, dimensions)
     : undefined
   const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpeg)(
     options.ffmpegPath,
-    createFfmpegArguments(options, dimensions, crop),
+    createFfmpegArguments(options, canvas, crop),
   )
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
@@ -408,7 +474,13 @@ export const recordScreencast = async (
       dependencies.monotonicNow ?? (() => performance.now()),
       dependencies,
     )
-    await session.send('Page.startScreencast', { format: 'png' })
+    await session.send('Page.startScreencast', {
+      format: 'png',
+      ...(options.maxWidth === undefined ? {} : { maxWidth: options.maxWidth }),
+      ...(options.maxHeight === undefined
+        ? {}
+        : { maxHeight: options.maxHeight }),
+    })
     await recorder.waitForFirstFrame(clock)
     return recorder
   } catch (error) {
@@ -433,13 +505,16 @@ export const createFfmpegArguments = (
     `crop='min(${width},iw):min(${height},ih):0:0'`,
     `pad=${width}:${height}:0:0`,
   ]
-  if (options.speed) {
+  // `speed` and `scale` default to 1, which is truthy, so an unconfigured
+  // recording would otherwise pay for a `setpts` retime and a full Lanczos
+  // resample on every frame to produce the frame it already had.
+  if (options.speed !== undefined && options.speed !== 1) {
     filters.push(`setpts=${1 / options.speed}*PTS`)
   }
   if (crop) {
     filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`)
   }
-  if (options.scale) {
+  if (options.scale !== undefined && options.scale !== 1) {
     filters.push(`scale=iw*${options.scale}:-1:flags=lanczos`)
   }
   return [

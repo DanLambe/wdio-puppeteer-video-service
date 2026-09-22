@@ -48,14 +48,24 @@ export class ManifestJournalWriter {
     this.onError = options.onError
   }
 
+  private directoryReady: Promise<unknown> | undefined
+
   async append(event: ManifestJournalEvent): Promise<void> {
     const write = async (): Promise<void> => {
-      await fs.mkdir(path.dirname(this.journalPath), { recursive: true })
-      await fs.appendFile(
-        this.journalPath,
-        `${JSON.stringify(event)}\n`,
-        'utf8',
-      )
+      const line = `${JSON.stringify(event)}\n`
+      await this.ensureDirectory()
+      try {
+        await fs.appendFile(this.journalPath, line, 'utf8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error
+        }
+        // Creating the directory on every append was self-healing when
+        // something removed it mid-run. Keep that: forget the memo, remake it.
+        this.directoryReady = undefined
+        await this.ensureDirectory()
+        await fs.appendFile(this.journalPath, line, 'utf8')
+      }
     }
     const writeTask = this.writeTask.then(write, write)
     this.writeTask = writeTask
@@ -74,6 +84,21 @@ export class ManifestJournalWriter {
 
   async flush(): Promise<void> {
     await this.writeTask
+  }
+
+  // Two or three events are appended per test and the directory does not come
+  // and go between them, so create it once rather than on every append.
+  private async ensureDirectory(): Promise<void> {
+    this.directoryReady ??= fs.mkdir(path.dirname(this.journalPath), {
+      recursive: true,
+    })
+    try {
+      await this.directoryReady
+    } catch (error) {
+      // A failed creation must not be cached as success for later appends.
+      this.directoryReady = undefined
+      throw error
+    }
   }
 }
 

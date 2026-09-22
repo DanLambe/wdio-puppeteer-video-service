@@ -87,6 +87,11 @@ describe('MediaPipeline', () => {
           '-vf',
           'pad=ceil(iw/2)*2:ceil(ih/2)*2',
           '-preset',
+          'veryfast',
+          '-crf',
+          '23',
+          // Configured arguments come last and win.
+          '-preset',
           'slow',
           temporaryPath,
         ])

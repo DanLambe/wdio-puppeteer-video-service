@@ -82,6 +82,9 @@ jobs:
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
 
+      - name: Verify Bounded Capture And Crop Content
+        run: corepack npm run test:e2e:capture:bounded && corepack npm run test:e2e:capture:cropped-region
+
       - name: Verify Real-Time Animation Recording
         run: corepack npm run test:e2e:capture:animation
 

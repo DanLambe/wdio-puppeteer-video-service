@@ -352,6 +352,47 @@ describe('Puppeteer capture engine', () => {
     )
   })
 
+  it('terminates the encoder instead of draining it for a discarded recording', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness()
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    harness.recorder.write('partial-bytes')
+
+    const stopped = await harness.engine.stopCapture({ discard: true })
+
+    // Retention already decided nothing will read this file. A graceful stop
+    // would drain whatever is still queued, flush, and finish writing bytes
+    // that are deleted moments later. Encoding already done during the test is
+    // not reclaimed; this removes the tail.
+    expect(harness.recorder.abort).toHaveBeenCalledOnce()
+    expect(harness.recorder.stop).not.toHaveBeenCalled()
+    expect(stopped.segment).toBeUndefined()
+    expect(harness.session.hasCapture).toBe(false)
+    await expect(fs.access(outputPath)).rejects.toThrow()
+  })
+
+  it('still drains the encoder when the recording is kept', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness()
+    await expect(startCapture(harness, outputPath)).resolves.toEqual({
+      started: true,
+    })
+    harness.recorder.write('recorded-bytes')
+
+    const stopped = await harness.engine.stopCapture({ discard: false })
+
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    expect(harness.recorder.abort).not.toHaveBeenCalled()
+    expect(stopped.streamOk).toBe(true)
+    await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe(
+      'recorded-bytes',
+    )
+  })
+
   it('clears and unreferences stream timeouts after clean completion', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')

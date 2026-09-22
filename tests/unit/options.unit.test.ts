@@ -110,10 +110,77 @@ describe('service option resolution', () => {
     ).toEqual({ attach: 'retained', maxBytes: 42 })
   })
 
+  it('keeps the CI transcode at a smaller, lower quality CRF', () => {
+    // The fast preset is a near free speed win and applies everywhere. Dropping
+    // to CRF 28 costs measurable fidelity for about 2% more speed, so only the
+    // CI profile opts into it, and it is appended after the default so it wins.
+    const args =
+      resolveServiceConfiguration({ profile: 'ci' }).options.processing
+        .transcode.ffmpegArgs ?? []
+    expect(args).toContain('28')
+    expect(args.indexOf('-crf')).toBeGreaterThanOrEqual(0)
+    expect(args).toEqual([...CI_TRANSCODE_FFMPEG_ARGS])
+  })
+
+  it('rejects a capture bound combined with a crop', () => {
+    // Chrome applies the bound against the viewport of each frame, so a crop
+    // rectangle scaled at capture start selects the wrong region as soon as the
+    // viewport changes - including the restore `capture.viewport` performs.
+    // Publishing a healthy recording of a different region is worse than
+    // refusing the combination.
+    for (const bound of [{ maxWidth: 640 }, { maxHeight: 480 }]) {
+      expect(() =>
+        resolveServiceConfiguration({
+          capture: { crop: { x: 0, y: 0, width: 100, height: 100 }, ...bound },
+        }),
+      ).toThrow(/cannot be combined with/u)
+    }
+  })
+
+  it('does not let the CI profile add a bound behind a cropped recording', () => {
+    // The profile default must not create the rejected combination by itself.
+    const capture = resolveServiceConfiguration({
+      profile: 'ci',
+      capture: { crop: { x: 0, y: 0, width: 100, height: 100 } },
+    }).options.capture
+    expect(capture.maxWidth).toBeUndefined()
+    expect(capture.maxHeight).toBeUndefined()
+    expect(capture.crop).toEqual({ x: 0, y: 0, width: 100, height: 100 })
+  })
+
+  it('caps capture width on CI and leaves other profiles at native size', () => {
+    // Encoding cost scales with pixels, and CI runners are the least able to
+    // absorb it, so `ci` opts into a bound the other profiles do not.
+    expect(
+      resolveServiceConfiguration({ profile: 'ci' }).options.capture.maxWidth,
+    ).toBe(1280)
+    for (const profile of ['default', 'parallel'] as const) {
+      const capture = resolveServiceConfiguration({ profile }).options.capture
+      expect(capture.maxWidth).toBeUndefined()
+      expect(capture.maxHeight).toBeUndefined()
+    }
+  })
+
+  it('lets an explicit capture bound replace the CI default entirely', () => {
+    expect(
+      resolveServiceConfiguration({ profile: 'ci', capture: { maxWidth: 640 } })
+        .options.capture,
+    ).toMatchObject({ maxWidth: 640 })
+
+    // A height-only bound is a deliberate choice, so the profile must not
+    // quietly reimpose its width alongside it.
+    const heightOnly = resolveServiceConfiguration({
+      profile: 'ci',
+      capture: { maxHeight: 480 },
+    }).options.capture
+    expect(heightOnly.maxHeight).toBe(480)
+    expect(heightOnly.maxWidth).toBeUndefined()
+  })
+
   it('applies CI defaults, pinned logging, and explicit grouped overrides', () => {
     const defaults = resolveServiceConfiguration({ profile: 'ci' })
     expect(defaults.options).toMatchObject({
-      capture: { fps: 24, framePriming: false },
+      capture: { fps: 24, framePriming: false, maxWidth: 1280 },
       processing: {
         merge: { deleteSegments: true, enabled: false },
         timing: 'after-worker',

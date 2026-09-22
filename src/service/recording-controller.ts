@@ -211,7 +211,9 @@ export class RecordingController {
     await this.lifecycle.stop({
       hasWork: () => this.captureSession.hasCapture,
       stopCapture: async () => {
-        const stoppedCapture = await this.captureEngine.stopCapture()
+        const stoppedCapture = await this.captureEngine.stopCapture({
+          discard: options.keepArtifacts === false,
+        })
         activeSegment = stoppedCapture.segment
         streamOk = stoppedCapture.streamOk
       },

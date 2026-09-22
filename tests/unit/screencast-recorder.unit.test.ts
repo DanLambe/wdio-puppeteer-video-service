@@ -10,6 +10,7 @@ import {
 import {
   createFfmpegArguments,
   recordScreencast,
+  resolveCaptureCanvas,
   ScreencastRecorder,
   type ScreencastRecorderOptions,
 } from '../../src/service/screencast-recorder.js'
@@ -278,6 +279,21 @@ describe('screencast recorder FFmpeg arguments', () => {
       "crop='min(1280,iw):min(720,ih):0:0',pad=1280:720:0:0",
     )
   })
+
+  it('omits the speed and scale filters at their resolved neutral defaults', () => {
+    // `resolveOptions` always supplies `scale: 1` and `speed: 1`, so this is
+    // what an unconfigured recording actually passes. Both are truthy, and
+    // emitting them cost every default recording a Lanczos resample that
+    // produced the frame it already had.
+    const args = createFfmpegArguments(
+      { format: 'webm', fps: 30, quality: 30, scale: 1, speed: 1 },
+      { width: 1280, height: 720 },
+      undefined,
+    )
+    expect(args[args.indexOf('-vf') + 1]).toBe(
+      "crop='min(1280,iw):min(720,ih):0:0',pad=1280:720:0:0",
+    )
+  })
   it('encodes at the fastest realtime VP9 speed on every host', () => {
     const args = createFfmpegArguments(
       options,
@@ -288,6 +304,190 @@ describe('screencast recorder FFmpeg arguments', () => {
     expect(
       args.slice(args.indexOf('-deadline'), args.indexOf('-cpu-used') + 2),
     ).toEqual(['-deadline', 'realtime', '-cpu-used', '8'])
+  })
+})
+
+describe('screencast capture bounds', () => {
+  it('preserves the original dimensions when a ratio cannot be computed', () => {
+    expect(
+      resolveCaptureCanvas({ width: Number.NaN, height: 600 }, 480, undefined),
+    ).toEqual({ width: Number.NaN, height: 600 })
+  })
+
+  it('leaves a frame already inside the bound untouched', () => {
+    const native = { width: 1280, height: 720 }
+    expect(resolveCaptureCanvas(native, 1920, undefined)).toEqual({
+      width: 1280,
+      height: 720,
+    })
+    expect(resolveCaptureCanvas(native, undefined, undefined)).toEqual({
+      width: 1280,
+      height: 720,
+    })
+  })
+
+  it('shrinks to fit the bound while preserving aspect ratio', () => {
+    // Chrome scales a frame down to fit inside the box and never enlarges one.
+    expect(
+      resolveCaptureCanvas({ width: 1920, height: 1080 }, 1280, undefined),
+    ).toEqual({ width: 1280, height: 720 })
+    // The tighter of the two bounds wins.
+    expect(
+      resolveCaptureCanvas({ width: 1920, height: 1080 }, 1280, 360),
+    ).toEqual({ width: 640, height: 360 })
+  })
+
+  it('rounds the canvas to even pixels', () => {
+    // Odd dimensions force the encoder to pad every frame.
+    const canvas = resolveCaptureCanvas(
+      { width: 1000, height: 667 },
+      501,
+      undefined,
+    )
+    expect(canvas.width % 2).toBe(0)
+    expect(canvas.height % 2).toBe(0)
+  })
+
+  it('asks Chrome for the bound and encodes against the smaller canvas', async () => {
+    const ffmpeg = createFakeFfmpeg()
+    const session = createFakeSession((method, current) => {
+      if (method === 'Page.startScreencast') {
+        current.emitFrame('start', 100)
+      }
+    })
+    const spawnProcess = vi.fn((_command: string, _args: string[]) =>
+      ffmpeg.spawn(),
+    )
+    await recordScreencast(
+      createPage(session, { width: 1920, height: 1080 }),
+      { ...options, maxWidth: 1280 },
+      { clock: createClock(), monotonicNow: () => 0, spawnProcess },
+    )
+
+    // Chrome composites and encodes the smaller frame, so the saving lands in
+    // the browser and on the wire, not only in FFmpeg.
+    expect(session.send).toHaveBeenCalledWith('Page.startScreencast', {
+      format: 'png',
+      maxWidth: 1280,
+    })
+    const args = spawnProcess.mock.calls[0]?.[1] ?? []
+    expect(args[args.indexOf('-vf') + 1]).toBe(
+      "crop='min(1280,iw):min(720,ih):0:0',pad=1280:720:0:0",
+    )
+  })
+})
+
+describe('screencast recorder frame decoding', () => {
+  it('decodes a frame only when it is written', async () => {
+    const ffmpeg = createFakeFfmpeg()
+    const decode = vi.spyOn(Buffer, 'from')
+    try {
+      const run = await startRecorder({ fps: 1 }, 100, ffmpeg)
+      decode.mockClear()
+
+      // At 1 fps these all land on grid position 0, so every one of them is
+      // superseded before the timeline advances and none is ever written.
+      run.frame('skipped-a', 100.1)
+      run.frame('skipped-b', 100.2)
+      run.frame('skipped-c', 100.3)
+
+      expect(ffmpeg.writes).toEqual([])
+      const decodedBase64 = (
+        decode.mock.calls as unknown as unknown[][]
+      ).filter((call) => call[1] === 'base64')
+      expect(decodedBase64).toEqual([])
+    } finally {
+      decode.mockRestore()
+    }
+  })
+})
+
+// An encoder that accepts nothing until released. Every `write` call is
+// recorded, including the ones Node buffers rather than handing to `_write`.
+const createStalledFfmpeg = (): ReturnType<typeof createFakeFfmpeg> & {
+  release: () => void
+} => {
+  const writes: string[] = []
+  const pending: Array<() => void> = []
+  let flowing = false
+  const child = new EventEmitter() as ChildProcess & {
+    exitCode: number | null
+    signalCode: NodeJS.Signals | null
+  }
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
+  const stdin = new Writable({
+    write(_chunk: Buffer, _encoding, callback) {
+      if (flowing) {
+        callback()
+        return
+      }
+      pending.push(callback)
+    },
+  })
+  const originalWrite = stdin.write.bind(stdin)
+  stdin.write = ((chunk: Buffer) => {
+    writes.push(chunk.toString())
+    return originalWrite(chunk)
+  }) as typeof stdin.write
+  let closing = false
+  const close = (): void => {
+    if (closing) {
+      return
+    }
+    closing = true
+    stdout.end()
+    setImmediate(() => {
+      child.exitCode = 0
+      child.emit('close', 0)
+    })
+  }
+  stdin.on('finish', close)
+  const kill = vi.fn(() => {
+    close()
+    return true
+  })
+  Object.assign(child, {
+    exitCode: null,
+    kill,
+    signalCode: null,
+    stderr,
+    stdin,
+    stdout,
+    unref: vi.fn(),
+  })
+  return {
+    child,
+    kill,
+    release: () => {
+      flowing = true
+      while (pending.length > 0) {
+        pending.shift()?.()
+      }
+    },
+    spawn: (): ChildProcess => {
+      queueMicrotask(() => child.emit('spawn'))
+      return child
+    },
+    writes,
+  }
+}
+
+describe('screencast recorder timeline under a stalled encoder', () => {
+  it('keeps each frame on its own span when the encoder blocks and recovers', async () => {
+    // An earlier attempt at bounding the encoder queue stopped advancing the
+    // timeline when the queue grew, then backfilled the missed span with
+    // whichever frame arrived next. A two second state showed for a tenth of a
+    // second and its replacement appeared nearly two seconds early, while the
+    // frame total still looked right. Assert the spans, not the totals.
+    const ffmpeg = createStalledFfmpeg()
+    const run = await startRecorder({ fps: 30 }, 100, ffmpeg)
+
+    run.frame('second', 102)
+    ffmpeg.release()
+    run.frame('third', 103)
+
+    expect(countWrites(ffmpeg.writes)).toEqual({ start: 60, second: 30 })
   })
 })
 

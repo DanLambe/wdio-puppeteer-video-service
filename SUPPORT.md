@@ -10,12 +10,12 @@
 - Mocha, Jasmine, and Cucumber WDIO frameworks
 - Ubuntu and Windows GitHub-hosted runners
 
-The Puppeteer floor is intentional. Puppeteer Core 24.0.0 was checked during
-release validation, but its public and runtime screencast options do not support
-the `format`, `fps`, and `quality` controls used by this service. Puppeteer Core
-24.11.2 is the lowest version exercised by the package, protocol,
-capture-control, and media matrix. The floor is changed only after the same
-checks pass on a proposed version.
+The Puppeteer floor is intentional. The service records through its own CDP
+screencast and FFmpeg pipeline rather than Puppeteer's `page.screencast()`, but
+it still depends on Puppeteer Core for the CDP connection, page lookup, and
+viewport control that capture is built on. Puppeteer Core 24.11.2 is the lowest
+version exercised by the package, protocol, capture-control, and media matrix.
+The floor is changed only after the same checks pass on a proposed version.
 
 Finalized merge and transcode artifacts use atomic hard-link publication so an
 existing artifact is never overwritten. Keep `outputDir` on a filesystem that
