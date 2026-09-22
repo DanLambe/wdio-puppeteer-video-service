@@ -297,7 +297,7 @@ const resolveFfmpegPath = async (
   }
   const staticModule = (await import('ffmpeg-static')) as { default?: unknown }
   if (typeof staticModule.default !== 'string') {
-    throw new Error(
+    throw new TypeError(
       'Set --ffmpeg or FFMPEG_PATH: ffmpeg-static did not resolve a binary',
     )
   }

@@ -308,6 +308,12 @@ describe('screencast recorder FFmpeg arguments', () => {
 })
 
 describe('screencast capture bounds', () => {
+  it('preserves the original dimensions when a ratio cannot be computed', () => {
+    expect(
+      resolveCaptureCanvas({ width: Number.NaN, height: 600 }, 480, undefined),
+    ).toEqual({ width: Number.NaN, height: 600 })
+  })
+
   it('leaves a frame already inside the bound untouched', () => {
     const native = { width: 1280, height: 720 }
     expect(resolveCaptureCanvas(native, 1920, undefined)).toEqual({

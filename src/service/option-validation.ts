@@ -178,18 +178,14 @@ const validateCapture = (value: unknown): void => {
 // moment the viewport changes — including the restore that `capture.viewport`
 // performs immediately after capture begins. Reject the pair instead.
 const assertCropWithoutCaptureBounds = (capture: OptionRecord): void => {
-  if (capture.crop === undefined) {
+  if (
+    capture.crop === undefined ||
+    (capture.maxWidth === undefined && capture.maxHeight === undefined)
+  ) {
     return
   }
   const bound =
-    capture.maxWidth !== undefined
-      ? 'capture.maxWidth'
-      : capture.maxHeight !== undefined
-        ? 'capture.maxHeight'
-        : undefined
-  if (bound === undefined) {
-    return
-  }
+    capture.maxWidth !== undefined ? 'capture.maxWidth' : 'capture.maxHeight'
   throw new TypeError(
     `Configuration option "capture.crop" cannot be combined with "${bound}". A capture bound is applied by Chrome against the viewport of each frame, so a crop rectangle cannot stay on the requested region. Use "capture.scale" to resize a cropped recording, or remove the crop.`,
   )

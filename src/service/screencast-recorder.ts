@@ -81,7 +81,7 @@ export const resolveCaptureCanvas = (
       ? 1
       : maxHeight / dimensions.height,
   )
-  if (!(ratio < 1)) {
+  if (ratio >= 1 || Number.isNaN(ratio)) {
     return { width: dimensions.width, height: dimensions.height }
   }
   const toEven = (value: number): number =>
