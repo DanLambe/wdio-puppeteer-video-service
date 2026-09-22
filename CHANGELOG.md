@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.0.0-rc.5
+
+### Minor Changes
+
+- a52bda6: Add `capture.maxWidth` and `capture.maxHeight`, which cap the dimensions Chrome
+  is asked to produce for each screencast frame. Chrome scales the frame to fit,
+  preserving aspect ratio, before it leaves the browser, so a smaller frame is
+  encoded, transferred, and decoded. This bounds the frame, not the page: layout
+  and paint are unchanged, and the viewport is not resized. A frame already
+  inside the bound is untouched.
+
+  The `ci` profile defaults `capture.maxWidth` to `1280` unless a bound is
+  configured. Encoding a real captured page at 720p rather than 1080p measured
+  about 2.2 times the throughput with output about 47% smaller, under a
+  two-CPU quota with four concurrent encoders. That figure is encoder-only and
+  uses a repeated still frame, so it is not a claim about animated pages or about
+  whole-suite time. Set `capture.maxWidth` or `capture.maxHeight` explicitly to
+  choose your own bound.
+
+  `capture.crop` cannot be combined with a bound, and is rejected before capture
+  starts. Chrome applies the bound against the viewport of each frame, so a crop
+  rectangle fixed when capture starts selects the wrong region as soon as the
+  viewport changes — including the restore that `capture.viewport` performs. The
+  `ci` profile's default bound is not applied to a cropped recording. Use
+  `capture.scale` to resize a cropped recording.
+
+### Patch Changes
+
+- a52bda6: Create the worker manifest journal's directory once per run instead of on every
+  append. Two or three events are appended per test and the directory does not
+  come and go between them. A journal write that still finds the directory
+  missing recreates it and retries, so cleanup elsewhere in a run cannot silently
+  lose later events.
+- a52bda6: Decode screencast frames only when they are written to the encoder. Chrome
+  delivers frames faster than `capture.fps` on a busy page, and a frame
+  superseded before the timeline advanced was still being turned into a buffer
+  that nothing consumed.
+- a52bda6: Apply a fast H.264 preset to MP4 transcoding in every profile. Without an
+  explicit preset libx264 falls back to `preset medium`, the most expensive
+  single step in the pipeline. Every profile now defaults to
+  `-preset veryfast -crf 23`, and `processing.transcode.ffmpegArgs` still wins
+  because configured arguments are appended last.
+
+  On a static UI clip, `veryfast` at CRF 23 took 1.43 s rather than 1.98 s for
+  SSIM 0.9855 against 0.9889 — most of the saving, for a small fidelity cost.
+  Dropping to CRF 28 as well bought only about 2% more time while SSIM fell to
+  0.9774, so the default keeps CRF 23. The `ci` profile continues to use CRF 28
+  for smaller artifacts, and keeps `-threads 1` so concurrent transcodes do not
+  each claim every core.
+
+- a52bda6: Stop draining the encoder for a recording that retention is about to delete.
+  With the default `recording.retain: 'failures'`, a passing test's recording was
+  stopped gracefully, so the encoder drained its remaining queue, flushed, and
+  finished writing a file that was deleted moments later. The encoder is now
+  terminated instead and the partial file removed.
+
+  Frames are encoded as they are captured, so this does not avoid the encoding
+  already done during the test. It removes the work at the end, which is largest
+  exactly where it hurts most: on a host whose encoder has fallen behind, that
+  drain is bounded only by the five second stop deadline.
+
+  The manifest is unchanged: such an entry was already recorded as `discarded`
+  with no segments and no post-processing.
+
+- a52bda6: Stop spending encoder time on capture filters that change nothing. `capture.scale` and
+  `capture.speed` both resolve to `1` when they are not configured, and `1` is truthy, so every
+  default recording built a filter chain containing `setpts=1*PTS` and
+  `scale=iw*1:-1:flags=lanczos` and paid for a full Lanczos resample on every frame to produce the
+  frame it already had. Both filters are now emitted only when they would actually change the output.
+
+  Recorded video decodes to pixel-identical frames, verified with FFmpeg per-frame checksums, and a
+  configured `scale` or `speed` is unaffected. On a 1080p frame at 24 fps, encoding 100 frames went
+  from 2724 ms to 2589 ms (best of three).
+
 ## 1.0.0-rc.4
 
 ### Patch Changes
