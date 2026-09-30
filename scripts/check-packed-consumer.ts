@@ -95,7 +95,7 @@ const runChecked = (command: string, args: string[], cwd: string): string => {
   })
   if (result.status !== 0 || result.error) {
     throw new Error(
-      `Command failed: ${command} ${args.join(' ')}\n${result.stderr}`,
+      `Command failed: ${command} ${args.join(' ')}\n${result.stdout}${result.stderr}`,
       { cause: result.error },
     )
   }
@@ -130,6 +130,15 @@ export const checkPackedConsumer = async (): Promise<void> => {
       repositoryRoot,
     )
     const tarballPath = path.join(tempDir, parsePackResult(packOutput))
+    runChecked(
+      process.execPath,
+      [
+        path.join(repositoryRoot, 'node_modules', 'publint', 'src', 'cli.js'),
+        tarballPath,
+        '--strict',
+      ],
+      repositoryRoot,
+    )
     const attwEntryPoint = path.join(
       repositoryRoot,
       'node_modules',

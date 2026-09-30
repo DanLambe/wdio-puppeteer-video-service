@@ -10,6 +10,8 @@ import {
 } from './post-process.js'
 
 export interface MediaPipelineRuntime {
+  /** How the detected FFmpeg keeps frame timestamps when transcoding. */
+  readonly timestampPassthroughArgs: readonly string[]
   run(args: string[], operation: string): Promise<boolean>
   withPostProcessSlot<T>(
     operation: string,
@@ -65,6 +67,7 @@ export class MediaPipeline {
                 options.ffmpegArgs === undefined
                   ? undefined
                   : [...options.ffmpegArgs],
+                this.runtime.timestampPassthroughArgs,
               ),
               'transcode',
             ),

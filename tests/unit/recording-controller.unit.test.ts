@@ -1,22 +1,28 @@
-import type { WriteStream } from 'node:fs'
+import { createWriteStream, type WriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
+import { finished } from 'node:stream/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
-import { nodeFileSystem } from '../../src/service/boundaries.js'
+import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type { ActiveSegment } from '../../src/service/constants.js'
 import type { ServiceLogger } from '../../src/service/logging.js'
 import type { MediaPipeline } from '../../src/service/media-pipeline.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
+import { PuppeteerCaptureEngine } from '../../src/service/puppeteer-capture-engine.js'
 import {
   RecordingController,
   type RecordingControllerOptions,
 } from '../../src/service/recording-controller.js'
 import { RecordingMediaCoordinator } from '../../src/service/recording-media-coordinator.js'
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
-import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
+import {
+  type RecordingAllurePort,
+  WorkerRecordingCoordinator,
+} from '../../src/service/worker-recording-coordinator.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 
@@ -66,6 +72,10 @@ interface ControllerHarness {
 
 const createHarness = (
   serviceOptions: WdioPuppeteerVideoServiceOptions = {},
+  createCaptureEngine?: (
+    session: CaptureSession,
+    log: ServiceLogger,
+  ) => RecordingControllerOptions['captureEngine'],
 ): ControllerHarness => {
   const resolved = resolveServiceConfiguration(serviceOptions, 'linux')
   const session = new CaptureSession()
@@ -81,18 +91,19 @@ const createHarness = (
     shouldTranscode,
   }
   const startCapture = vi.fn(async () => ({ started: false as const }))
-  const captureEngine: RecordingControllerOptions['captureEngine'] = {
-    afterWindowCommand: vi.fn(async () => {}),
-    beforeWindowCommand: vi.fn(async () => {}),
-    resetRecording: vi.fn(async () => {
-      session.resetRecording()
-    }),
-    startCapture,
-    stopCapture: vi.fn(async () => {
-      const { segment } = session.detachCapture()
-      return { segment, streamOk: true }
-    }),
-  }
+  const captureEngine: RecordingControllerOptions['captureEngine'] =
+    createCaptureEngine?.(session, log) ?? {
+      afterWindowCommand: vi.fn(async () => {}),
+      beforeWindowCommand: vi.fn(async () => {}),
+      resetRecording: vi.fn(async () => {
+        session.resetRecording()
+      }),
+      startCapture,
+      stopCapture: vi.fn(async () => {
+        const { segment } = session.detachCapture()
+        return { segment, streamOk: true }
+      }),
+    }
   let slotOwned = false
   const acquireSlot = vi.fn(async () => {
     slotOwned = true
@@ -191,6 +202,112 @@ const attachTranscodedSegment = async (
     },
     windowHandle: undefined,
   })
+}
+
+const createRealCaptureEngine =
+  (serviceOptions: WdioPuppeteerVideoServiceOptions) =>
+  (session: CaptureSession, log: ServiceLogger): PuppeteerCaptureEngine =>
+    new PuppeteerCaptureEngine({
+      capture: resolveServiceConfiguration(serviceOptions, 'linux').options
+        .capture,
+      clock: systemClock,
+      connectPuppeteer: async () => {
+        throw new Error('Capture is attached directly')
+      },
+      fileSystem: nodeFileSystem,
+      getSessionToken: () => 'session',
+      log,
+      onConnectionFailure: () => {},
+      onProtocolChanged: () => {},
+      session,
+      startScreencast: async () => {
+        throw new Error('Capture is attached directly')
+      },
+      uuid: () => 'uuid',
+    })
+
+type ControlledRecorder = PassThrough & {
+  abort: ReturnType<typeof vi.fn<() => Promise<void>>>
+  stop: ReturnType<typeof vi.fn<() => Promise<void>>>
+}
+
+// A recorder streaming into a real file, as the engine attaches one, whose
+// capture has already failed for `incompleteReason` when that is set.
+const attachControlledCapture = (
+  session: CaptureSession,
+  recordingPath: string,
+  incompleteReason: string | undefined,
+): ControlledRecorder => {
+  const recorder = new PassThrough() as ControlledRecorder
+  Object.assign(recorder, {
+    abort: vi.fn(async () => {
+      recorder.destroy()
+    }),
+    ffmpegResult: { code: 0, diagnostic: '', signal: null },
+    frameCount: 5,
+    incompleteReason,
+    queueStats: {
+      highWaterBlocks: 0,
+      highWaterBytes: 0,
+      highWaterLagSeconds: 0,
+      pendingBlocks: 0,
+      pendingBytes: 0,
+    },
+    stop: vi.fn(async () => {
+      recorder.end()
+    }),
+  })
+  const writeStream = createWriteStream(recordingPath, { flags: 'r+' })
+  recorder.pipe(writeStream)
+  session.attachCapture({
+    recorder: recorder as unknown as ScreencastRecorder,
+    segment: {
+      ...createActiveSegment(recordingPath),
+      writeStream,
+      writeStreamDone: finished(writeStream),
+    },
+    windowHandle: undefined,
+  })
+  return recorder
+}
+
+const createEntityCoordinator = (
+  harness: ControllerHarness,
+  serviceOptions: WdioPuppeteerVideoServiceOptions,
+  manifest: {
+    completeCurrent: ReturnType<typeof vi.fn<() => Promise<string>>>
+  },
+  attachRetainedVideos: RecordingAllurePort['attachRetainedVideos'],
+): WorkerRecordingCoordinator => {
+  const coordinator = new WorkerRecordingCoordinator({
+    actions: {
+      finalizeMedia: (passed, keep) =>
+        harness.controller.finalizeMedia(passed, keep),
+      getAvailability: () => ({ available: true }),
+      getRecordedPaths: () => harness.session.recordedPaths,
+      isRecordingActive: () => harness.session.isRecordingActive,
+      resetRecording: () => harness.controller.reset(),
+      runSerialized: (task) => harness.controller.runSerialized(task),
+      startRecording: (metadata, retry) =>
+        harness.controller.startForMetadata(metadata, retry),
+    },
+    allure: { attachRetainedVideos },
+    getLogLevel: () => 'warn',
+    log: vi.fn(),
+    options: resolveServiceConfiguration(serviceOptions).options,
+  })
+  coordinator.configureSession({
+    framework: 'mocha',
+    specFileRetryAttempt: 0,
+    manifest: {
+      currentEntryId: 'entry',
+      beginEntity: async () => 'entry',
+      completeCurrent: manifest.completeCurrent,
+      recordResult: async () => {},
+      setCurrentAttempt: () => {},
+    },
+  })
+  return coordinator
 }
 
 const withTempDir = async (
@@ -761,14 +878,19 @@ describe('RecordingController', () => {
     expect(harness.releaseSlot).toHaveBeenCalledOnce()
   })
 
+  const overload =
+    'The encoder fell behind the screencast (1024 frames waiting for the encoder reached the limit of 1024); capture stopped after 40.0s to bound memory.'
+  const earlyExit =
+    'FFmpeg exited with code 0 before the recording was stopped.'
+
   it.each([
-    { failurePolicy: 'warn', keepArtifacts: true },
-    { failurePolicy: 'error', keepArtifacts: true },
-    { failurePolicy: 'warn', keepArtifacts: false },
-    { failurePolicy: 'error', keepArtifacts: false },
+    { failurePolicy: 'warn', reason: undefined },
+    { failurePolicy: 'error', reason: undefined },
+    { failurePolicy: 'warn', reason: overload },
+    { failurePolicy: 'error', reason: overload },
   ] as const)(
-    'records an incomplete capture as failed with $failurePolicy and retention=$keepArtifacts',
-    async ({ failurePolicy, keepArtifacts }) => {
+    'records an unclean retained stream as failed with $failurePolicy and reason=$reason',
+    async ({ failurePolicy, reason }) => {
       await withTempDir(async (tempDir) => {
         const options = { failurePolicy, outputDir: tempDir }
         const harness = createHarness(options)
@@ -781,79 +903,158 @@ describe('RecordingController', () => {
           windowHandle: undefined,
         })
         harness.setSlotOwned(true)
+        // A stream can be unclean without a recorder reason, for example
+        // after a write error or a stop timeout.
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
-          async () => ({ ...harness.session.detachCapture(), streamOk: false }),
+          async () => ({
+            ...harness.session.detachCapture(),
+            ...(reason ? { incompleteReason: reason } : {}),
+            streamOk: false,
+          }),
         )
+        const failure = `Recording stream did not finish cleanly for: ${recordingPath}${reason ? ` (${reason})` : ''}`
         const completeCurrent = vi.fn(async () => 'entry')
         const attachRetainedVideos = vi.fn(async () => ({ attachedPaths: [] }))
-        const coordinator = new WorkerRecordingCoordinator({
-          actions: {
-            finalizeMedia: (passed, keep) =>
-              harness.controller.finalizeMedia(passed, keep),
-            getAvailability: () => ({ available: true }),
-            getRecordedPaths: () => harness.session.recordedPaths,
-            isRecordingActive: () => harness.session.isRecordingActive,
-            resetRecording: () => harness.controller.reset(),
-            runSerialized: (task) => harness.controller.runSerialized(task),
-            startRecording: (metadata, retry) =>
-              harness.controller.startForMetadata(metadata, retry),
-          },
-          allure: { attachRetainedVideos },
-          getLogLevel: () => 'warn',
-          log: vi.fn(),
-          options: resolveServiceConfiguration(options).options,
-        })
-        coordinator.configureSession({
-          framework: 'mocha',
-          specFileRetryAttempt: 0,
-          manifest: {
-            currentEntryId: 'entry',
-            beginEntity: async () => 'entry',
-            completeCurrent,
-            recordResult: async () => {},
-            setCurrentAttempt: () => {},
-          },
-        })
+        const coordinator = createEntityCoordinator(
+          harness,
+          options,
+          { completeCurrent },
+          attachRetainedVideos,
+        )
+
         const outcome = coordinator.endEntity({
-          manifestResult: keepArtifacts ? 'failed' : 'passed',
-          passed: !keepArtifacts,
+          manifestResult: 'failed',
+          passed: false,
         })
         if (failurePolicy === 'error') {
-          await expect(outcome).rejects.toThrow(
-            `Recording stream did not finish cleanly for: ${recordingPath}`,
-          )
+          await expect(outcome).rejects.toThrow(failure)
         } else {
           await expect(outcome).resolves.toBeUndefined()
         }
-        const paths = keepArtifacts ? [recordingPath] : []
         expect(completeCurrent).toHaveBeenCalledWith({
           decision: 'failed',
-          paths,
+          paths: [recordingPath],
           processingOperation: 'capture',
           processingOutcome: 'failed',
           reason: 'capture-incomplete',
-          result: keepArtifacts ? 'failed' : 'passed',
+          result: 'failed',
         })
         // The partial file is still what a failing test's report should show.
-        expect(attachRetainedVideos).toHaveBeenCalledWith(paths, !keepArtifacts)
-        // One warning when the segment stopped; no error-level duplicate.
+        expect(attachRetainedVideos).toHaveBeenCalledWith(
+          [recordingPath],
+          false,
+        )
         expect(harness.logs.filter((entry) => entry.level !== 'debug')).toEqual(
           [
             expect.objectContaining({
               level: 'warn',
-              message: `[WdioPuppeteerVideoService] Recording stream did not finish cleanly for: ${recordingPath}`,
+              message: `[WdioPuppeteerVideoService] ${failure}`,
             }),
             ...(failurePolicy === 'error'
               ? [expect.objectContaining({ level: 'error' })]
               : []),
           ],
         )
+        expect(await fs.readFile(recordingPath, 'utf8')).toBe(
+          'recoverable-partial-media',
+        )
+      })
+    },
+  )
+
+  it.each(
+    (['warn', 'error'] as const).flatMap((failurePolicy) =>
+      [true, false].flatMap((keepArtifacts) =>
+        [
+          { cause: 'overload', reason: overload },
+          { cause: 'early encoder exit', reason: earlyExit },
+          { cause: 'nothing', reason: undefined },
+        ].map((row) => ({ ...row, failurePolicy, keepArtifacts })),
+      ),
+    ),
+  )(
+    'reports a capture failed by $cause through the real engine with $failurePolicy and retention=$keepArtifacts',
+    async ({ failurePolicy, keepArtifacts, reason }) => {
+      await withTempDir(async (tempDir) => {
+        const options = { failurePolicy, outputDir: tempDir }
+        const harness = createHarness(options, createRealCaptureEngine(options))
+        const resetRecording = vi.spyOn(harness.captureEngine, 'resetRecording')
+        const recordingPath = path.join(tempDir, 'partial.webm')
+        await fs.writeFile(recordingPath, 'recoverable-partial-media')
+        harness.session.beginRecording('partial')
+        const recorder = attachControlledCapture(
+          harness.session,
+          recordingPath,
+          reason,
+        )
+        harness.setSlotOwned(true)
+        const completeCurrent = vi.fn(async () => 'entry')
+        const attachRetainedVideos = vi.fn(async () => ({ attachedPaths: [] }))
+        const coordinator = createEntityCoordinator(
+          harness,
+          options,
+          { completeCurrent },
+          attachRetainedVideos,
+        )
+        const failure = keepArtifacts
+          ? `Recording stream did not finish cleanly for: ${recordingPath} (${reason})`
+          : `Discarded recording was incomplete (${reason})`
+
+        // Retention keeps a failing test's video and discards a passing one's.
+        const outcome = coordinator.endEntity({
+          manifestResult: keepArtifacts ? 'failed' : 'passed',
+          passed: !keepArtifacts,
+        })
+        if (reason && failurePolicy === 'error') {
+          await expect(outcome).rejects.toThrow(failure)
+        } else {
+          await expect(outcome).resolves.toBeUndefined()
+        }
+
+        // Kept media drains through a graceful stop; discarded media is
+        // aborted without one, whether or not its capture had failed.
+        expect(recorder.stop).toHaveBeenCalledTimes(keepArtifacts ? 1 : 0)
+        expect(recorder.abort).toHaveBeenCalledTimes(keepArtifacts ? 0 : 1)
+        const paths = keepArtifacts ? [recordingPath] : []
+        if (reason) {
+          expect(completeCurrent).toHaveBeenCalledWith({
+            decision: 'failed',
+            paths,
+            processingOperation: 'capture',
+            processingOutcome: 'failed',
+            reason: 'capture-incomplete',
+            result: keepArtifacts ? 'failed' : 'passed',
+          })
+        } else {
+          expect(completeCurrent).toHaveBeenCalledWith(
+            expect.objectContaining({
+              decision: keepArtifacts ? 'recorded' : 'discarded',
+              paths,
+            }),
+          )
+        }
+        expect(attachRetainedVideos).toHaveBeenCalledWith(paths, !keepArtifacts)
+        // One warning for a failed capture, naming its cause; none otherwise.
+        expect(harness.logs.filter((entry) => entry.level !== 'debug')).toEqual(
+          reason
+            ? [
+                expect.objectContaining({
+                  level: 'warn',
+                  message: `[WdioPuppeteerVideoService] ${failure}`,
+                }),
+                ...(failurePolicy === 'error'
+                  ? [expect.objectContaining({ level: 'error' })]
+                  : []),
+              ]
+            : [],
+        )
+        // The slot is free before the entry completes, and the policy error
+        // follows cleanup.
         expect(harness.releaseSlot.mock.invocationCallOrder[0]).toBeLessThan(
           completeCurrent.mock.invocationCallOrder[0] as number,
         )
         expect(completeCurrent.mock.invocationCallOrder[0]).toBeLessThan(
-          vi.mocked(harness.captureEngine.resetRecording).mock
-            .invocationCallOrder[0] as number,
+          resetRecording.mock.invocationCallOrder[0] as number,
         )
         expect(harness.session.isRecordingActive).toBe(false)
         expect(harness.media.pendingTaskCount).toBe(0)

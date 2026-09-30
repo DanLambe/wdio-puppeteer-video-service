@@ -18,6 +18,7 @@ type FrameworkMode =
   | 'cucumber-retry-all'
   | 'cucumber-retry-retries'
   | 'cucumber-duplicate-names'
+  | 'cucumber-scenario-level'
 
 const CUCUMBER_DUPLICATE_TITLES = [
   'cucumber style should record each same-named scenario',
@@ -32,7 +33,7 @@ const requestedMode = process.argv[2] || 'both'
 
 const resolveFrameworkOrder = (mode: string): FrameworkMode[] => {
   if (mode === 'both') {
-    return ['jasmine', 'cucumber']
+    return ['jasmine', 'cucumber', 'cucumber-scenario-level']
   }
   if (mode === 'cucumber-retry') {
     return ['cucumber-retry-all', 'cucumber-retry-retries']
@@ -42,7 +43,8 @@ const resolveFrameworkOrder = (mode: string): FrameworkMode[] => {
     mode === 'cucumber' ||
     mode === 'cucumber-retry-all' ||
     mode === 'cucumber-retry-retries' ||
-    mode === 'cucumber-duplicate-names'
+    mode === 'cucumber-duplicate-names' ||
+    mode === 'cucumber-scenario-level'
   ) {
     return [mode]
   }
@@ -171,7 +173,7 @@ const frameworkOrder: FrameworkMode[] = resolveFrameworkOrder(requestedMode)
 
 if (frameworkOrder.length === 0) {
   console.error(
-    `[e2e:frameworks] Invalid mode "${requestedMode}". Use jasmine, cucumber, cucumber-retry, cucumber-retry-all, cucumber-retry-retries, cucumber-duplicate-names, or both.`,
+    `[e2e:frameworks] Invalid mode "${requestedMode}". Use jasmine, cucumber, cucumber-retry, cucumber-retry-all, cucumber-retry-retries, cucumber-duplicate-names, cucumber-scenario-level, or both.`,
   )
   process.exit(1)
 }
@@ -183,6 +185,7 @@ const frameworkConfigMap: Record<
     resultsDirName: string
     retryAttempts?: 'all' | 'retries'
     duplicateNames?: boolean
+    scenarioLevel?: boolean
   }
 > = {
   jasmine: {
@@ -208,13 +211,18 @@ const frameworkConfigMap: Record<
     resultsDirName: 'cucumber-duplicate-names',
     duplicateNames: true,
   },
+  'cucumber-scenario-level': {
+    configPath: 'tests/wdio.cucumber.conf.ts',
+    resultsDirName: 'cucumber-scenario-level',
+    scenarioLevel: true,
+  },
 }
 
 const resolveExpectedTitle = (framework: FrameworkMode): string => {
   if (framework === 'jasmine') {
     return 'jasmine style should keep test name in video filename'
   }
-  if (framework === 'cucumber') {
+  if (framework === 'cucumber' || framework === 'cucumber-scenario-level') {
     return 'cucumber style should keep scenario name in video filename'
   }
   return CUCUMBER_RETRY_TITLE
@@ -255,6 +263,7 @@ const runWdioFramework = async (
         ? { WDIO_CUCUMBER_RETRY_MODE: target.retryAttempts }
         : {}),
       ...(target.duplicateNames ? { WDIO_CUCUMBER_DUPLICATE_NAMES: '1' } : {}),
+      ...(target.scenarioLevel ? { WDIO_CUCUMBER_SCENARIO_LEVEL: '1' } : {}),
     }),
   })
 

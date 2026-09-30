@@ -2,7 +2,7 @@
 
 ## Supported 1.0 environment
 
-- Node.js 24
+- Node.js 24 is the certified runtime. Newer versions are permitted by `engines.node` and supported on a best-effort basis; they are not part of the release certification matrix.
 - WebdriverIO `>=9.29.1 <10`
 - Puppeteer Core `>=24.11.2 <25`
 - Chrome through WebDriver BiDi or classic WebDriver with a usable CDP endpoint
@@ -44,3 +44,48 @@ issue.
 
 Security reports should use GitHub's private security-advisory flow rather than
 a public issue.
+
+## Advisories reported through peers
+
+The package has no runtime dependencies, but `npm audit` lists it as affected
+through its `puppeteer-core` peer. Every supported WDIO 9 and Puppeteer Core 24
+release depends on `@puppeteer/browsers` 2, which unpacks ZIP archives with
+`extract-zip` 2.0.1.
+[GHSA-jmr9-qjv8-65gv](https://github.com/advisories/GHSA-jmr9-qjv8-65gv) and
+[GHSA-7pqw-9j4j-h8q3](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3)
+describe how a crafted archive can write files outside its extraction
+directory. No patched `extract-zip` exists. Do not clear the report with
+`npm audit fix --force`: it downgrades WDIO to 8, which this service does not
+support.
+
+The service never downloads or unpacks archives; it attaches to the browser
+WDIO has already started. `extract-zip` runs when WDIO prepares a local Chrome
+session and has to fetch Chrome for Testing or ChromeDriver:
+
+- Chrome is fetched when `browserVersion` is set, or when
+  `goog:chromeOptions.binary` is unset and no installed Chrome is found.
+- ChromeDriver is fetched unless `wdio:chromedriverOptions.binary` or
+  `CHROMEDRIVER_PATH` names a driver.
+- Either one is skipped when a matching build is already in WDIO's cache
+  directory.
+- Sessions on an existing WebDriver server, configured with `hostname`,
+  `port`, or cloud `user` and `key`, skip this setup. Edge's driver download
+  uses a different extractor.
+
+Archives come from Google's Chrome for Testing storage over HTTPS, or from
+`CHROMEDRIVER_CDNURL` when it is set. Anyone who could replace such an archive
+could also replace the browser or driver that WDIO then runs, so the advisories
+do not widen what you already trust in the download source. The cache is
+different: WDIO unpacks an archive it finds there without downloading it, and
+runs a driver it finds there.
+
+To reduce exposure:
+
+- Install Chrome and ChromeDriver from a trusted source, such as your runner
+  image, and set `goog:chromeOptions.binary` and
+  `wdio:chromedriverOptions.binary` (or `CHROMEDRIVER_PATH`). Nothing is then
+  downloaded or unpacked.
+- Set `CHROMEDRIVER_CDNURL` only to a mirror you trust.
+- Keep the cache directory writable only by the test user. WDIO uses
+  `wdio:chromedriverOptions.cacheDir`, the `cacheDir` option or
+  `WEBDRIVER_CACHE_DIR`, and otherwise the system temporary directory.

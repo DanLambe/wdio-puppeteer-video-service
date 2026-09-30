@@ -19,6 +19,7 @@ import {
   type MediaDimensions,
   parseMediaDimensions,
 } from './media-metadata.js'
+import { resolveTimestampPassthroughArgs } from './post-process.js'
 import type { PostProcessSlotScheduler } from './recording-slots.js'
 
 export type FfmpegRunner = (
@@ -71,6 +72,7 @@ export class FfmpegRuntime {
   private warnedAboutUnavailableMetadata = false
   private forceMp4Transcode = false
   private acceptingWork = true
+  private version: string | undefined
 
   constructor(dependencies: FfmpegRuntimeDependencies) {
     this.options = dependencies.options
@@ -96,6 +98,11 @@ export class FfmpegRuntime {
     this.initializationTask = undefined
     this.initializationCompleted = false
     this.warnedAboutUnavailableMetadata = false
+    this.version = undefined
+  }
+
+  get timestampPassthroughArgs(): readonly string[] {
+    return resolveTimestampPassthroughArgs(this.version)
   }
 
   async ensureReady(): Promise<boolean> {
@@ -316,6 +323,7 @@ export class FfmpegRuntime {
       `[WdioPuppeteerVideoService] Using ffmpeg binary: ${executablePath}`,
     )
     const version = await this.readVersion(executablePath)
+    this.version = version
     if (version) {
       await this.onVersion?.(version)
     }

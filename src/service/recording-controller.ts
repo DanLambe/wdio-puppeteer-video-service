@@ -198,6 +198,7 @@ export class RecordingController {
   ): Promise<void> {
     let activeSegment: ActiveSegment | undefined
     let streamOk = false
+    let incompleteReason: string | undefined
     let recordingSlotReleased = false
     const releaseRecordingSlot = async (): Promise<void> => {
       if (recordingSlotReleased) {
@@ -216,16 +217,24 @@ export class RecordingController {
         })
         activeSegment = stoppedCapture.segment
         streamOk = stoppedCapture.streamOk
+        incompleteReason = stoppedCapture.incompleteReason
       },
       processCapture: async () => {
         try {
           if (!activeSegment) {
+            // Retention already deleted the media, but capture had failed
+            // before then: the entry and failure policy must still say so.
+            if (incompleteReason) {
+              this.reportCaptureFailure(
+                `Discarded recording was incomplete (${incompleteReason})`,
+              )
+            }
             return
           }
           if (!streamOk) {
-            const message = `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}`
-            this.captureFailure ??= message
-            this.log('warn', `[WdioPuppeteerVideoService] ${message}`)
+            this.reportCaptureFailure(
+              `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}${incompleteReason ? ` (${incompleteReason})` : ''}`,
+            )
           }
           await releaseRecordingSlot()
           await this.media.finalizeSegment(activeSegment, {
@@ -272,6 +281,11 @@ export class RecordingController {
 
     this.recordingTask = this.recordingTask.then(wrappedTask, wrappedTask)
     await this.recordingTask
+  }
+
+  private reportCaptureFailure(message: string): void {
+    this.captureFailure ??= message
+    this.log('warn', `[WdioPuppeteerVideoService] ${message}`)
   }
 
   private get ownsRecordingSlot(): boolean {

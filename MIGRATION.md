@@ -97,7 +97,7 @@ Equivalent retry-only configuration:
   acquisition immediately. The configured failure policy applies after cleanup.
 - Allure requires test scope because the media must be attached while the
   corresponding reporter test remains active.
-- The package is ESM-only and requires Node.js 24. Use NodeNext module
+- The package is ESM-only and requires Node.js 24 or newer. Node 24 is certified; newer versions are best-effort. Use NodeNext module
   resolution and import the compiled package exports.
 
 ## Imports

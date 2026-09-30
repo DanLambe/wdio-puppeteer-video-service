@@ -19,7 +19,10 @@ import {
   type CaptureWindowOperations,
   PuppeteerCaptureEngine,
 } from '../../src/service/puppeteer-capture-engine.js'
-import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
+import type {
+  ScreencastQueueStats,
+  ScreencastRecorder,
+} from '../../src/service/screencast-recorder.js'
 
 type FakeRecorder = PassThrough & {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
@@ -29,7 +32,17 @@ type FakeRecorder = PassThrough & {
     signal: NodeJS.Signals | null
   }
   frameCount: number
+  incompleteReason: string | undefined
+  queueStats: ScreencastQueueStats
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
+}
+
+const idleQueueStats: ScreencastQueueStats = {
+  highWaterBlocks: 0,
+  highWaterBytes: 0,
+  highWaterLagSeconds: 0,
+  pendingBlocks: 0,
+  pendingBytes: 0,
 }
 
 const tempDirs: string[] = []
@@ -47,6 +60,8 @@ const createRecorder = (): FakeRecorder => {
   })
   recorder.frameCount = 1
   recorder.ffmpegResult = { code: 0, diagnostic: '', signal: null }
+  recorder.incompleteReason = undefined
+  recorder.queueStats = idleQueueStats
   recorder.stop = vi.fn(async () => {
     recorder.end()
   })
@@ -352,6 +367,19 @@ describe('Puppeteer capture engine', () => {
     )
   })
 
+  it('bounds screencast startup paints with the engine clock', async () => {
+    const tempDir = await createTempDir()
+    const clock = createAdvancingClock()
+    const harness = createHarness({ clock })
+
+    await startCapture(harness, path.join(tempDir, 'capture.webm'))
+
+    expect(harness.startScreencast).toHaveBeenCalledWith(
+      harness.page,
+      expect.objectContaining({ clock }),
+    )
+  })
+
   it('terminates the encoder instead of draining it for a discarded recording', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
@@ -369,10 +397,61 @@ describe('Puppeteer capture engine', () => {
     // not reclaimed; this removes the tail.
     expect(harness.recorder.abort).toHaveBeenCalledOnce()
     expect(harness.recorder.stop).not.toHaveBeenCalled()
-    expect(stopped.segment).toBeUndefined()
+    // A healthy discard is not a failure, and the abort is not one either.
+    expect(stopped).toEqual({ segment: undefined, streamOk: true })
     expect(harness.session.hasCapture).toBe(false)
     await expect(fs.access(outputPath)).rejects.toThrow()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
   })
+
+  it.each([
+    ['before the discard', false],
+    ['by the abort that discards it', true],
+  ])(
+    'carries a capture failure known %s past the discarded media',
+    async (_label, reportedByAbort) => {
+      const tempDir = await createTempDir()
+      const outputPath = path.join(tempDir, 'capture.webm')
+      const harness = createHarness()
+      await startCapture(harness, outputPath)
+      const reason = reportedByAbort
+        ? 'FFmpeg exited with code 0 before the recording was stopped.'
+        : 'The encoder fell behind the screencast (1024 frames waiting for the encoder reached the limit of 1024); capture stopped after 40.0s to bound memory.'
+      harness.recorder.queueStats = {
+        ...idleQueueStats,
+        highWaterBlocks: 1_024,
+      }
+      if (reportedByAbort) {
+        // The encoder exited just before retention discarded the recording;
+        // the abort notices the exit its close event has not reported yet.
+        harness.recorder.abort.mockImplementation(async () => {
+          harness.recorder.incompleteReason = reason
+          harness.recorder.destroy()
+        })
+      } else {
+        harness.recorder.incompleteReason = reason
+      }
+
+      await expect(
+        harness.engine.stopCapture({ discard: true }),
+      ).resolves.toEqual({
+        incompleteReason: reason,
+        segment: undefined,
+        streamOk: true,
+      })
+      // Still discarded fast: the failure travels with the result instead.
+      expect(harness.recorder.stop).not.toHaveBeenCalled()
+      await expect(fs.access(outputPath)).rejects.toThrow()
+      expect(harness.logs).toEqual([
+        expect.objectContaining({ level: 'info' }),
+        {
+          level: 'debug',
+          message:
+            '[WdioPuppeteerVideoService] Encoder queue high-water: 1024 frames, 0.0 MiB, 0.00s behind capture.',
+        },
+      ])
+    },
+  )
 
   it('still drains the encoder when the recording is kept', async () => {
     const tempDir = await createTempDir()
@@ -532,6 +611,44 @@ describe('Puppeteer capture engine', () => {
     },
   )
 
+  it('keeps an overloaded recording unclean and reports why capture stopped', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const harness = createHarness()
+    await startCapture(harness, outputPath)
+    const segment = harness.session.activeSegment
+    if (segment) {
+      segment.transcode = true
+      segment.outputPath = path.join(tempDir, 'capture.mp4')
+    }
+    const reason =
+      'The encoder fell behind the screencast (65.0 MiB of frames waiting for the encoder exceeds 64.0 MiB); capture stopped after 12.0s to bound memory.'
+    harness.recorder.incompleteReason = reason
+    harness.recorder.queueStats = {
+      highWaterBlocks: 211,
+      highWaterBytes: 65 * 1024 * 1024,
+      highWaterLagSeconds: 9.8,
+      pendingBlocks: 0,
+      pendingBytes: 0,
+    }
+
+    // The encoder exited cleanly with the frames it accepted, but the capture
+    // is still incomplete: never transcode or merge it as a whole recording.
+    await expect(harness.engine.stopCapture()).resolves.toEqual({
+      incompleteReason: reason,
+      segment: expect.objectContaining({ outputPath, transcode: false }),
+      streamOk: false,
+    })
+    expect(harness.logs).toContainEqual({
+      level: 'debug',
+      message:
+        '[WdioPuppeteerVideoService] Encoder queue high-water: 211 frames, 65.0 MiB, 9.80s behind capture.',
+    })
+    // The controller's warning for the segment names the reason; a second
+    // warning here would repeat it.
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
   it('stays quiet about a recorder that captured frames and exited cleanly', async () => {
     const tempDir = await createTempDir()
     const harness = createHarness()
@@ -582,6 +699,26 @@ describe('Puppeteer capture engine', () => {
     )
 
     expect(harness.recorder.stop).not.toHaveBeenCalled()
+    await expect(fs.stat(outputPath)).rejects.toThrow()
+  })
+
+  it('releases a partially created segment and its reserved file exactly once', async () => {
+    const outputPath = path.join(await createTempDir(), 'partial.webm')
+    const unlink = vi.fn(nodeFileSystem.unlink)
+    const harness = createHarness({ fileSystem: { ...nodeFileSystem, unlink } })
+    vi.spyOn(harness.recorder, 'pipe').mockImplementation(() => {
+      throw new Error('pipe failed')
+    })
+    await expect(startCapture(harness, outputPath)).rejects.toThrow(
+      'pipe failed',
+    )
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    expect(harness.recorder.destroyed).toBe(true)
+    expect(harness.recorder.listenerCount('error')).toBe(0)
+    expect(harness.session.hasCapture).toBe(false)
+    expect(unlink).toHaveBeenCalledExactlyOnceWith(outputPath)
+    await harness.engine.resetRecording()
+    expect(unlink).toHaveBeenCalledOnce()
     await expect(fs.stat(outputPath)).rejects.toThrow()
   })
 
@@ -691,6 +828,7 @@ describe('Puppeteer capture engine', () => {
       ffmpegResult: { code: 0, diagnostic: '' },
       frameCount: 1,
       off: vi.fn(),
+      queueStats: idleQueueStats,
       stop: vi.fn(async () => {}),
     } as unknown as ScreencastRecorder
     const segment = {
@@ -737,6 +875,7 @@ describe('Puppeteer capture engine', () => {
       ffmpegResult: { code: null, diagnostic: '', signal: 'SIGKILL' },
       frameCount: 1,
       off: vi.fn(),
+      queueStats: idleQueueStats,
       stop,
     } as unknown as ScreencastRecorder
     const segment = {
@@ -775,7 +914,7 @@ describe('Puppeteer capture engine', () => {
     expect(segment.writeStream.end).toHaveBeenCalledOnce()
     // One readable line per timeout; the logger receives no Error to print a
     // stack for. The abort's own SIGKILL is not reported as an encoder failure.
-    expect(harness.logs).toEqual([
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
       {
         level: 'warn',
         message:
@@ -805,6 +944,7 @@ describe('Puppeteer capture engine', () => {
       ffmpegResult: { code: 0, diagnostic: '' },
       frameCount: 1,
       off: vi.fn(),
+      queueStats: idleQueueStats,
       stop: vi.fn(async () => {}),
     } as unknown as ScreencastRecorder
     const segment = {

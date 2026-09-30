@@ -32,7 +32,7 @@ export interface RecordingOptions {
   attempts?: RecordingAttempts
   /** @default 'failures' */
   retain?: RecordingRetention
-  /** @default 'segment' */
+  /** The `ci` profile defaults to `'ignore'`. @default 'segment' */
   windowChanges?: WindowChangeBehavior
   filters?: RecordingFilterOptions
 }
@@ -50,7 +50,11 @@ export interface CaptureCrop extends CaptureViewport {
 export interface CaptureOptions {
   /** Use the current browser viewport or temporarily size capture initialization. @default 'current' */
   viewport?: 'current' | CaptureViewport
-  /** @default 30 */
+  /**
+   * The frame-rate grid frames are placed on; an unchanged page is held rather
+   * than encoded again. The `parallel` and `ci` profiles default to 24.
+   * @default 30
+   */
   fps?: number
   /** FFmpeg constant-rate factor from 0 (best) to 63 (smallest). @default 30 */
   quality?: number
@@ -70,7 +74,11 @@ export interface CaptureOptions {
   speed?: number
   /** Crop applied before scaling; cannot be combined with maxWidth/maxHeight. */
   crop?: CaptureCrop
-  /** Whether to prime early screencast frames with the viewport warmup. @default true */
+  /**
+   * Whether to prime early screencast frames with the viewport warmup. The
+   * `ci` profile defaults to `false`.
+   * @default true
+   */
   framePriming?: boolean
   /** Maximum time to wait for WDIO's CDP-backed Puppeteer connection. @default 10000 */
   connectionTimeoutMs?: number
@@ -87,6 +95,10 @@ export interface ProcessingTranscodeOptions {
   enabled?: boolean
   /** @default true */
   deleteOriginal?: boolean
+  /**
+   * Appended after the defaults, `-preset veryfast -crf 23`, so these win. The
+   * `ci` profile defaults to `-crf 28 -threads 1`.
+   */
   ffmpegArgs?: string[]
 }
 
@@ -102,7 +114,7 @@ export interface ProcessingOptions {
   format?: OutputFormat
   /** @default 'auto' */
   mp4Mode?: Mp4Mode
-  /** @default 'after-test' */
+  /** The `ci` profile defaults to `'after-worker'`. @default 'after-test' */
   timing?: ProcessingTiming
   ffmpeg?: ProcessingFfmpegOptions
   transcode?: ProcessingTranscodeOptions
@@ -114,7 +126,7 @@ export interface ConcurrencyOptions {
   maxRecordingsPerProcess?: number
   /** Limit local workers within one WDIO invocation; 0 disables the limit. @default 0 */
   maxRecordingsGlobal?: number
-  /** @default 'blocking' */
+  /** The `ci` profile defaults to `'fast-fail'`. @default 'blocking' */
   startMode?: RecordingStartMode
   /** @default 2500 */
   startTimeoutMs?: number

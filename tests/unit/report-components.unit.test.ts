@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ManifestEntryV1, ManifestRunV1 } from '../../src/manifest.js'
 import { renderStaticVideoReport } from '../../src/reporter/html-renderer.js'
 import {
@@ -96,11 +96,529 @@ const createRun = (
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(
     tempDirs
       .splice(0)
       .map((tempDir) => fs.rm(tempDir, { recursive: true, force: true })),
   )
+})
+
+describe('report identity and media checks', () => {
+  const entry = (id: string, fullName?: string): ManifestEntryV1 => ({
+    ...createEntryWithoutTest('identity-run'),
+    id,
+    test: { name: 'same title', ...(fullName ? { fullName } : {}) },
+    capture: { decision: 'skipped', reason: id, segments: [] },
+  })
+  const outcome = (uid: string, fullName?: string): ReporterTestOutcome => ({
+    ...createOutcome('identity-run'),
+    uid,
+    test: { name: 'same title', ...(fullName ? { fullName } : {}) },
+  })
+  const report = async (
+    entries: ManifestEntryV1[],
+    outcomes: ReporterTestOutcome[],
+  ): Promise<ReportModel> =>
+    createReportModel({
+      outputDir: await createTempDir(),
+      runId: 'identity-run',
+      run: createRun('identity-run', entries),
+      fragments: [createFragment('identity-run', completedAt, outcomes)],
+      initialDiagnostics: [],
+    })
+
+  it('prefers full names when outcomes arrive in a different suite order', async () => {
+    const model = await report(
+      [entry('A', 'suite A same title'), entry('B', 'suite B same title')],
+      [outcome('B', 'suite B same title'), outcome('A', 'suite A same title')],
+    )
+    expect(model.items.map((item) => item.captureReason)).toEqual(['B', 'A'])
+    expect(model.diagnostics).toEqual([])
+  })
+
+  it('does not use a short title when both full names disagree', async () => {
+    const model = await report(
+      [entry('A', 'suite A same title')],
+      [outcome('B', 'suite B same title')],
+    )
+    expect(
+      model.items.find((item) => item.id === '0-0-B-1')?.captureDecision,
+    ).toBeUndefined()
+    expect(model.diagnostics.map((item) => item.code)).toEqual([
+      'unmatched-manifest-entry',
+      'unmatched-test-outcome',
+    ])
+  })
+
+  it.each(['entry', 'outcome'] as const)(
+    'uses a unique short title when the %s lacks a full name',
+    async (missing) => {
+      const model = await report(
+        [entry('A', missing === 'entry' ? undefined : 'suite A same title')],
+        [
+          outcome(
+            'A',
+            missing === 'outcome' ? undefined : 'suite A same title',
+          ),
+        ],
+      )
+      expect(model.items[0]?.captureReason).toBe('A')
+      expect(model.diagnostics).toEqual([])
+    },
+  )
+
+  it('reports ambiguous short titles without claiming either capture', async () => {
+    const model = await report(
+      [entry('A', 'suite A same title'), entry('B', 'suite B same title')],
+      [outcome('unknown')],
+    )
+    expect(
+      model.items.find((item) => item.id === '0-0-unknown-1')?.captureDecision,
+    ).toBeUndefined()
+    expect(
+      model.items.filter((item) => item.id.startsWith('manifest-')),
+    ).toHaveLength(2)
+    expect(model.diagnostics.map((item) => item.code)).toEqual([
+      'ambiguous-test-outcome',
+      'unmatched-manifest-entry',
+      'unmatched-manifest-entry',
+    ])
+  })
+
+  it.each(['first', 'last'] as const)(
+    'resolves exact identities before a short-title outcome arriving %s',
+    async (position) => {
+      const exact = [
+        outcome('B', 'suite B same title'),
+        outcome('A', 'suite A same title'),
+      ]
+      const model = await report(
+        [entry('A', 'suite A same title'), entry('B', 'suite B same title')],
+        position === 'first'
+          ? [outcome('unknown'), ...exact]
+          : [...exact, outcome('unknown')],
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-unknown-1')
+          ?.captureDecision,
+      ).toBeUndefined()
+      expect(
+        model.items.find((item) => item.id === '0-0-B-1')?.captureReason,
+      ).toBe('B')
+      expect(
+        model.items.find((item) => item.id === '0-0-A-1')?.captureReason,
+      ).toBe('A')
+      expect(model.diagnostics.map((item) => item.code)).toEqual([
+        'unmatched-test-outcome',
+      ])
+    },
+  )
+
+  it('keeps exact duplicate occurrences ordered and removes claimed fallback candidates', async () => {
+    const model = await report(
+      [
+        entry('A1', 'suite A same title'),
+        entry('A2', 'suite A same title'),
+        entry('B', 'suite B same title'),
+      ],
+      [
+        outcome('A1', 'suite A same title'),
+        outcome('A2', 'suite A same title'),
+        outcome('B'),
+      ],
+    )
+    expect(model.items.map((item) => item.captureReason)).toEqual([
+      'A1',
+      'A2',
+      'B',
+    ])
+    expect(model.diagnostics).toEqual([])
+  })
+
+  it('does not choose between two different fallback aliases', async () => {
+    const fullAlias = entry('full-alias')
+    fullAlias.test = { name: 'suite same title' }
+    const model = await report(
+      [entry('short-alias'), fullAlias],
+      [outcome('unknown', 'suite same title')],
+    )
+    expect(
+      model.items.find((item) => item.id === '0-0-unknown-1')?.media,
+    ).toEqual([])
+    expect(model.diagnostics.map((item) => item.code)).toContain(
+      'ambiguous-test-outcome',
+    )
+  })
+
+  it.each(['first', 'last'] as const)(
+    'keeps a capture for its exact identity when a short-title outcome arrives %s',
+    async (position) => {
+      const exact = outcome('exact', 'suite same title')
+      const model = await report(
+        [entry('A', 'suite same title')],
+        position === 'first'
+          ? [outcome('short'), exact]
+          : [exact, outcome('short')],
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-exact-1')?.captureReason,
+      ).toBe('A')
+      expect(
+        model.items.find((item) => item.id === '0-0-short-1')?.captureDecision,
+      ).toBeUndefined()
+      expect(model.diagnostics.map((item) => item.code)).toEqual([
+        'unmatched-test-outcome',
+      ])
+    },
+  )
+
+  it.each(['first', 'last'] as const)(
+    'keeps a top-level capture from a nested same-titled test arriving %s',
+    async (position) => {
+      const nested = outcome('nested', 'suite same title')
+      const topLevel = outcome('top-level', 'same title')
+      const model = await report(
+        [entry('top-level', 'same title')],
+        position === 'first' ? [nested, topLevel] : [topLevel, nested],
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-top-level-1')
+          ?.captureReason,
+      ).toBe('top-level')
+      expect(
+        model.items.find((item) => item.id === '0-0-nested-1')?.captureDecision,
+      ).toBeUndefined()
+    },
+  )
+
+  it.each(['recorded', 'reversed'] as const)(
+    'keeps full titles that differ only in case on their own captures in %s order',
+    async (order) => {
+      const exact = [
+        outcome('upper', 'ADMIN same title'),
+        outcome('title', 'Admin same title'),
+      ]
+      const model = await report(
+        [
+          entry('upper', 'ADMIN same title'),
+          entry('title', 'Admin same title'),
+        ],
+        order === 'recorded' ? exact : exact.toReversed(),
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-upper-1')?.captureReason,
+      ).toBe('upper')
+      expect(
+        model.items.find((item) => item.id === '0-0-title-1')?.captureReason,
+      ).toBe('title')
+      expect(model.diagnostics).toEqual([])
+    },
+  )
+
+  it.each([
+    ['spacing', 'suite  A\tsame title', 'suite A same title'],
+    ['case', 'Suite A same title', 'suite a same title'],
+    ['Unicode form', 'caf\u00e9 same title', 'cafe\u0301 same title'],
+  ])(
+    'matches a unique full title that differs only in %s',
+    async (_label, recorded, reported) => {
+      const model = await report(
+        [entry('A', recorded)],
+        [outcome('A', reported)],
+      )
+      expect(model.items.map((item) => item.captureReason)).toEqual(['A'])
+      expect(model.diagnostics).toEqual([])
+    },
+  )
+
+  it.each([
+    ['without an exact match', [outcome('other', 'admin same title')]],
+    [
+      'after one capture matched exactly',
+      [
+        outcome('upper', 'ADMIN same title'),
+        outcome('other', 'admin same title'),
+      ],
+    ],
+  ])(
+    'reports titles that only normalization joins as ambiguous %s',
+    async (_label, outcomes) => {
+      const model = await report(
+        [
+          entry('upper', 'ADMIN same title'),
+          entry('title', 'Admin same title'),
+        ],
+        outcomes,
+      )
+      // Never chosen by elimination: "admin" may describe the claimed one.
+      expect(
+        model.items.find((item) => item.id === '0-0-other-1')?.captureDecision,
+      ).toBeUndefined()
+      expect(
+        model.diagnostics.filter(
+          (item) => item.code === 'ambiguous-test-outcome',
+        ),
+      ).toHaveLength(1)
+    },
+  )
+
+  it.each(['first', 'last'] as const)(
+    'keeps a capture for its exact full title when a variant arrives %s',
+    async (position) => {
+      const exact = outcome('exact', 'Admin same title')
+      const variant = outcome('variant', 'admin same title')
+      const model = await report(
+        [entry('A', 'Admin same title')],
+        position === 'first' ? [variant, exact] : [exact, variant],
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-exact-1')?.captureReason,
+      ).toBe('A')
+      expect(
+        model.items.find((item) => item.id === '0-0-variant-1')
+          ?.captureDecision,
+      ).toBeUndefined()
+      expect(model.diagnostics.map((item) => item.code)).toEqual([
+        'unmatched-test-outcome',
+      ])
+    },
+  )
+
+  describe('top-level titles, recorded with the title as both names', () => {
+    const topLevelEntry = (id: string, title: string): ManifestEntryV1 => ({
+      ...entry(id),
+      test: { name: title, fullName: title },
+    })
+    // Some reporters send only a short name, which the fallback pass matches.
+    const topLevelOutcome = (
+      uid: string,
+      title: string,
+      withFullName = true,
+    ): ReporterTestOutcome => ({
+      ...outcome(uid),
+      test: withFullName ? { name: title, fullName: title } : { name: title },
+    })
+    const captureOf = (model: ReportModel, uid: string) =>
+      model.items.find((item) => item.id === `0-0-${uid}-1`)?.captureReason
+    const unmatchedCaptures = (model: ReportModel) =>
+      model.items
+        .filter((item) => item.id.startsWith('manifest-'))
+        .map((item) => item.captureReason)
+
+    it.each([
+      ['case', 'ADMIN', 'Admin'],
+      ['spacing', 'Admin page', 'Admin  page'],
+      ['Unicode form', 'caf\u00e9', 'cafe\u0301'],
+    ])(
+      'never gives an exhausted %s spelling the other spelling capture',
+      async (_label, spelling, other) => {
+        // More outcomes than captures of one spelling: the extra outcome must
+        // be diagnosed, not attached to the only capture left unclaimed.
+        for (const withFullName of [true, false]) {
+          const model = await report(
+            [topLevelEntry('own', spelling), topLevelEntry('other', other)],
+            [
+              topLevelOutcome('first', spelling),
+              topLevelOutcome('second', spelling, withFullName),
+            ],
+          )
+          expect(captureOf(model, 'first')).toBe('own')
+          expect(captureOf(model, 'second')).toBeUndefined()
+          expect(unmatchedCaptures(model)).toEqual(['other'])
+          expect(model.diagnostics.map((item) => item.code)).toEqual([
+            'unmatched-manifest-entry',
+            'unmatched-test-outcome',
+          ])
+        }
+      },
+    )
+
+    it.each(['first', 'last'] as const)(
+      'does not give a short-name outcome arriving %s another spelling capture',
+      async (position) => {
+        const exact = topLevelOutcome('exact', 'ADMIN')
+        const short = topLevelOutcome('short', 'ADMIN', false)
+        const model = await report(
+          [topLevelEntry('upper', 'ADMIN'), topLevelEntry('title', 'Admin')],
+          position === 'first' ? [short, exact] : [exact, short],
+        )
+        expect(captureOf(model, 'exact')).toBe('upper')
+        expect(captureOf(model, 'short')).toBeUndefined()
+        expect(unmatchedCaptures(model)).toEqual(['title'])
+      },
+    )
+
+    it.each([
+      ['ADMIN', 'ADMIN', 'Admin'],
+      ['ADMIN', 'Admin', 'ADMIN'],
+      ['Admin', 'ADMIN', 'ADMIN'],
+    ])(
+      'gives each spelling its own capture and diagnoses the extra one: %s, %s, %s',
+      async (...titles) => {
+        const model = await report(
+          [topLevelEntry('upper', 'ADMIN'), topLevelEntry('title', 'Admin')],
+          titles.map((title, index) =>
+            topLevelOutcome(`${title}-${index.toString()}`, title),
+          ),
+        )
+        const byTitle = titles.map((title, index) => [
+          title,
+          captureOf(model, `${title}-${index.toString()}`),
+        ])
+        // The first "ADMIN" takes the capture; the second has none.
+        expect(byTitle.filter(([title]) => title === 'ADMIN')).toEqual([
+          ['ADMIN', 'upper'],
+          ['ADMIN', undefined],
+        ])
+        expect(byTitle.find(([title]) => title === 'Admin')).toEqual([
+          'Admin',
+          'title',
+        ])
+        expect(model.diagnostics.map((item) => item.code)).toEqual([
+          'unmatched-test-outcome',
+        ])
+      },
+    )
+
+    it.each([
+      ['alone', []],
+      [
+        'after one capture matched exactly',
+        [topLevelOutcome('exact', 'ADMIN')],
+      ],
+    ])(
+      'reports a short name that only normalization joins as ambiguous %s',
+      async (_label, others) => {
+        const model = await report(
+          [topLevelEntry('upper', 'ADMIN'), topLevelEntry('title', 'Admin')],
+          [...others, topLevelOutcome('short', 'admin', false)],
+        )
+        expect(captureOf(model, 'short')).toBeUndefined()
+        expect(unmatchedCaptures(model)).toContain('title')
+        expect(
+          model.diagnostics.filter(
+            (item) => item.code === 'ambiguous-test-outcome',
+          ),
+        ).toHaveLength(1)
+      },
+    )
+
+    it('still matches truly identical titles to their captures in order', async () => {
+      const model = await report(
+        [topLevelEntry('one', 'ADMIN'), topLevelEntry('two', 'ADMIN')],
+        [topLevelOutcome('first', 'ADMIN'), topLevelOutcome('second', 'ADMIN')],
+      )
+      expect(captureOf(model, 'first')).toBe('one')
+      expect(captureOf(model, 'second')).toBe('two')
+      expect(model.diagnostics).toEqual([])
+    })
+
+    it.each([true, false])(
+      'still matches a unique spelling variant (full name: %s)',
+      async (withFullName) => {
+        const model = await report(
+          [topLevelEntry('A', 'Admin page')],
+          [topLevelOutcome('variant', 'admin  PAGE', withFullName)],
+        )
+        expect(captureOf(model, 'variant')).toBe('A')
+        expect(model.diagnostics).toEqual([])
+      },
+    )
+  })
+
+  it('matches a scenario-level Cucumber outcome to its recorded scenario name', async () => {
+    // With scenarioLevelReporter, WDIO prefixes the full title with the
+    // feature id, while the service records the scenario name as both names.
+    const scenario = outcome('scenario', 'video-naming.feature:1:1: same title')
+    scenario.test.parent = 'video-naming.feature:1:1'
+    const model = await report([entry('scenario', 'same title')], [scenario])
+    expect(model.items.map((item) => item.captureReason)).toEqual(['scenario'])
+    expect(model.diagnostics).toEqual([])
+  })
+
+  it('reports same-titled scenario-level Cucumber outcomes as ambiguous', async () => {
+    const scenarios = ['first', 'second'].map((uid) => {
+      const scenario = outcome(uid, 'video-naming.feature:1:1: same title')
+      scenario.test.parent = 'video-naming.feature:1:1'
+      return scenario
+    })
+    const model = await report(
+      [entry('first', 'same title'), entry('second', 'same title')],
+      scenarios,
+    )
+    expect(
+      model.items
+        .filter((item) => !item.id.startsWith('manifest-'))
+        .map((item) => item.media),
+    ).toEqual([[], []])
+    expect(
+      model.diagnostics.filter(
+        (item) => item.code === 'ambiguous-test-outcome',
+      ),
+    ).toHaveLength(2)
+  })
+
+  it.each(['cid', 'spec', 'attempt', 'runId'] as const)(
+    'separates identical names by %s',
+    async (field) => {
+      const other = entry('other', 'suite same title')
+      if (field === 'attempt') {
+        other.attempt = 2
+      } else {
+        other[field] = 'other'
+      }
+      const model = await report(
+        [other, entry('target', 'suite same title')],
+        [outcome('target', 'suite same title')],
+      )
+      expect(
+        model.items.find((item) => item.id === '0-0-target-1')?.captureReason,
+      ).toBe('target')
+    },
+  )
+
+  it('does not associate a step title with a different scenario when its container is missing', async () => {
+    const step = outcome('step', 'same title')
+    step.test.containerName = 'missing scenario'
+    const model = await report([entry('other', 'same title')], [step])
+    expect(
+      model.items.find((item) => item.id === '0-0-step-1')?.captureDecision,
+    ).toBeUndefined()
+  })
+
+  it('checks shared media once with no more than eight outstanding filesystem operations', async () => {
+    let active = 0
+    let peak = 0
+    const stat = vi.spyOn(fs, 'stat').mockImplementation(async () => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      active -= 1
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+    })
+    const entries = Array.from({ length: 40 }, (_, index) => {
+      const item = entry(String(index), `suite ${index}`)
+      item.capture.segments = [
+        { path: `video-${index % 20}.webm`, mimeType: 'video/webm', size: 1 },
+      ]
+      return item
+    })
+    const model = await report(
+      entries,
+      entries.map((item) => outcome(item.id, item.test?.fullName)),
+    )
+    expect(stat).toHaveBeenCalledTimes(20)
+    expect(peak).toBe(8)
+    expect(
+      model.items.every((item) => item.media[0]?.available === false),
+    ).toBe(true)
+    expect(
+      model.diagnostics.filter(
+        (item) => item.code === 'missing-media-artifact',
+      ),
+    ).toHaveLength(20)
+  })
 })
 
 describe('report model and HTML renderer', () => {

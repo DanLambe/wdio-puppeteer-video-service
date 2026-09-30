@@ -49,6 +49,11 @@ export interface CaptureStartResult {
 }
 
 export interface CaptureStopResult {
+  /**
+   * Why capture was incomplete, when the recorder knows. Reported for a
+   * discarded segment too: retention does not make a failed capture healthy.
+   */
+  readonly incompleteReason?: string
   readonly segment: ActiveSegment | undefined
   readonly streamOk: boolean
 }
@@ -235,6 +240,7 @@ export class PuppeteerCaptureEngine {
       pendingRecordingPath = output.recordingPath
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
+        clock: this.clock,
         ffmpegPath: options.ffmpegPath,
         format: output.recordingFormat,
         onViewportRestoreError: (error) => {
@@ -273,7 +279,7 @@ export class PuppeteerCaptureEngine {
       return { started: true }
     } catch (error) {
       await this.cleanupPartialCapture(pendingRecorder, pendingSegment)
-      if (pendingRecordingPath) {
+      if (pendingRecordingPath && !pendingSegment) {
         await this.fileSystem
           .unlink(pendingRecordingPath)
           .catch(() => undefined)
@@ -296,9 +302,17 @@ export class PuppeteerCaptureEngine {
       // still queued, flush, and finish writing a file that is deleted moments
       // later. That tail is largest on a host whose encoder has fallen behind.
       await this.discardCapture(recorder, segment)
-      return { segment: undefined, streamOk: true }
+      this.logQueueStats(recorder)
+      // Read after the abort, which reports an encoder exit that preceded it.
+      const incompleteReason = recorder.incompleteReason
+      return {
+        ...(incompleteReason ? { incompleteReason } : {}),
+        segment: undefined,
+        streamOk: true,
+      }
     }
     const recorderStopped = await this.stopRecorder(recorder)
+    this.logQueueStats(recorder)
     if (!recorderStopped && !segment.writeStream.destroyed) {
       // Destroying a pipe's source does not end its destination. Flush bytes
       // already accepted by the file without waiting for an impossible EOF.
@@ -314,7 +328,12 @@ export class PuppeteerCaptureEngine {
       if (!streamOk) {
         this.markSegmentAsUnclean(segment)
       }
-      return { segment, streamOk }
+      const incompleteReason = recorder.incompleteReason
+      return {
+        ...(incompleteReason ? { incompleteReason } : {}),
+        segment,
+        streamOk,
+      }
     } finally {
       recorder.off('error', segment.onRecorderError)
       segment.writeStream.off('error', segment.onWriteStreamError)
@@ -519,9 +538,23 @@ export class PuppeteerCaptureEngine {
     }
   }
 
+  private logQueueStats(recorder: ScreencastRecorder): void {
+    const stats = recorder.queueStats
+    this.log(
+      'debug',
+      `[WdioPuppeteerVideoService] Encoder queue high-water: ${stats.highWaterBlocks.toString()} frames, ${(stats.highWaterBytes / (1024 * 1024)).toFixed(1)} MiB, ${stats.highWaterLagSeconds.toFixed(2)}s behind capture.`,
+    )
+  }
+
   // A file that finished writing is not a complete recording if the encoder
   // failed: keep its bytes as an unclean segment instead of transcoding them.
   private checkEncoderResult(recorder: ScreencastRecorder): boolean {
+    if (recorder.incompleteReason) {
+      // Frames already accepted were still encoded, so the segment is kept as
+      // unclean media rather than processed as a complete recording. The
+      // stop result carries the reason into the segment's one warning.
+      return false
+    }
     if (recorder.frameCount === 0) {
       this.log(
         'warn',

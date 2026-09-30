@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest, type VideoManifestV1 } from '../manifest.js'
+import { writeFileAtomically } from './atomic-write.js'
 import { readReporterFragments } from './fragments.js'
 import { renderStaticVideoReport } from './html-renderer.js'
 import { createReportModel } from './report-model.js'
@@ -126,9 +126,7 @@ const writeReportAtomically = async (
   content: string,
 ): Promise<void> => {
   await fs.mkdir(path.dirname(reportPath), { recursive: true })
-  const temporaryPath = `${reportPath}.${randomUUID()}.tmp`
-  await fs.writeFile(temporaryPath, content, 'utf8')
-  await fs.rename(temporaryPath, reportPath)
+  await writeFileAtomically(reportPath, content)
 }
 
 export { renderStaticVideoReport } from './html-renderer.js'
