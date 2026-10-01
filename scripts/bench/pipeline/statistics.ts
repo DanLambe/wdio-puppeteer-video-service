@@ -94,7 +94,9 @@ export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
     groups.set(key, [...(groups.get(key) ?? []), run])
   }
   return [...groups].map(([workload, observations]) => {
-    const pairs = [...new Set(observations.map((run) => run.pair))].sort()
+    const pairs = [...new Set(observations.map((run) => run.pair))].sort(
+      (left, right) => left - right,
+    )
     const present =
       pairs.length === requiredPairs &&
       pairs.every((pair) =>

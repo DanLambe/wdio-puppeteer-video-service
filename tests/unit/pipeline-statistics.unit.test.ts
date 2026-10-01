@@ -42,6 +42,21 @@ const fixtureRuns = (): RunResult[] =>
   ).flat()
 
 describe('paired pipeline investigation gates', () => {
+  it('reports multi-digit pair identifiers in numeric order', () => {
+    const runs = fixtureRuns().filter((run) => run.pair <= 3)
+    const identifiers = [10, 2, 1]
+    for (const run of runs) {
+      run.pair = identifiers[run.pair - 1] as number
+      if (run.variant === 'candidate') {
+        run.suiteMs = 100 + run.pair
+      }
+    }
+    const comparison = compareRuns(runs, 3)[0]
+    expect(comparison?.status).toBe('pass')
+    expect(
+      comparison?.pairs?.map((pair) => Math.round(pair.suite * 100)),
+    ).toEqual([1, 2, 10])
+  })
   it('uses median paired ratios and recording-disabled overhead', () => {
     const runs = fixtureRuns()
     for (const run of runs.filter((run) => run.pair === 5)) {

@@ -49,6 +49,9 @@ jobs:
       - name: Verify Report Artifact Integration
         run: corepack npm run test:integration:report
 
+      - name: Verify Benchmark Host Integration
+        run: corepack npm run test:integration:pipeline
+
       - name: Run SonarQube PR Analysis
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
@@ -159,6 +162,9 @@ jobs:
 
       - name: Verify Report Artifact Integration
         run: corepack npm run test:integration:report
+
+      - name: Verify Benchmark Host Integration
+        run: corepack npm run test:integration:pipeline
 
       - name: Verify Recorded Frame Timeline
         run: corepack npm run test:integration:timeline

@@ -4,6 +4,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parseArgs, promisify } from 'node:util'
 import {
+  prepareOutputDirectory,
+  resolveBaseline,
+  resolveImage,
+} from './pipeline/inputs.js'
+import { hashTree } from './pipeline/snapshot.js'
+import {
   compareRuns,
   completedPairs,
   qualificationPassed,
@@ -23,16 +29,13 @@ const { values } = parseArgs({
   },
 })
 const root = path.resolve(import.meta.dirname, '../..')
-const directory = path.resolve(
+const outputRoot = path.join(root, 'tests', 'results', 'pipeline')
+const directory = await prepareOutputDirectory(
+  outputRoot,
   values.resume ??
     values.output ??
-    path.join(
-      root,
-      'tests/results/pipeline',
-      new Date().toISOString().replaceAll(/[:.]/gu, '-'),
-    ),
+    path.join(outputRoot, new Date().toISOString().replaceAll(/[:.]/gu, '-')),
 )
-await fs.mkdir(directory, { recursive: true })
 interface Environment {
   baselineSha: string
   imageId: string
@@ -72,17 +75,11 @@ const execute = (
   }
   return run.stdout.trim()
 }
-const baselineSha = execute('git', [
-  'rev-parse',
-  '--verify',
-  `${previous?.baselineSha ?? values.baseline}^{commit}`,
-])
-const imageId = execute('docker', [
-  'inspect',
-  '--format',
-  '{{.Id}}',
-  previous?.imageId ?? values.image,
-])
+const baselineSha = resolveBaseline(
+  execute,
+  previous?.baselineSha ?? values.baseline,
+)
+const imageId = resolveImage(execute, previous?.imageId ?? values.image)
 const availableCpus = Number(
   execute('docker', ['info', '--format', '{{.NCPU}}']),
 )
@@ -119,20 +116,6 @@ if (!previous) {
       { recursive: true },
     )
   }
-}
-const hashTree = async (base: string): Promise<string> => {
-  const files = (
-    await fs.readdir(base, { recursive: true, withFileTypes: true })
-  )
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.join(entry.parentPath, entry.name))
-    .sort()
-  const hash = createHash('sha256')
-  for (const file of files) {
-    hash.update(path.relative(base, file).replaceAll('\\', '/'))
-    hash.update(await fs.readFile(file))
-  }
-  return hash.digest('hex')
 }
 if (!previous) {
   await fs.writeFile(

@@ -12,8 +12,20 @@ once, snapshots both product revisions and the test harness, and uses that same
 image and dependency tree for every measurement. The baseline is exported with
 `git archive`; it does not need a separate checkout or installed dependencies.
 `--output` selects a new output directory; existing snapshots are never reused.
+Output and resume directories must be inside `tests/results/pipeline`; anything
+else, including a link that leads out of it, is rejected before a run starts.
+The default is a new timestamped directory there.
 `--smoke` runs one pair at 2 CPUs / 2 workers without a soak and explicitly marks
 its output as **not qualification**.
+
+This is a local developer tool. Use trusted Git, tar and Docker executables on
+your PATH, a trusted image and source revision, and keep `tests/results`
+writable only by the test user. Resume only your own trusted saved runs. The
+disposable measurement container runs as root to retain the pinned benchmark
+environment and output permissions. It has no privileged mode or Docker socket;
+source mounts are read-only and the selected results directory is the only
+writable host mount.
+Do not use this harness to execute untrusted images, source or saved metadata.
 
 After an interrupted full run, use `--resume <output-directory>`. Resume verifies
 the saved image, Docker environment, candidate source and harness hashes. Complete
