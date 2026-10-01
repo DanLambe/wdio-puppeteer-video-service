@@ -217,15 +217,20 @@ failure after cleanup.
 
 ## The static report shows ambiguous-test-outcome or unmatched-test-outcome
 
-The report joins reporter outcomes to manifest captures by full test title
-first. A title that differs only in case, spacing or Unicode form joins only
-when no other capture's title normalizes the same way. A short title is used
-last, and only when one side lacks a fuller title.
+The report joins reporter outcomes to manifest captures from the same spec file,
+worker and attempt. Spec paths that differ only in case can be different files,
+so a path in another case joins only when it is the one spelling recorded.
+Within a spec file, outcomes join by full test title first. A title that differs
+only in case, spacing or Unicode form joins only when no other capture's title
+normalizes the same way. A short title is used last, and only when one side
+lacks a fuller title.
 
 - `ambiguous-test-outcome`: more than one capture could belong to the outcome,
   for example two tests with the same short title and no distinguishing suite
   titles, or titles such as `ADMIN works` and `Admin works` reported with a
-  third spelling. The outcome is shown without video rather than with a guess.
+  third spelling. The same applies to spec paths such as `tests/ADMIN.ts` and
+  `tests/admin.ts` reported as `tests/Admin.ts`. The outcome is shown without
+  video rather than with a guess.
 - `unmatched-test-outcome`: no capture matches, for example a test that was not
   recorded, was filtered out, or reported more often than it was recorded.
 - `unmatched-manifest-entry`: a capture no outcome claimed. It stays visible on

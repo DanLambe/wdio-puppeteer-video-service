@@ -246,6 +246,56 @@ describe('report generation from persisted artifacts', () => {
     expect(titleCards[0]).toContain('<h2>Admin</h2>')
   })
 
+  it('links same-titled tests in case-distinct spec files to their own videos', async () => {
+    // Different files on a case-sensitive filesystem, run by one worker; the
+    // reporter lists them in the opposite order to their captures.
+    const specs = { upper: 'tests/ADMIN.ts', lower: 'tests/admin.ts' } as const
+    const manifestPath = path.join(outputDir, 'manifest.json')
+    const manifest = JSON.parse(
+      await fs.readFile(manifestPath, 'utf8'),
+    ) as VideoManifestV1
+    const run = manifest.runs[0]
+    if (!run) {
+      throw new Error('Expected the seeded run')
+    }
+    run.entries = (['upper', 'lower'] as const).map((name) => ({
+      ...entry('suite'),
+      id: name,
+      spec: specs[name],
+      capture: {
+        decision: 'recorded',
+        segments: [{ path: `${name}.webm`, mimeType: 'video/webm', size: 1 }],
+      },
+    }))
+    await fs.writeFile(manifestPath, JSON.stringify(manifest))
+    await fs.writeFile(path.join(outputDir, 'upper.webm'), 'upper')
+    await fs.writeFile(path.join(outputDir, 'lower.webm'), 'lower')
+    const value = fragment()
+    value.specs = [specs.upper, specs.lower]
+    value.outcomes = (['lower', 'upper'] as const).map((name, index) => ({
+      ...(value.outcomes[index] as ReporterFragmentV1['outcomes'][number]),
+      uid: name,
+      spec: specs[name],
+      test: { name: 'same title', fullName: 'suite same title' },
+    }))
+    await writeReporterFragment(outputDir, value)
+
+    const result = await generateVideoReportForRun({ outputDir, runId })
+
+    expect(result).toMatchObject({ itemCount: 2, diagnosticCount: 0 })
+    const cards = await readCards()
+    for (const [own, other] of [
+      ['upper', 'lower'],
+      ['lower', 'upper'],
+    ] as const) {
+      const card = cards.find((value) =>
+        value.includes(`data-spec="${specs[own]}"`),
+      )
+      expect(card).toContain(`src="./${own}.webm"`)
+      expect(card).not.toContain(`src="./${other}.webm"`)
+    }
+  })
+
   it('removes temporary report files after a real rename failure and preserves source fragments', async () => {
     const source = await writeReporterFragment(outputDir, fragment())
     const reportPath = path.join(outputDir, 'video-report.html')

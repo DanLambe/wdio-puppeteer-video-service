@@ -68,8 +68,12 @@ export const prepareOutputDirectory = async (
   while (existing !== base && !existsSync(existing)) {
     existing = path.dirname(existing)
   }
-  if (existing !== base && !inside(await fs.realpath(existing))) {
-    throw outside()
+  if (existing !== base) {
+    // An ancestor may be the base itself, through a link; the output may not.
+    const resolved = await fs.realpath(existing)
+    if (resolved !== canonicalBase && !inside(resolved)) {
+      throw outside()
+    }
   }
   await fs.mkdir(candidate, { recursive: true })
   const directory = await fs.realpath(candidate)

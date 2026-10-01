@@ -91,6 +91,8 @@ interface EntryGroup {
 export class ManifestMatcher {
   readonly matchedEntries: Set<string> = new Set()
   private readonly groups = new Map<string, EntryGroup>()
+  /** Group keys by their form with the spec path's case ignored. */
+  private readonly groupSpellings = new Map<string, string[]>()
   private readonly scenarios = new Map<string, ManifestEntryV1>()
 
   constructor(entries: readonly ManifestEntryV1[]) {
@@ -105,6 +107,11 @@ export class ManifestMatcher {
           withoutFullerIdentity: new AliasIndex(),
         }
         this.groups.set(key, group)
+        const caseless = caselessGroupKey(entry)
+        this.groupSpellings.set(caseless, [
+          ...(this.groupSpellings.get(caseless) ?? []),
+          key,
+        ])
       }
       if (entry.scope === 'spec') {
         group.spec ??= entry
@@ -157,7 +164,10 @@ export class ManifestMatcher {
 
   private match(outcome: ReporterTestOutcome, pass: Pass): ManifestMatch {
     const key = groupKey(outcome)
-    const group = this.groups.get(key)
+    const group = this.findGroup(outcome)
+    if (group === 'ambiguous') {
+      return { kind: 'ambiguous' }
+    }
     if (!group) {
       return { kind: 'missing' }
     }
@@ -192,6 +202,26 @@ export class ManifestMatcher {
       return { kind: 'matched', entry: group.spec }
     }
     return result
+  }
+
+  /**
+   * Spec paths that differ only in case can be different files, so an
+   * outcome's own spelling wins. Another spelling is used only when it is the
+   * one recorded, and several are no basis for choosing.
+   */
+  private findGroup(
+    outcome: ReporterTestOutcome,
+  ): EntryGroup | 'ambiguous' | undefined {
+    const exact = this.groups.get(groupKey(outcome))
+    if (exact) {
+      return exact
+    }
+    const [spelling, ...others] =
+      this.groupSpellings.get(caselessGroupKey(outcome)) ?? []
+    if (others.length > 0) {
+      return 'ambiguous'
+    }
+    return spelling === undefined ? undefined : this.groups.get(spelling)
   }
 
   private findFullName(
@@ -276,13 +306,26 @@ const identityNames = (entry: ManifestEntryV1): string[] => {
   )
 }
 
-const groupKey = (
-  entry: Pick<ManifestEntryV1, 'runId' | 'cid' | 'spec' | 'attempt'>,
-): string => {
+type GroupIdentity = Pick<ManifestEntryV1, 'runId' | 'cid' | 'spec' | 'attempt'>
+
+const specPath = (spec: string): string => {
+  return spec.replaceAll('\\', '/').replace(/^\.\//u, '')
+}
+
+const groupKey = (entry: GroupIdentity): string => {
   return JSON.stringify([
     entry.runId,
     entry.cid,
-    entry.spec.replaceAll('\\', '/').replace(/^\.\//u, '').toLowerCase(),
+    specPath(entry.spec),
+    entry.attempt,
+  ])
+}
+
+const caselessGroupKey = (entry: GroupIdentity): string => {
+  return JSON.stringify([
+    entry.runId,
+    entry.cid,
+    specPath(entry.spec).toLowerCase(),
     entry.attempt,
   ])
 }

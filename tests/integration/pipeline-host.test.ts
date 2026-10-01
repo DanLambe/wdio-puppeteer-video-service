@@ -152,6 +152,17 @@ describe('benchmark output directory', () => {
     expect(await fs.readdir(outside)).toEqual([])
   })
 
+  it('accepts a link to the results root as a parent, but not as the output', async () => {
+    await fs.mkdir(base)
+    await fs.symlink(base, path.join(base, 'alias'), 'junction')
+    expect(
+      await prepareOutputDirectory(base, path.join(base, 'alias', 'run')),
+    ).toBe(path.join(await fs.realpath(base), 'run'))
+    await expect(
+      prepareOutputDirectory(base, path.join(base, 'alias')),
+    ).rejects.toThrow(outsideMessage)
+  })
+
   it('accepts a link that stays inside the results root', async () => {
     const target = path.join(base, 'runs')
     await fs.mkdir(target, { recursive: true })

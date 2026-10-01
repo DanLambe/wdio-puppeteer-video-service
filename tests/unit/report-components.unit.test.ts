@@ -385,6 +385,110 @@ describe('report identity and media checks', () => {
     },
   )
 
+  describe('spec paths that differ only in case', () => {
+    // On a case-sensitive filesystem these are different files.
+    const upper = 'tests/ADMIN.ts'
+    const lower = 'tests/admin.ts'
+    const inSpec = <T extends { spec: string }>(value: T, spec: string): T => ({
+      ...value,
+      spec,
+    })
+    const specCapture = (id: string, spec: string): ManifestEntryV1 => ({
+      ...createEntryWithoutTest('identity-run'),
+      id,
+      spec,
+      scope: 'spec',
+      capture: { decision: 'skipped', reason: id, segments: [] },
+    })
+    const reasonOf = (model: ReportModel, uid: string) =>
+      model.items.find((item) => item.id === `0-0-${uid}-1`)?.captureReason
+
+    it.each(['recorded', 'reversed'] as const)(
+      'keeps same-titled tests on their own spec captures in %s order',
+      async (order) => {
+        const outcomes = [
+          inSpec(outcome('upper', 'suite same title'), upper),
+          inSpec(outcome('lower', 'suite same title'), lower),
+        ]
+        const model = await report(
+          [
+            inSpec(entry('upper', 'suite same title'), upper),
+            inSpec(entry('lower', 'suite same title'), lower),
+          ],
+          order === 'recorded' ? outcomes : outcomes.toReversed(),
+        )
+        expect(reasonOf(model, 'upper')).toBe('upper')
+        expect(reasonOf(model, 'lower')).toBe('lower')
+        expect(model.diagnostics).toEqual([])
+      },
+    )
+
+    it.each(['recorded', 'reversed'] as const)(
+      'keeps spec-level captures on their own spec in %s order',
+      async (order) => {
+        const outcomes = [
+          inSpec(outcome('upper', 'suite same title'), upper),
+          inSpec(outcome('lower', 'suite same title'), lower),
+        ]
+        const model = await report(
+          [specCapture('upper', upper), specCapture('lower', lower)],
+          order === 'recorded' ? outcomes : outcomes.toReversed(),
+        )
+        expect(reasonOf(model, 'upper')).toBe('upper')
+        expect(reasonOf(model, 'lower')).toBe('lower')
+        expect(model.diagnostics).toEqual([])
+      },
+    )
+
+    it.each([
+      ['only in case', 'tests/Admin.ts', 'tests/admin.ts'],
+      [
+        'in separators and a leading dot',
+        `./${path.win32.join('tests', 'specs', 'report.ts')}`,
+        'tests/specs/report.ts',
+      ],
+    ])(
+      'matches the one recorded spelling of a spec path that differs %s',
+      async (_label, recorded, reported) => {
+        const model = await report(
+          [inSpec(entry('A', 'suite same title'), recorded)],
+          [inSpec(outcome('A', 'suite same title'), reported)],
+        )
+        expect(reasonOf(model, 'A')).toBe('A')
+        expect(model.diagnostics).toEqual([])
+      },
+    )
+
+    it.each(['test', 'spec'] as const)(
+      'does not choose between two recorded spellings for a %s capture',
+      async (scope) => {
+        const captures =
+          scope === 'test'
+            ? [
+                inSpec(entry('upper', 'suite same title'), upper),
+                inSpec(entry('lower', 'suite same title'), lower),
+              ]
+            : [specCapture('upper', upper), specCapture('lower', lower)]
+        const model = await report(captures, [
+          inSpec(outcome('other', 'suite same title'), 'tests/Admin.ts'),
+        ])
+        expect(
+          model.items.find((item) => item.id === '0-0-other-1')
+            ?.captureDecision,
+        ).toBeUndefined()
+        expect(
+          model.diagnostics.filter(
+            (item) => item.code === 'ambiguous-test-outcome',
+          ),
+        ).toHaveLength(1)
+        // Neither capture is claimed, so both stay visible on their own.
+        expect(
+          model.items.filter((item) => item.captureDecision !== undefined),
+        ).toHaveLength(2)
+      },
+    )
+  })
+
   describe('top-level titles, recorded with the title as both names', () => {
     const topLevelEntry = (id: string, title: string): ManifestEntryV1 => ({
       ...entry(id),
