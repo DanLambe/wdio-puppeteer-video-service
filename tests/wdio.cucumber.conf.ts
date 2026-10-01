@@ -13,12 +13,18 @@ const retryMode = process.env.WDIO_CUCUMBER_RETRY_MODE as
   | CucumberRetryMode
   | undefined
 const duplicateNameMode = process.env.WDIO_CUCUMBER_DUPLICATE_NAMES === '1'
+// Cucumber can report each scenario as one test, with a feature-prefixed full
+// title that differs from the scenario name the service records.
+const scenarioLevelMode = process.env.WDIO_CUCUMBER_SCENARIO_LEVEL === '1'
 const resolveDefaultResultsDirName = (): string => {
   if (retryMode) {
     return `cucumber-retry-${retryMode}`
   }
   if (duplicateNameMode) {
     return 'cucumber-duplicate-names'
+  }
+  if (scenarioLevelMode) {
+    return 'cucumber-scenario-level'
   }
   return 'cucumber'
 }
@@ -141,6 +147,7 @@ export const config: WebdriverIO.Config = {
     timeout: 60000,
     // Cucumber retries the scenario in-process and reuses its pickle id.
     ...(retryMode ? { retry: 1 } : {}),
+    ...(scenarioLevelMode ? { scenarioLevelReporter: true } : {}),
   },
   onPrepare: async () => {
     await emptyDir(resultsDir)

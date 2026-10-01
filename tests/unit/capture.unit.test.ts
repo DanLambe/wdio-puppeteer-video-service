@@ -25,6 +25,13 @@ const createPaintSession = (send: () => Promise<unknown>) => ({
     ({ send, detach: async () => {} }) as unknown as CDPSession,
 })
 
+const fakeTimerClock = (): ClockBoundary => ({
+  ...systemClock,
+  // Keep the hold and paint deadlines on the same controlled clock.
+  delay: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+})
+
 describe('Puppeteer screencast capture controls', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -99,6 +106,32 @@ describe('Puppeteer screencast capture controls', () => {
     expect(setViewport).toHaveBeenLastCalledWith(null)
   })
 
+  it('awaits viewport restoration after a partially applied resize rejects', async () => {
+    const restored = Promise.withResolvers<void>()
+    const setViewport = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('resize rejected'))
+      .mockReturnValueOnce(restored.promise)
+    const capture = resolveServiceConfiguration({
+      capture: { viewport: { width: 800, height: 600 } },
+    }).options.capture
+    const record = vi.fn()
+    let settled = false
+    const starting = startScreencast(
+      { setViewport, viewport: () => null } as unknown as Page,
+      { capture, format: 'webm', ffmpegPath: 'ffmpeg' },
+      record,
+    ).catch((error: unknown) => {
+      settled = true
+      return error
+    })
+    await vi.waitFor(() => expect(setViewport).toHaveBeenLastCalledWith(null))
+    expect(settled).toBe(false)
+    expect(record).not.toHaveBeenCalled()
+    restored.resolve()
+    expect(await starting).toMatchObject({ message: 'resize rejected' })
+  })
+
   it('reports viewport restoration failures without discarding the recorder', async () => {
     const recorder = createRecorder()
     const restoreError = new Error('target closed during restore')
@@ -124,6 +157,140 @@ describe('Puppeteer screencast capture controls', () => {
       ),
     ).resolves.toBe(recorder)
     expect(onViewportRestoreError).toHaveBeenCalledWith(restoreError)
+  })
+
+  // Chrome's screencast can stop emitting frames after a viewport change it
+  // never sees painted, even across the next navigation; without frame
+  // priming, nothing else paints after this restore.
+  describe('restored-surface paint after an explicit viewport', () => {
+    const explicitViewport = resolveServiceConfiguration({
+      capture: { viewport: { width: 960, height: 600 }, framePriming: false },
+    }).options.capture
+
+    const createPaintingPage = (screenshot: () => Promise<unknown>) => {
+      const order: string[] = []
+      const detach = vi.fn(async () => {
+        order.push('detach')
+      })
+      const send = vi.fn(async (method: string) => {
+        order.push(method)
+        return screenshot()
+      })
+      const page = {
+        createCDPSession: vi.fn(async () => {
+          order.push('paint-session')
+          return { send, detach } as unknown as CDPSession
+        }),
+        setViewport: vi.fn(async (viewport: Viewport | null) => {
+          order.push(viewport ? 'resize' : 'restore')
+        }),
+        viewport: () => null,
+      }
+      return { detach, order, page, send }
+    }
+
+    it('paints the restored surface before handing over the recorder', async () => {
+      const recorder = createRecorder()
+      const painted = Promise.withResolvers<void>()
+      const { detach, order, page, send } = createPaintingPage(
+        () => painted.promise,
+      )
+      let started = false
+      const starting = startScreencast(
+        page as unknown as Page,
+        { capture: explicitViewport, format: 'webm', ffmpegPath: 'ffmpeg' },
+        async () => {
+          order.push('record')
+          return recorder
+        },
+      ).then((value) => {
+        started = true
+        return value
+      })
+
+      await vi.waitFor(() => expect(send).toHaveBeenCalled())
+      expect(started).toBe(false)
+      painted.resolve()
+      await expect(starting).resolves.toBe(recorder)
+      expect(order).toEqual([
+        'resize',
+        'record',
+        'restore',
+        'paint-session',
+        'Page.captureScreenshot',
+        'detach',
+      ])
+      // The same disposable, unclipped paint priming uses.
+      expect(send).toHaveBeenCalledWith(
+        'Page.captureScreenshot',
+        {
+          format: 'jpeg',
+          quality: 1,
+          fromSurface: true,
+          captureBeyondViewport: false,
+        },
+        { timeout: 500 },
+      )
+      expect(detach).toHaveBeenCalledOnce()
+    })
+
+    it('bounds an unresponsive paint on the injected clock and releases it', async () => {
+      vi.useFakeTimers()
+      const recorder = createRecorder()
+      const { detach, page } = createPaintingPage(() => new Promise(() => {}))
+      let started = false
+      const starting = startScreencast(
+        page as unknown as Page,
+        {
+          capture: explicitViewport,
+          clock: fakeTimerClock(),
+          format: 'webm',
+          ffmpegPath: 'ffmpeg',
+        },
+        async () => recorder,
+      ).then((value) => {
+        started = true
+        return value
+      })
+
+      await vi.advanceTimersByTimeAsync(499)
+      expect(started).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(starting).resolves.toBe(recorder)
+      expect(detach).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it.each([
+      ['the viewport was left as it was', 'current', true],
+      ['the screencast failed to start', 'explicit', false],
+    ] as const)('does not paint when %s', async (_label, viewport, starts) => {
+      const { page } = createPaintingPage(async () => undefined)
+      const capture =
+        viewport === 'current'
+          ? resolveServiceConfiguration({
+              capture: { viewport: 'current', framePriming: false },
+            }).options.capture
+          : explicitViewport
+      const starting = startScreencast(
+        page as unknown as Page,
+        { capture, format: 'webm', ffmpegPath: 'ffmpeg' },
+        async () => {
+          if (!starts) {
+            throw new Error('screencast failed')
+          }
+          return createRecorder()
+        },
+      )
+
+      if (starts) {
+        await expect(starting).resolves.toBeDefined()
+      } else {
+        await expect(starting).rejects.toThrow('screencast failed')
+        expect(page.setViewport).toHaveBeenLastCalledWith(null)
+      }
+      expect(page.createCDPSession).not.toHaveBeenCalled()
+    })
   })
 
   it.each(['current', { width: 800, height: 600 }] as const)(
@@ -261,7 +428,7 @@ describe('Puppeteer screencast capture controls', () => {
     expect(delay).toHaveBeenCalledWith(50)
   })
 
-  it('requests one unclipped in-memory paint before restoring the viewport', async () => {
+  it('requests unclipped in-memory paints before and after restoring the viewport', async () => {
     vi.useFakeTimers()
     const { promise, resolve } = Promise.withResolvers<Uint8Array>()
     const screenshot = vi.fn(async () => promise)
@@ -288,6 +455,7 @@ describe('Puppeteer screencast capture controls', () => {
     await vi.advanceTimersByTimeAsync(50)
     await priming
     expect(setViewport).toHaveBeenLastCalledWith({ width: 800, height: 600 })
+    expect(screenshot).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -300,8 +468,8 @@ describe('Puppeteer screencast capture controls', () => {
       setViewport,
       ...createPaintSession(async () => promise),
     } as unknown as Page
-    const priming = primeScreencastFrames(page)
-    await vi.advanceTimersByTimeAsync(550)
+    const priming = primeScreencastFrames(page, fakeTimerClock())
+    await vi.advanceTimersByTimeAsync(1_050)
     await priming
     expect(setViewport).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
@@ -324,6 +492,76 @@ describe('Puppeteer screencast capture controls', () => {
     await priming
     expect(setViewport).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('awaits a restored-surface paint even when temporary viewport frames have arrived', async () => {
+    vi.useFakeTimers()
+    const restoredPaint = Promise.withResolvers<void>()
+    const detachFirst = vi.fn(async () => {})
+    const detachRestored = vi.fn(async () => {})
+    const setViewport = vi.fn(async () => {})
+    const screenshot = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(restoredPaint.promise)
+    const createCDPSession = vi
+      .fn()
+      .mockResolvedValueOnce({ send: screenshot, detach: detachFirst })
+      .mockResolvedValueOnce({ send: screenshot, detach: detachRestored })
+    let ready = false
+    const priming = primeScreencastFrames(
+      {
+        viewport: () => null,
+        evaluate: async () => ({ width: 1280, height: 720 }),
+        setViewport,
+        createCDPSession,
+      } as unknown as Page,
+      fakeTimerClock(),
+      { frameCount: 2 },
+    ).then((result) => {
+      ready = true
+      return result
+    })
+    await vi.advanceTimersByTimeAsync(50)
+    expect(setViewport).toHaveBeenLastCalledWith(null)
+    expect(screenshot).toHaveBeenCalledTimes(2)
+    expect(ready).toBe(false)
+    expect(detachFirst).toHaveBeenCalledOnce()
+    expect(detachRestored).not.toHaveBeenCalled()
+    restoredPaint.resolve()
+    await expect(priming).resolves.toBe(true)
+    expect(detachRestored).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('bounds and detaches an unresponsive restored-surface paint without another resize', async () => {
+    vi.useFakeTimers()
+    const restoredPaint = Promise.withResolvers<void>()
+    const detach = vi.fn(async () => {})
+    const setViewport = vi.fn(async () => {})
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(restoredPaint.promise)
+    const priming = primeScreencastFrames(
+      {
+        viewport: () => ({ width: 800, height: 600 }),
+        setViewport,
+        createCDPSession: async () => ({ send, detach }),
+      } as unknown as Page,
+      fakeTimerClock(),
+      { frameCount: 2 },
+    )
+    await vi.advanceTimersByTimeAsync(550)
+    await expect(priming).resolves.toBe(true)
+    expect(detach).toHaveBeenCalledTimes(2)
+    expect(setViewport).toHaveBeenCalledTimes(2)
+    expect(setViewport).toHaveBeenLastCalledWith({ width: 800, height: 600 })
+    expect(vi.getTimerCount()).toBe(0)
+    restoredPaint.reject(new Error('late target closure'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(detach).toHaveBeenCalledTimes(2)
+    expect(setViewport).toHaveBeenCalledTimes(2)
   })
 
   it('restores the viewport when the injected warmup clock fails', async () => {

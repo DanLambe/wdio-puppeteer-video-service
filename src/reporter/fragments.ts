@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { writeFileAtomically } from './atomic-write.js'
 import {
   DEFAULT_REPORT_FILE_NAME,
   REPORTER_FRAGMENT_SCHEMA_VERSION,
@@ -56,9 +57,7 @@ export const writeReporterFragment = async (
   await fs.mkdir(fragmentDir, { recursive: true })
   const fileName = `${sanitizeFileToken(fragment.cid)}-${process.pid.toString()}-${randomUUID()}.json`
   const fragmentPath = path.join(fragmentDir, fileName)
-  const temporaryPath = `${fragmentPath}.${randomUUID()}.tmp`
-  await fs.writeFile(temporaryPath, `${JSON.stringify(fragment)}\n`, 'utf8')
-  await fs.rename(temporaryPath, fragmentPath)
+  await writeFileAtomically(fragmentPath, `${JSON.stringify(fragment)}\n`)
   return fragmentPath
 }
 

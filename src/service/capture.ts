@@ -38,6 +38,8 @@ export type ScreencastRecordFunction = (
 
 export interface StartScreencastOptions {
   capture: ResolvedCaptureOptions
+  /** Bounds the restored-surface paint; defaults to the system clock. */
+  clock?: ClockBoundary
   ffmpegPath: string
   format: OutputFormat
   onViewportRestoreError?: (error: unknown) => void
@@ -49,12 +51,13 @@ export const startScreencast = async (
   record: ScreencastRecordFunction = recordScreencast,
 ): Promise<ScreencastRecorder> => {
   const originalViewport = page.viewport()
-  if (options.capture.viewport !== 'current') {
-    await page.setViewport(options.capture.viewport)
-  }
-
+  let recorder: ScreencastRecorder | undefined
   try {
-    return await record(page, createScreencastOptions(options))
+    if (options.capture.viewport !== 'current') {
+      await page.setViewport(options.capture.viewport)
+    }
+    recorder = await record(page, createScreencastOptions(options))
+    return recorder
   } catch (error) {
     if (
       options.capture.crop &&
@@ -72,6 +75,10 @@ export const startScreencast = async (
       await page.setViewport(originalViewport).catch((error) => {
         options.onViewportRestoreError?.(error)
       })
+      // Frame priming may be disabled, so it cannot be relied on to paint.
+      if (recorder) {
+        await paintRestoredSurface(page, options.clock ?? systemClock)
+      }
     }
   }
 }
@@ -156,7 +163,22 @@ const warmViewport = async (
     await page.setViewport(currentViewport).catch(() => {
       /* best-effort viewport restore */
     })
+    // A frame from the temporary size does not confirm the restored surface.
+    await paintRestoredSurface(page, clock)
   }
+}
+
+/**
+ * A viewport change the screencast never sees painted can leave Chrome's
+ * screencast emitting no further frames, even after the page navigates, so a
+ * static test records only the frame before it. Every restore made while a
+ * screencast runs is followed by this bounded paint before the test continues.
+ */
+const paintRestoredSurface = async (
+  page: Page,
+  clock: ClockBoundary,
+): Promise<void> => {
+  await waitForPagePaint(page, clock, FRAME_PRIMING_PAINT_TIMEOUT_MS)
 }
 
 /**

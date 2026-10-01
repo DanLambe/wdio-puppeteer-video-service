@@ -82,6 +82,12 @@ export const assertManifestPlaybackMatchesCapture = async (
       playedSeconds <= captureSeconds + PLAYBACK_STARTUP_ALLOWANCE_SECONDS,
       `Expected ${segment.path} to play back no longer than its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
     )
+    // First-frame and stop latency shorten a video a little; half the capture
+    // means the container is truncated, as a mis-sized MP4 track once was.
+    assert.ok(
+      playedSeconds >= captureSeconds / 2,
+      `Expected ${segment.path} to cover most of its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
+    )
     verified += 1
   }
   assert.ok(verified > 0, 'Expected a single-segment recording to time')

@@ -46,6 +46,12 @@ jobs:
       - name: Verify Recorder Process Cleanup
         run: corepack npm run test:integration:screencast
 
+      - name: Verify Report Artifact Integration
+        run: corepack npm run test:integration:report
+
+      - name: Verify Benchmark Host Integration
+        run: corepack npm run test:integration:pipeline
+
       - name: Run SonarQube PR Analysis
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
@@ -78,6 +84,15 @@ jobs:
 
       - name: Rebuild E2E Binary Dependencies
         run: corepack npm rebuild esbuild ffmpeg-static
+
+      - name: Verify Recorded Frame Timeline
+        run: corepack npm run test:integration:timeline
+
+      - name: Exercise Installed Tarball
+        run: corepack npm run test:consumer:e2e
+
+      - name: Exercise Installed Tarball Without Frame Priming
+        run: corepack npm run test:consumer:e2e -- --priming off
 
       - name: Run E2E Tests
         run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced
@@ -144,6 +159,15 @@ jobs:
 
       - name: Verify Recorder Process Cleanup
         run: corepack npm run test:integration:screencast
+
+      - name: Verify Report Artifact Integration
+        run: corepack npm run test:integration:report
+
+      - name: Verify Benchmark Host Integration
+        run: corepack npm run test:integration:pipeline
+
+      - name: Verify Recorded Frame Timeline
+        run: corepack npm run test:integration:timeline
 
       - name: Run Bounded Windows Advanced Tests
         run: corepack npm run test:e2e:advanced:windows

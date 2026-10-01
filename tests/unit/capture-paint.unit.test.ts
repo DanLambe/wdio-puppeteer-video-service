@@ -1,5 +1,6 @@
 import type { CDPSession, Page } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { systemClock } from '../../src/service/boundaries.js'
 import {
   primeScreencastFrames,
   waitForBrowserToRender,
@@ -136,15 +137,20 @@ describe('disposable browser paint requests', () => {
     },
   )
 
-  it('also detaches a timed-out priming paint and restores the viewport', async () => {
+  it('detaches both timed-out priming paints and restores the viewport', async () => {
     vi.useFakeTimers()
     const harness = createHarness()
     harness.send.mockImplementation(async () => new Promise(() => {}))
-    const priming = primeScreencastFrames(harness.page)
-    await vi.advanceTimersByTimeAsync(550)
+    const priming = primeScreencastFrames(harness.page, {
+      ...systemClock,
+      delay: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    })
+    await vi.advanceTimersByTimeAsync(1_050)
     await expect(priming).resolves.toBe(true)
     expect(harness.screenshot).not.toHaveBeenCalled()
-    expect(harness.detach).toHaveBeenCalledOnce()
+    expect(harness.createCDPSession).toHaveBeenCalledTimes(2)
+    expect(harness.detach).toHaveBeenCalledTimes(2)
     expect(harness.send).toHaveBeenCalledWith(
       'Page.captureScreenshot',
       expect.any(Object),

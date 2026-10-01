@@ -10,6 +10,7 @@ import {
   createDeferredMergeTask,
   createDeferredTranscodeTask,
   mergeSegmentPathsToOutput,
+  resolveTimestampPassthroughArgs,
 } from '../../src/service/post-process.js'
 
 describe('post-process helpers', () => {
@@ -91,6 +92,24 @@ describe('post-process helpers', () => {
     })
   })
 
+  it.each([
+    ['4.4.2-0ubuntu0.22.04.1', ['-vsync', 'passthrough']],
+    ['5.0.1', ['-vsync', 'passthrough']],
+    ['5.1', ['-fps_mode', 'passthrough']],
+    ['6.1.1-essentials_build-www.gyan.dev', ['-fps_mode', 'passthrough']],
+    ['7.0.2-static', ['-fps_mode', 'passthrough']],
+    ['n9.0.2-3-ga5923073bf-20260924', ['-fps_mode', 'passthrough']],
+    // Development builds report a revision, not a release.
+    ['N-112345-gabcdef0123', ['-fps_mode', 'passthrough']],
+    [undefined, ['-fps_mode', 'passthrough']],
+  ])(
+    'keeps frame timestamps with the spelling FFmpeg %s accepts',
+    (version, args) => {
+      // FFmpeg 5.1 added -fps_mode and 9.0 removed -vsync.
+      expect(resolveTimestampPassthroughArgs(version)).toEqual(args)
+    },
+  )
+
   it('builds H.264 transcode args with custom ffmpeg args before the output path', () => {
     expect(
       buildH264TranscodeArgs('input.webm', 'output.mp4', ['-preset', 'slow']),
@@ -105,6 +124,10 @@ describe('post-process helpers', () => {
       'yuv420p',
       '-vf',
       'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+      '-fps_mode',
+      'passthrough',
+      '-bf',
+      '0',
       '-preset',
       'veryfast',
       '-crf',
@@ -133,6 +156,10 @@ describe('post-process helpers', () => {
       'yuv420p',
       '-vf',
       'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+      '-fps_mode',
+      'passthrough',
+      '-bf',
+      '0',
       '-preset',
       'veryfast',
       '-crf',

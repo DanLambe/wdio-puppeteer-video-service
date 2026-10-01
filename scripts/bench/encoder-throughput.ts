@@ -1,13 +1,12 @@
 // Encoder-only throughput benchmark: no browser, no WDIO.
 //
-// Feeds a fixed PNG frame to FFmpeg the way `ScreencastRecorder` does - one
-// `image2pipe` stream of PNG buffers - and measures how fast each encoder
-// configuration drains them. The number that matters is `realtimeRatio`: the
-// encoded frames per second divided by the capture rate. Below 1.0 the encoder
-// falls behind the capture grid for the whole test, so `stop()` inherits a
-// backlog it cannot drain inside the stop deadline.
-//
-// Pair this with `pipeline.ts`, which measures the same thing end to end.
+// Feeds a stream of PNG frames to FFmpeg and measures how fast each encoder
+// configuration decodes and encodes them. `ScreencastRecorder` sends each
+// distinct frame once and lets the video hold an unchanged page, so this is its
+// worst case: a busy page whose every grid position shows a new frame. The
+// number that matters is `realtimeRatio`: the encoded frames per second divided
+// by the capture rate. Below 1.0 the encoder falls behind a continuously
+// changing page, and the recorder's bounded queue eventually stops capture.
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -99,7 +98,8 @@ export const buildEncoderArguments = (
     String(settings.threads),
     ...codecStage,
     '-vf',
-    [cropExpression, `pad=${width}:${height}:0:0`].join(),
+    // Same canvas and 4:2:0 conversion as the recorder.
+    [cropExpression, `pad=${width}:${height}:0:0`, 'format=yuv420p'].join(),
     '-y',
     'pipe:1',
   ]

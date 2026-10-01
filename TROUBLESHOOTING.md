@@ -157,11 +157,15 @@ timeout. The replacement recorder always encodes at VP9's fastest realtime speed
 with full-HD capture on 4-CPU runners in validation. It also encodes a static
 page's held frame while the test runs: Chrome sends no frames while nothing
 changes, and Puppeteer's recorder left that whole quiet period to be encoded
-at stop. If a stop still times out, the recorder terminates its owned encoder
+at stop. From `1.0.0-rc.6`, an unchanged page is not re-encoded at all: each
+distinct frame reaches the encoder once and the video holds it, which removed
+stop timeouts from a two-CPU, four-worker reproduction that still hit them in
+`1.0.0-rc.5`. If a stop still times out, the recorder terminates its owned encoder
 tree, closes the file, and preserves partial bytes as an unclean segment. An
-encoder that exits with an error or is killed is reported with its exit code or
-signal, and its file is likewise kept as an unclean segment rather than
-processed as a complete recording. Either way the manifest entry is `failed`
+encoder that exits before the recording stops, whether with an error, a signal
+or exit code 0, is reported with its exit code or signal, and its file is
+likewise kept as an unclean segment rather than processed as a complete
+recording. Either way the manifest entry is `failed`
 with reason `capture-incomplete`, and `failurePolicy: 'error'` raises it.
 Partial files are not guaranteed to decode. The normal five-second
 graceful-stop deadline is unchanged.
@@ -181,6 +185,58 @@ it an explicit status condition, such as `if: ${{ !cancelled() }}`, so a failed
 test does not skip the upload. Upload only intended logs/media, not the entire
 workspace or credential files. GitHub documents these
 [status-check conditions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions).
+
+## The encoder fell behind, or FFmpeg exited before the recording was stopped
+
+Each of these warnings marks the recording as incomplete. The manifest entry is
+`failed` with reason `capture-incomplete`, the file is kept as an unclean
+segment without merging or transcoding, and `failurePolicy: 'error'` raises the
+failure after cleanup.
+
+- `The encoder fell behind the screencast (… frames waiting for the encoder
+  reached the limit of 1024)` or `(… MiB of frames waiting for the encoder
+  exceeds 64.0 MiB); capture stopped after …s to bound memory.` The page changed
+  faster than FFmpeg could encode it for long enough to fill the recording's
+  bounded queue. The video covers the time up to that point. To reduce the
+  encoding load, run fewer workers or set `concurrency.maxRecordingsPerProcess`
+  or `maxRecordingsGlobal`. You can also bound the frame size with
+  `capture.maxWidth` (the `ci` profile uses 1280), or lower `capture.scale` or
+  `capture.fps`. With `logLevel: 'debug'`, each recording logs its `Encoder queue
+  high-water` mark, which shows how close it came.
+- `FFmpeg exited with code … before the recording was stopped` or `FFmpeg was
+  terminated by … before the recording was stopped`, followed by the end of
+  FFmpeg's error output. The encoder stopped before the service ended its input,
+  so the video ends early even when the exit code is 0. Check a custom
+  `processing.ffmpeg.path`, `FFMPEG_PATH` or wrapper script for options that
+  stop FFmpeg early. `SIGKILL` usually means the operating system reclaimed
+  memory.
+- `Discarded recording was incomplete (…)`: retention discarded a passing test's
+  video, but its capture had already failed for one of the reasons above. The
+  manifest records the failure without segments, so the cause stays visible even
+  though no video is kept.
+
+## The static report shows ambiguous-test-outcome or unmatched-test-outcome
+
+The report joins reporter outcomes to manifest captures from the same spec file,
+worker and attempt. Spec paths that differ only in case can be different files,
+so a path in another case joins only when it is the one spelling recorded.
+Within a spec file, outcomes join by full test title first. A title that differs
+only in case, spacing or Unicode form joins only when no other capture's title
+normalizes the same way. A short title is used last, and only when one side
+lacks a fuller title.
+
+- `ambiguous-test-outcome`: more than one capture could belong to the outcome,
+  for example two tests with the same short title and no distinguishing suite
+  titles, or titles such as `ADMIN works` and `Admin works` reported with a
+  third spelling. The same applies to spec paths such as `tests/ADMIN.ts` and
+  `tests/admin.ts` reported as `tests/Admin.ts`. The outcome is shown without
+  video rather than with a guess.
+- `unmatched-test-outcome`: no capture matches, for example a test that was not
+  recorded, was filtered out, or reported more often than it was recorded.
+- `unmatched-manifest-entry`: a capture no outcome claimed. It stays visible on
+  its own card with its media.
+
+Give tests distinct full titles, and do not rely on case alone to tell them apart.
 
 ## Merge or transcode fails
 

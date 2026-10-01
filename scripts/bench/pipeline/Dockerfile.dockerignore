@@ -1,0 +1,9 @@
+# Only the pinned dependency environment is built into this image.
+# Product and harness snapshots are mounted separately by the runner.
+**
+!package.json
+!package-lock.json
+!.npmrc
+!scripts/
+scripts/**
+!scripts/check-install-scripts.ts

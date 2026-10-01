@@ -1,7 +1,15 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
   "files": {
-    "includes": ["**", "!build", "!node_modules", "!coverage", "!tests/results"]
+    "includes": [
+      "**",
+      "!build",
+      "!node_modules",
+      "!coverage",
+      "!tests/results",
+      "!!.local-review",
+      "!!.webdriverio-skills"
+    ]
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "javascript": {

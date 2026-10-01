@@ -2,7 +2,11 @@ import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import type { CaptureOptions } from '../src/index.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
-import { countFrameColors, probeMediaFile } from './utils/media-probe.js'
+import {
+  countFrameColors,
+  probeFrameTimestamps,
+  probeMediaFile,
+} from './utils/media-probe.js'
 import { videoServiceModulePath } from './utils/service-module.js'
 import { listVideoArtifacts } from './utils/video-artifact-assertions.js'
 
@@ -169,7 +173,17 @@ export const config: WebdriverIO.Config = {
         `Expected a decodable, primed ${format} for ${mode}; container=${media.container}, frames=${media.frameCount.toString()}`,
       )
     }
-    assertRealTimePlayback(media)
+    assertGridPlayback(
+      media,
+      await probeFrameTimestamps(ffmpegPath, path.join(resultsDir, artifact)),
+    )
+    // Planar RGB (VP9 profile 1) is larger and unplayable on Safari and
+    // hardware decoders; every container should carry 4:2:0.
+    if (media.pixelFormat !== 'yuv420p') {
+      throw new Error(
+        `Expected ${mode} media in yuv420p, received ${String(media.pixelFormat)}`,
+      )
+    }
     if (mode === 'animation') {
       const distinct = await probeMediaFile(
         ffmpegPath,
@@ -261,26 +275,45 @@ export const config: WebdriverIO.Config = {
   },
 }
 
-// Encoded frames must follow the configured rate and playback must last about
-// as long as the spec kept the page open. Puppeteer 24's recorder encoded every
-// video at 25 fps regardless of `capture.fps`, stretching or compressing it.
-const assertRealTimePlayback = (media: {
-  durationSeconds: number
-  frameCount: number
-}): void => {
+// Frames sit on the configured playback grid and never closer than one step:
+// an unchanged page is held as one frame instead of repeated. Puppeteer 24's
+// recorder encoded every video at 25 fps regardless of `capture.fps`,
+// stretching or compressing it.
+const assertGridPlayback = (
+  media: { durationSeconds: number },
+  timestamps: readonly number[],
+): void => {
   const speed = capture.speed ?? 1
-  // speed retimes frames and FFmpeg keeps the configured output rate.
-  const expectedFps = capture.fps ?? 30
-  if (media.frameCount >= 15) {
-    const effectiveFps = media.frameCount / media.durationSeconds
-    if (Math.abs(effectiveFps - expectedFps) > expectedFps * 0.12) {
-      throw new Error(
-        `Expected ${mode} media near ${expectedFps.toString()} fps; decoded ${effectiveFps.toFixed(1)} fps`,
-      )
-    }
-    return
+  const step = 1 / ((capture.fps ?? 30) * speed)
+  const offGrid = timestamps.filter((time) => {
+    const steps = time / step
+    // WebM stores milliseconds, so allow rounding within a step.
+    return Math.abs(steps - Math.round(steps)) > 0.05
+  })
+  if (offGrid.length > 0) {
+    throw new Error(
+      `Expected ${mode} frames on the ${step.toFixed(4)}s grid; off-grid at ${offGrid.slice(0, 5).join(', ')}`,
+    )
   }
-  // Too few frames to measure a rate: the spec dwells at least 1.5 seconds.
+  const crowded = timestamps.findIndex(
+    (time, index) =>
+      index > 0 && time - (timestamps[index - 1] ?? 0) < step * 0.95,
+  )
+  if (crowded > 0) {
+    throw new Error(
+      `Expected ${mode} frames at least ${step.toFixed(4)}s apart; frame ${crowded.toString()} follows its predecessor by less`,
+    )
+  }
+  // Players size their timeline from the container. A transcode that sized
+  // the MP4 track from reordered decode times claimed 0.67 s for a 1.6 s
+  // recording whose frames all decoded.
+  const lastFrame = timestamps.at(-1) ?? 0
+  if (media.durationSeconds + step / 2 < lastFrame) {
+    throw new Error(
+      `Expected ${mode} media duration to cover its last frame at ${lastFrame.toFixed(3)}s; container reports ${media.durationSeconds.toFixed(3)}s`,
+    )
+  }
+  // The spec dwells at least 1.5 seconds.
   if (media.durationSeconds * speed < 0.5) {
     throw new Error(
       `Expected ${mode} playback to cover its 1.5 second capture; media plays ${media.durationSeconds.toFixed(2)}s`,

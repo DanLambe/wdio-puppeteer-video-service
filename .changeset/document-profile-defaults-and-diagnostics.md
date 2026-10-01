@@ -1,0 +1,5 @@
+---
+'wdio-puppeteer-video-service': patch
+---
+
+Document the `ci` and `parallel` profile defaults in the published option types, so editor hints no longer show only the `default` profile's values. This covers `capture.fps`, `capture.framePriming`, `recording.windowChanges`, `processing.timing`, `processing.transcode.ffmpegArgs` and `concurrency.startMode`. Troubleshooting now quotes the incomplete-capture warnings (an encoder that fell behind, an encoder that exited before the recording was stopped, and a discarded recording that was already incomplete) and the static report's matching diagnostics, and explains what each means and how to respond. Node.js 24 is documented as the certified runtime; newer versions allowed by `engines.node` are supported on a best-effort basis. Support now explains why `npm audit` reports the `extract-zip` advisories against the service through its Puppeteer Core peer, when WebdriverIO's Chrome and ChromeDriver downloads reach that code, and how to avoid it with pre-installed binaries and a private driver cache.

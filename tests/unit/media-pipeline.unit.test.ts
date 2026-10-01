@@ -17,6 +17,11 @@ import type { FailurePolicy, LogLevel } from '../../src/types.js'
 type RunHandler = (args: string[], operation: string) => Promise<boolean>
 
 class FakeMediaRuntime implements MediaPipelineRuntime {
+  // Deliberately not the default spelling, to show the runtime's choice is used.
+  readonly timestampPassthroughArgs: readonly string[] = [
+    '-vsync',
+    'passthrough',
+  ]
   readonly operations: Array<Readonly<{ args: string[]; operation: string }>> =
     []
   readonly slotOperations: string[] = []
@@ -86,6 +91,10 @@ describe('MediaPipeline', () => {
           'yuv420p',
           '-vf',
           'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+          '-vsync',
+          'passthrough',
+          '-bf',
+          '0',
           '-preset',
           'veryfast',
           '-crf',

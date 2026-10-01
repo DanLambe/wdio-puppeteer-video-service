@@ -83,10 +83,35 @@ const DEFAULT_H264_TRANSCODE_ARGS = [
   '23',
 ] as const
 
+const FPS_MODE_PASSTHROUGH = ['-fps_mode', 'passthrough'] as const
+
+/**
+ * Keep each frame's timestamp instead of repeating frames onto a constant
+ * rate. Recordings hold an unchanged page as one frame, so a constant-rate
+ * transcode would re-encode every repeat and size the final frame by guessing.
+ * FFmpeg 5.1 introduced `-fps_mode` and 9.0 removed `-vsync`, so the spelling
+ * follows the detected version; an unrecognized version string is a recent
+ * development build.
+ */
+export const resolveTimestampPassthroughArgs = (
+  version: string | undefined,
+): readonly string[] => {
+  const match = /^n?(\d+)\.(\d+)/u.exec(version ?? '')
+  if (!match) {
+    return FPS_MODE_PASSTHROUGH
+  }
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return major < 5 || (major === 5 && minor < 1)
+    ? ['-vsync', 'passthrough']
+    : FPS_MODE_PASSTHROUGH
+}
+
 export const buildH264TranscodeArgs = (
   inputPath: string,
   outputPath: string,
   ffmpegArgs: string[] | undefined,
+  timestampArgs: readonly string[] = FPS_MODE_PASSTHROUGH,
 ): string[] => {
   return [
     '-n',
@@ -99,6 +124,12 @@ export const buildH264TranscodeArgs = (
     'yuv420p',
     '-vf',
     'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+    ...timestampArgs,
+    // With kept timestamps, B-frame reordering makes the MP4 muxer size the
+    // track from decode times: a 1.6 s recording of sparse frames claimed to
+    // last 0.67 s. A held page gains nothing from B-frames anyway.
+    '-bf',
+    '0',
     // Speed up the default preset while retaining CRF 23. Configured arguments
     // follow, so callers can still override both the preset and quality.
     ...DEFAULT_H264_TRANSCODE_ARGS,

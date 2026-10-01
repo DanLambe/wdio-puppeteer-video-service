@@ -30,7 +30,17 @@ describe('media probe', () => {
       height: 720,
       durationSeconds: 1.25,
       frameCount: 38,
+      pixelFormat: 'yuv420p',
     })
+  })
+
+  it.each([
+    ['vp9 (Profile 1), gbrp(pc, gbr/unknown/unknown, progressive)', 'gbrp'],
+    ['vp9 (Profile 0), yuv420p(tv, progressive)', 'yuv420p'],
+    ['h264 (High) (avc1 / 0x31637661), yuv420p(progressive)', 'yuv420p'],
+  ])('reads the pixel format after %s', (stream, pixelFormat) => {
+    const output = validProbeOutput.replace('vp9 (Profile 0), yuv420p', stream)
+    expect(parseFfmpegProbeOutput(output).pixelFormat).toBe(pixelFormat)
   })
 
   it('derives raw WebM duration from the decoded timeline', () => {

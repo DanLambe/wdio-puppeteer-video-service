@@ -101,7 +101,7 @@ keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
 ## Prerequisites
 
-- Node.js 24+
+- Node.js 24 is certified. Newer versions are permitted by the package engine range and supported on a best-effort basis.
 - WebdriverIO `>=9.29.1 <10` using `runner: 'local'`
 - Puppeteer Core `>=24.11.2 <25`
 - A Chromium-based browser session (Chrome or Edge)
@@ -113,6 +113,11 @@ FFmpeg is resolved in this order:
 2. `FFMPEG_PATH`
 3. `ffmpeg` on `PATH`
 4. `ffmpeg-static` when installed by the consuming project
+
+FFmpeg 4.4 (Ubuntu 22.04's package) and later are supported; release
+validation covers 4.4 and the bundled `ffmpeg-static` build. Recordings are
+VP9 in 4:2:0 color (`yuv420p`), the profile browsers, Safari and hardware
+decoders all play.
 
 This package does not install FFmpeg automatically for end users. Repository
 development uses the Node and npm versions declared in `package.json`; run npm
@@ -137,13 +142,13 @@ Top-level options:
 
 `capture`:
 
-- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while the recorder establishes its canvas, then the original viewport mode is restored immediately after the screencast starts. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
-- `fps` (default `30`; `24` for the `parallel` and `ci` profiles): the encoded frame rate. Captured frames are placed on this frame-rate timeline, so recordings play back in real time (before `speed`) whether the page repaints faster or slower than `fps`.
+- `viewport` (default `'current'`): preserves the browser's current viewport. An explicit `{ width, height }` temporarily sizes the page while the recorder establishes its canvas, then the original viewport mode is restored immediately after the screencast starts, and a bounded paint (up to 500 ms) confirms the restored surface before the test continues, with or without frame priming. The canvas remains pinned to that start-time size, so later larger frames are cropped or padded against it; this option does not hold the test page at the configured size for the full recording.
+- `fps` (default `30`; `24` for the `parallel` and `ci` profiles): the frame-rate grid captured frames are placed on, so recordings play back in real time (before `speed`) whether the page repaints faster or slower than `fps`. A page that has not changed is held as one frame rather than encoded again at every grid position, so the video's frame rate varies up to `fps` and a mostly static test costs the encoder little.
 - `quality` (default `30`): Puppeteer/FFmpeg constant-rate factor from `0` (best quality) through `63` (smallest output).
 - `maxWidth` and `maxHeight` (no default; `maxWidth: 1280` on the `ci` profile unless either bound is set or `crop` is used): cap the dimensions Chrome is asked to produce for each screencast frame. Chrome scales the frame to fit, preserving aspect ratio, before it leaves the browser, so a smaller frame is encoded, transferred, and decoded. This bounds the frame, not the page: layout and paint are unchanged and the viewport is not resized. A frame already inside the bound is untouched. Both must be even integers of at least 2. Encoding a real captured page at 720p rather than 1080p measured about 2.2 times the throughput with output about 47% smaller, under a two-CPU quota with four concurrent encoders; that is an encoder-only figure using a repeated still frame, not a whole-suite measurement. **Cannot be combined with `crop`** (see below).
 - `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters. `scale` resizes precisely after capture using a Lanczos filter, so prefer `maxWidth`/`maxHeight` when the goal is cost rather than an exact size.
 - `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg. A crop cannot be combined with `maxWidth` or `maxHeight`: Chrome applies a bound against the viewport of each frame, so a crop rectangle fixed when capture starts would select the wrong region as soon as the viewport changes — including the restore that `capture.viewport` performs. The combination is rejected before capture starts, and the `ci` profile's default bound is not applied to a cropped recording. Use `scale` to resize a cropped recording.
-- `framePriming` (default `true`; `false` on the `ci` profile): primes early screencast frames with a viewport warmup and a bounded paint request (up to 500 ms), then restores the original viewport. A low-quality, in-memory viewport snapshot requests that paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, priming retries within a 1.5-second budget. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
+- `framePriming` (default `true`; `false` on the `ci` profile): primes early screencast frames with a viewport warmup: a bounded paint request (up to 500 ms) at a temporary size, then the original viewport is restored and a second bounded paint (up to 500 ms) confirms the restored surface. A low-quality, in-memory viewport snapshot requests each paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, further warmups start for up to 1.5 seconds; if paint requests never complete, priming can take about 3.4 seconds in all. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection. Before the first test, the service connects when a Chromium worker session starts and finds its page, then allows up to 20 seconds for a disposable paint request to confirm that the browser is ready to render. This separate render budget does not include connection or page lookup. Warm-up is best-effort, runs even with `framePriming: false`, and also runs for workers whose tests are filtered out or record only retries. Paint requests use a dedicated CDP session that is detached on completion or timeout, without taking Puppeteer's shared screenshot lock. A connection that fails at warm-up is retried, and reported, at the first recording.
 
 `processing`:
@@ -325,9 +330,11 @@ without mixing worker journals. Existing valid run records are retained whenever
 the manifest is aggregated; the service does not prune old runs, so archive or
 remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
-An incomplete capture (for example, an encoder error or a stop timeout) is
-recorded in the manifest as `failed` with reason `capture-incomplete`, even if
-it produced a nonempty file. Retained partial media is still listed, and
+An incomplete capture (for example, an encoder error, an encoder that exits
+before the recording stops even with exit code 0, an overloaded encoder, or a
+stop timeout) is recorded in the manifest as `failed` with reason
+`capture-incomplete`, even if it produced a nonempty file or retention
+discarded its media. Retained partial media is still listed, and
 attached to Allure when configured, for diagnosis, but it is not merged or
 otherwise processed; unretained media is discarded normally. The default
 `failurePolicy: 'warn'` logs one warning when the segment stops and does not
@@ -375,6 +382,13 @@ without fractional seconds.
 The optional reporter writes one fragment per WDIO worker. After Manifest v1 is
 aggregated, the service joins outcomes to captures by run, worker, normalized
 spec/test identity, and attempt, then creates `outputDir/video-report.html`.
+Full test identities are matched first across the whole run, so a short title
+never takes a capture that another outcome identifies exactly. A short-title
+fallback then requires one side to lack a fuller identity and exactly one
+unclaimed capture to match. Cucumber scenarios are recorded under their
+scenario name, so `scenarioLevelReporter` outcomes join through this fallback;
+ambiguous outcomes receive a diagnostic instead of a potentially incorrect
+video.
 Skipped tests and tests without retained video remain visible. The report has
 status, spec, browser, and retry filters, inline playback, diagnostics, and
 error details.
@@ -442,12 +456,41 @@ captured PNG, and `--size`, `--fps`, and `--encoders` to match the workload:
 npm run bench:encoder -- --size=1920x1080 --frames=100 --fps=24
 ```
 
+`npm run bench:report` measures report matching and sorting on 1,000, 5,000,
+and 10,000 entries, checking associations and deterministic output. It emits
+JSON timings and host metadata. An optional module path selects another
+checkout's `src/reporter/report-model.ts` for comparison. This benchmark
+excludes browser, encoding, media I/O, and HTML rendering costs.
+
+`npm run bench:pipeline` compares the complete browser/WDIO pipeline against a
+baseline commit and recording disabled in one pinned Docker image. It runs five
+paired comparisons per CPU/worker and retention combination, verifies decoded
+media, and finishes with a five-minute memory soak. See the
+[benchmark instructions](scripts/bench/pipeline/README.md) for image setup,
+metrics, investigation thresholds, and the separate performance workflow.
+
 Recordings are not throttled by default: `concurrency.maxRecordingsPerProcess`
 and `maxRecordingsGlobal` are both unlimited, so WDIO `maxInstances: 4` means
 four browsers and four encoders competing for the same cores. Set one of them
 when workers outnumber the cores available.
 
 ## WDIO Protocol Compatibility
+
+Once the encoder spawns, recorder-owned CDP attachment and screencast start
+share a 10-second internal deadline. Startup failures terminate the owned
+encoder tree and detach any session that arrives late. The first-frame wait,
+cold-browser render warm-up, and recorder shutdown keep separate budgets.
+Viewport changes and restoration are awaited so a timed-out start cannot
+leave a pending resize behind the following test.
+
+Each distinct frame is handed to the encoder once, and writes wait whenever the
+encoder's input is full. Frames waiting for the encoder are bounded per
+recording (64 MiB of image data or 1,024 frames). If an overloaded host lets
+the encoder fall that far behind, capture stops early: the frames already
+accepted are still encoded, and the recording is reported as incomplete
+(Manifest reason `capture-incomplete`, no merge or transcode, `failurePolicy`
+applied after cleanup) rather than letting worker memory grow without bound.
+Debug logging reports each recording's queue high-water mark.
 
 WDIO v9 attempts WebDriver BiDi for supported browsers by default. This service
 classifies a successful recording session as `bidi+cdp` or `classic+cdp`:
@@ -483,6 +526,7 @@ cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
+- `npm run test:consumer:e2e`: installs a tarball into a fresh consumer with normal peer resolution, then verifies package-name WDIO registration, decoded media, Manifest v1, the HTML report, and Allure attachments. Use `-- --peers minimum --protocol bidi` (or `latest` / `classic`) to select the compatibility leg, and `--priming off` to record without frame priming, as the `ci` profile does. The existing peer-free import check remains separate.
 - `npm run test:coverage`: runs the deterministic unit/integration suite with
   96% statements and lines, 95% functions, and a 93% branch gate.
 - `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.

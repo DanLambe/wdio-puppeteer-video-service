@@ -1,5 +1,7 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
+import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
 
 export type MediaContainer = 'mp4' | 'webm'
 
@@ -10,6 +12,8 @@ export interface MediaProbeResult {
   height: number
   durationSeconds: number
   frameCount: number
+  /** Decoded pixel format, such as `yuv420p`, when FFmpeg reports one. */
+  pixelFormat?: string
 }
 
 export interface MediaProbeOptions {
@@ -64,7 +68,7 @@ const parseDurationSeconds = (output: string): number => {
 
 const parseVideoStream = (
   output: string,
-): Pick<MediaProbeResult, 'codec' | 'width' | 'height'> => {
+): Pick<MediaProbeResult, 'codec' | 'width' | 'height' | 'pixelFormat'> => {
   const videoLine = output
     .split(/\r?\n/u)
     .find((line) => line.includes('Video:'))
@@ -76,10 +80,16 @@ const parseVideoStream = (
     )
   }
 
+  // "Video: vp9 (Profile 0), yuv420p(tv, progressive), 1280x720": the pixel
+  // format follows the codec and its optional parenthesized profile.
+  const pixelFormat = /Video:\s*[^,]+,\s*([a-z0-9_]+)/u.exec(
+    videoLine ?? '',
+  )?.[1]
   return {
     codec: codecMatch[1]?.toLowerCase() ?? '',
     width: Number(dimensionsMatch[1]),
     height: Number(dimensionsMatch[2]),
+    ...(pixelFormat ? { pixelFormat } : {}),
   }
 }
 
@@ -210,6 +220,46 @@ export const probeMediaFile = async (
       timeout.unref()
     }
   })
+}
+
+/**
+ * Every decoded frame's presentation time in seconds. Recordings hold an
+ * unchanged page as one frame, so timestamps, not a frame rate, describe them;
+ * the passthrough flag keeps FFmpeg from inventing repeats while decoding.
+ */
+export const probeFrameTimestamps = async (
+  ffmpegPath: string,
+  filePath: string,
+): Promise<number[]> => {
+  const passthrough = resolveTimestampPassthroughArgs(
+    await readFfmpegVersion(ffmpegPath),
+  )
+  const result = spawnSync(
+    ffmpegPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-i',
+      filePath,
+      '-map',
+      '0:v:0',
+      '-vf',
+      'showinfo',
+      ...passthrough,
+      '-f',
+      'null',
+      '-',
+    ],
+    { encoding: 'utf8', maxBuffer: 1 << 26 },
+  )
+  if (result.status !== 0) {
+    throw new Error(
+      `Frame timestamp probe failed for ${filePath}: ${result.stderr.slice(-2_000)}`,
+    )
+  }
+  return [...result.stderr.matchAll(/pts_time:\s*(-?[\d.]+)/gu)].map((match) =>
+    Number(match[1]),
+  )
 }
 
 export interface FramePixelCounts {

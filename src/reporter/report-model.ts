@@ -5,6 +5,7 @@ import type {
   ManifestMediaArtifact,
   ManifestRunV1,
 } from '../manifest.js'
+import { type ManifestMatch, ManifestMatcher } from './manifest-matcher.js'
 import type {
   ReporterDiagnostic,
   ReporterErrorDetails,
@@ -65,22 +66,19 @@ export const createReportModel = async (options: {
       }),
     ),
   )
-  const matchedEntries = new Set<string>()
-  const scenarioAssignments = new Map<string, string>()
   const entries = options.run?.entries ?? []
+  const matcher = new ManifestMatcher(entries)
   const outcomes = options.fragments.flatMap((fragment) => fragment.outcomes)
-  const items = outcomes.map((outcome) =>
+  const items = matcher.matchAll(outcomes).map(({ outcome, match }) =>
     createOutcomeReportItem({
       diagnostics,
-      entries,
       hasManifest: options.run !== undefined,
-      matchedEntries,
+      match,
       outcome,
-      scenarioAssignments,
     }),
   )
   const unmatchedEntries = entries.filter(
-    (entry) => !matchedEntries.has(entry.id),
+    (entry) => !matcher.matchedEntries.has(entry.id),
   )
   diagnostics.push(...unmatchedEntries.map(createUnmatchedEntryDiagnostic))
   items.push(...unmatchedEntries.map(createManifestOnlyReportItem))
@@ -97,24 +95,17 @@ export const createReportModel = async (options: {
 
 const createOutcomeReportItem = (options: {
   readonly diagnostics: ReporterDiagnostic[]
-  readonly entries: ManifestEntryV1[]
   readonly hasManifest: boolean
-  readonly matchedEntries: Set<string>
+  readonly match: ManifestMatch
   readonly outcome: ReporterTestOutcome
-  readonly scenarioAssignments: Map<string, string>
 }): ReportItem => {
-  const entry = findManifestEntry(
-    options.entries,
-    options.outcome,
-    options.matchedEntries,
-    options.scenarioAssignments,
-  )
-  if (entry) {
-    options.matchedEntries.add(entry.id)
-  } else if (options.hasManifest) {
+  const entry =
+    options.match.kind === 'matched' ? options.match.entry : undefined
+  if (!entry && options.hasManifest) {
+    const ambiguous = options.match.kind === 'ambiguous'
     options.diagnostics.push({
-      code: 'unmatched-test-outcome',
-      message: `No manifest capture matched ${options.outcome.cid} / ${options.outcome.test.fullName ?? options.outcome.test.name} / attempt ${options.outcome.attempt.toString()}`,
+      code: ambiguous ? 'ambiguous-test-outcome' : 'unmatched-test-outcome',
+      message: `${ambiguous ? 'Multiple manifest captures could match' : 'No manifest capture matched'} ${options.outcome.cid} / ${options.outcome.test.fullName ?? options.outcome.test.name} / attempt ${options.outcome.attempt.toString()}`,
     })
   }
   return createReportItem(options.outcome, entry)
@@ -126,136 +117,6 @@ const createUnmatchedEntryDiagnostic = (
   code: 'unmatched-manifest-entry',
   message: `Manifest capture ${entry.id} has no reporter outcome`,
 })
-
-const findManifestEntry = (
-  entries: ManifestEntryV1[],
-  outcome: ReporterTestOutcome,
-  matchedEntries: ReadonlySet<string>,
-  scenarioAssignments: Map<string, string>,
-): ManifestEntryV1 | undefined => {
-  const candidates = entries.filter((entry) => {
-    return (
-      entry.runId === outcome.runId &&
-      entry.cid === outcome.cid &&
-      normalizePathForComparison(entry.spec) ===
-        normalizePathForComparison(outcome.spec) &&
-      entry.attempt === outcome.attempt
-    )
-  })
-  const exact = candidates.find((entry) => {
-    return (
-      entry.scope === 'test' &&
-      !matchedEntries.has(entry.id) &&
-      testIdentityMatches(entry, outcome)
-    )
-  })
-  const containerName = outcome.test.containerName
-  const scenario = containerName
-    ? resolveScenarioEntry({
-        candidates,
-        containerName,
-        matchedEntries,
-        outcome,
-        scenarioAssignments,
-      })
-    : undefined
-  return scenario ?? exact ?? candidates.find((entry) => entry.scope === 'spec')
-}
-
-/**
- * Cucumber emits one outcome per step, so every step of a scenario must resolve
- * to the same manifest entry while distinct scenarios that share a title claim
- * different entries. The first step of a scenario claims the next unmatched
- * same-titled entry and later steps reuse that assignment; excluding matched
- * entries alone would push a scenario's later steps onto the next entry.
- */
-const resolveScenarioEntry = (input: {
-  readonly candidates: ManifestEntryV1[]
-  readonly containerName: string
-  readonly matchedEntries: ReadonlySet<string>
-  readonly outcome: ReporterTestOutcome
-  readonly scenarioAssignments: Map<string, string>
-}): ManifestEntryV1 | undefined => {
-  const assignmentKey = buildScenarioAssignmentKey(
-    input.outcome,
-    input.containerName,
-  )
-  const assignedEntryId = input.scenarioAssignments.get(assignmentKey)
-  if (assignedEntryId !== undefined) {
-    const assigned = input.candidates.find(
-      (entry) => entry.id === assignedEntryId,
-    )
-    if (assigned) {
-      return assigned
-    }
-  }
-
-  const claimed = input.candidates.find((entry) => {
-    return (
-      entry.scope === 'test' &&
-      !input.matchedEntries.has(entry.id) &&
-      containerIdentityMatches(entry, input.containerName)
-    )
-  })
-  if (claimed) {
-    input.scenarioAssignments.set(assignmentKey, claimed.id)
-  }
-  return claimed
-}
-
-/**
- * Cucumber's step payload carries the scenario's id as `test.parent`, which
- * stays stable across a scenario's steps and differs between scenarios,
- * including expanded Scenario Outline rows.
- */
-const buildScenarioAssignmentKey = (
-  outcome: ReporterTestOutcome,
-  containerName: string,
-): string => {
-  return [
-    outcome.runId,
-    outcome.cid,
-    normalizePathForComparison(outcome.spec),
-    outcome.attempt.toString(),
-    outcome.test.parent ?? '',
-    normalizeIdentity(containerName),
-  ].join('\0')
-}
-
-const testIdentityMatches = (
-  entry: ManifestEntryV1,
-  outcome: ReporterTestOutcome,
-): boolean => {
-  if (!entry.test) {
-    return false
-  }
-  const entryFullName = normalizeIdentity(
-    entry.test.fullName ?? entry.test.name,
-  )
-  const outcomeFullName = normalizeIdentity(
-    outcome.test.fullName ?? outcome.test.name,
-  )
-  const entryNames = [entryFullName, normalizeIdentity(entry.test.name)]
-  const outcomeNames = new Set([
-    outcomeFullName,
-    normalizeIdentity(outcome.test.name),
-  ])
-  return entryNames.some((entryName) => outcomeNames.has(entryName))
-}
-
-const containerIdentityMatches = (
-  entry: ManifestEntryV1,
-  containerName: string,
-): boolean => {
-  if (!entry.test) {
-    return false
-  }
-  const normalizedContainer = normalizeIdentity(containerName)
-  return [entry.test.fullName, entry.test.name]
-    .filter((name): name is string => !!name)
-    .map(normalizeIdentity)
-    .includes(normalizedContainer)
-}
 
 const createReportItem = (
   outcome: ReporterTestOutcome,
@@ -319,26 +180,34 @@ const checkMediaAvailability = async (
   items: ReportItem[],
   diagnostics: ReporterDiagnostic[],
 ): Promise<void> => {
-  const media = items.flatMap((item) => item.media)
-  const missingPaths = await Promise.all(
-    media.map((item) => resolveMediaAvailability(outputDir, item)),
+  const byPath = new Map<string, ReportMedia[]>()
+  for (const item of items) {
+    for (const media of item.media) {
+      const references = byPath.get(media.path)
+      if (references) {
+        references.push(media)
+      } else {
+        byPath.set(media.path, [media])
+      }
+    }
+  }
+  const pending = byPath.entries()
+  await Promise.all(
+    Array.from({ length: Math.min(8, byPath.size) }, async () => {
+      for (const [relativePath, references] of pending) {
+        const available = await fs
+          .stat(path.resolve(outputDir, relativePath))
+          .then((stats) => stats.isFile())
+          .catch(() => false)
+        for (const media of references) {
+          media.available = available
+        }
+        if (!available) {
+          diagnostics.push(createMissingMediaDiagnostic(relativePath))
+        }
+      }
+    }),
   )
-  diagnostics.push(
-    ...missingPaths
-      .filter((missingPath): missingPath is string => !!missingPath)
-      .map(createMissingMediaDiagnostic),
-  )
-}
-
-const resolveMediaAvailability = async (
-  outputDir: string,
-  media: ReportMedia,
-): Promise<string | undefined> => {
-  media.available = await fs
-    .stat(path.resolve(outputDir, media.path))
-    .then((stats) => stats.isFile())
-    .catch(() => false)
-  return media.available ? undefined : media.path
 }
 
 const createMissingMediaDiagnostic = (path: string): ReporterDiagnostic => ({
@@ -381,14 +250,6 @@ const outcomeBrowserFallback = (outcome: ReporterTestOutcome): string => {
   return outcome.browser.version
     ? `${outcome.browser.name} ${outcome.browser.version}`
     : outcome.browser.name
-}
-
-const normalizeIdentity = (value: string): string => {
-  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()
-}
-
-const normalizePathForComparison = (value: string): string => {
-  return value.replaceAll('\\', '/').replace(/^\.\//u, '').toLowerCase()
 }
 
 const createRelativeMediaHref = (relativePath: string): string => {

@@ -65,6 +65,7 @@ export interface ReporterDiagnostic {
     | 'manifest-diagnostic'
     | 'missing-manifest-run'
     | 'unmatched-test-outcome'
+    | 'ambiguous-test-outcome'
     | 'unmatched-manifest-entry'
     | 'missing-media-artifact'
   message: string

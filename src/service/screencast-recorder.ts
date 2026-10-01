@@ -1,15 +1,13 @@
 import { type ChildProcess, spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
-import { FFMPEG_TERMINATION_HELPER_TIMEOUT_MS } from './constants.js'
-import {
-  type TerminateFfmpegProcessTree,
-  terminateFfmpegProcessTree,
-} from './process-supervisor.js'
-import { Utf8TailBuffer } from './utf8-tail-buffer.js'
+import { createMatroskaHeader, MatroskaBlockWriter } from './matroska-writer.js'
+import type { TerminateFfmpegProcessTree } from './process-supervisor.js'
+import { type FfmpegResult, ScreencastEncoder } from './screencast-encoder.js'
+
+export type { FfmpegResult } from './screencast-encoder.js'
 
 // Puppeteer resolves `page.screencast()` once the first frame arrives. Keep that
 // ordering, but do not wait indefinitely for a tab that never paints.
@@ -24,14 +22,17 @@ const VP9_REALTIME_SPEED = 8
 // painted, seconds before capture began. Never place a frame later than it
 // arrived, measured from the first frame's arrival, beyond this delivery slack.
 const TIMESTAMP_ARRIVAL_SLACK_SECONDS = 0.25
-const FFMPEG_DIAGNOSTIC_LIMIT = 4_000
+// Owned-session operations only; viewport restoration must remain awaited.
+const CDP_STARTUP_TIMEOUT_MS = 10_000
 // Chrome sends no frames while a page is static, so the last frame's duration is
-// only known when another frame arrives or the recording stops. Feed it to the
-// encoder on this cadence instead, so a long quiet tail is not encoded all at
-// once inside the stop deadline. Stay this far behind real time so a frame that
-// arrives a little late still starts at its own timestamp.
-const HOLD_INTERVAL_MS = 250
+// only known when another frame arrives or the recording stops. Mark it on this
+// cadence so a recording cut short by a crashed worker still covers the quiet
+// tail. Stay this far behind real time so a frame that arrives a little late
+// still starts at its own timestamp.
+const HOLD_INTERVAL_MS = 1_000
 const HOLD_LAG_SECONDS = 0.5
+// Consecutive writes the encoder accepted before yielding to the event loop.
+const WRITE_BATCH = 32
 
 export interface ScreencastRecorderOptions {
   readonly crop?: Readonly<CaptureCrop>
@@ -89,19 +90,38 @@ export const resolveCaptureCanvas = (
   return { width: toEven(dimensions.width), height: toEven(dimensions.height) }
 }
 
-export interface FfmpegResult {
-  readonly code: number | null
-  /** The end of FFmpeg's error output. */
-  readonly diagnostic: string
-  readonly signal: NodeJS.Signals | null
+export interface ScreencastQueueLimits {
+  /** Payload of distinct frames retained by pending writes and the held frame. */
+  readonly maxPendingBytes: number
+  /**
+   * Frame blocks waiting to be handed to the encoder while capturing. Stop may
+   * queue two more, which show the held frame and add no payload.
+   */
+  readonly maxPendingBlocks: number
+}
+
+const DEFAULT_SCREENCAST_QUEUE_LIMITS: ScreencastQueueLimits = {
+  maxPendingBytes: 64 * 1024 * 1024,
+  maxPendingBlocks: 1_024,
 }
 
 export interface ScreencastRecorderDependencies {
   readonly clock?: ClockBoundary
   /** Monotonic milliseconds, used to bound frame timestamps and the final hold. */
   readonly monotonicNow?: () => number
+  readonly queueLimits?: Partial<ScreencastQueueLimits>
   readonly spawnProcess?: (command: string, args: string[]) => ChildProcess
   readonly terminateProcessTree?: TerminateFfmpegProcessTree
+}
+
+/** Encoder queue measurements for diagnostics; high-water marks never fall. */
+export interface ScreencastQueueStats {
+  readonly highWaterBlocks: number
+  readonly highWaterBytes: number
+  /** Most capture time waiting for the encoder, from its oldest pending block. */
+  readonly highWaterLagSeconds: number
+  readonly pendingBlocks: number
+  readonly pendingBytes: number
 }
 
 interface ScreencastFrameEvent {
@@ -113,7 +133,7 @@ interface ScreencastFrameEvent {
 interface ReceivedFrame {
   /** Chrome's base64 payload, released once decoded. */
   data: string | undefined
-  /** The decoded PNG, produced the first time the frame is written. */
+  /** The decoded image, produced when the frame is first queued. */
   encoded: Buffer | undefined
   /** Seconds after the first frame at which this frame is shown. */
   readonly elapsedSeconds: number
@@ -121,10 +141,21 @@ interface ReceivedFrame {
   readonly timestamp: number
 }
 
+interface PendingBlock {
+  readonly frame: ReceivedFrame
+  readonly position: number
+}
+
+// Base64 is ASCII, which V8 stores at one byte per character; a decoded frame
+// costs its length. A frame is counted once however many blocks reference it.
+const frameCost = (frame: ReceivedFrame): number => {
+  return frame.encoded?.length ?? frame.data?.length ?? 0
+}
+
 // Chrome delivers frames faster than `fps` on a busy page, and only the frames
-// that land on a new grid position are ever written. Decoding on first write
-// keeps the base64 of a superseded frame from being turned into a buffer that
-// nothing consumes.
+// that land on a new grid position are ever written. Decoding when a frame is
+// first queued keeps the base64 of a superseded frame from being turned into a
+// buffer that nothing consumes.
 const frameBytes = (frame: ReceivedFrame): Buffer => {
   frame.encoded ??= Buffer.from(frame.data ?? '', 'base64')
   frame.data = undefined
@@ -137,70 +168,103 @@ interface PixelDimensions {
   readonly width: number
 }
 
+export interface ScreencastRecorderInit {
+  /** The frame size FFmpeg is told to expect. */
+  readonly canvas: CaptureCanvas
+  readonly clock?: ClockBoundary
+  readonly encoder?: ScreencastEncoder
+  readonly ffmpeg: ChildProcess
+  readonly fps: number
+  readonly monotonicNow: () => number
+  readonly queueLimits?: Partial<ScreencastQueueLimits>
+  readonly session: CDPSession
+  /** Playback speed; applied to frame timestamps, so FFmpeg never retimes. */
+  readonly speed?: number
+  readonly terminateProcessTree?: TerminateFfmpegProcessTree
+}
+
 /**
  * Records a page's screencast into FFmpeg. Replaces Puppeteer 24's
  * `ScreenRecorder`, whose output does not play back in real time: it passes
  * `-framerate` after `-i`, so FFmpeg assumes 25 fps; it rounds each frame gap on
  * its own, dropping frames Chrome captures faster than `fps`; and its
- * `-avioflags direct` input makes FFmpeg discard the first two frames. Frames
- * are placed on a constant `fps` grid anchored at the first frame instead, using
- * Chrome's timestamps bounded by when each frame actually arrived.
+ * `-avioflags direct` input makes FFmpeg discard the first two frames.
+ *
+ * Frames are placed on an `fps` grid anchored at the first frame, using
+ * Chrome's timestamps bounded by when each frame actually arrived. Each
+ * distinct frame reaches FFmpeg once, stamped with its grid position, and the
+ * video holds it until the next one: an unchanged page costs the encoder
+ * nothing per grid position. Writes wait for the encoder's input to drain, and
+ * the frames waiting on it are bounded; past either limit capture stops and
+ * the recording is reported incomplete rather than growing without bound. An
+ * encoder that exits before the recording is stopped leaves it incomplete too.
  */
 export class ScreencastRecorder extends PassThrough {
   private readonly ffmpeg: ChildProcess
-  private readonly ffmpegClosed: Promise<void>
+  private readonly encoder: ScreencastEncoder
   private readonly fps: number
+  // Output frames per second: capture positions are spaced `1 / fps` apart
+  // in capture time and `1 / playbackRate` apart in the video.
+  private readonly playbackRate: number
+  private readonly limits: ScreencastQueueLimits
   private readonly monotonicNow: () => number
   private readonly session: CDPSession
   private readonly clock: ClockBoundary
-  private readonly terminateProcessTree: TerminateFfmpegProcessTree
+  private readonly blocks = new MatroskaBlockWriter()
   private readonly cancelled = Promise.withResolvers<void>()
+  private readonly pending: PendingBlock[] = []
+  // Distinct frames referenced by pending blocks, with their block counts.
+  private readonly pendingFrames = new Map<ReceivedFrame, number>()
   private aborting: Promise<void> | undefined
   private detaching: Promise<void> | undefined
-  private readonly stderr = new Utf8TailBuffer(FFMPEG_DIAGNOSTIC_LIMIT)
-  private finishedDiagnostic: string | undefined
   private emitted = 0
-  private first: ReceivedFrame | undefined
+  private firstReceivedAt: number | undefined
+  private firstTimestamp = 0
+  private highWaterBlocks = 0
+  private highWaterBytes = 0
+  private highWaterLag = 0
   private holdTimer: NodeJS.Timeout | undefined
+  private incomplete: string | undefined
+  private inputEnded = false
+  private lastBlockPosition = -1
   private latest: ReceivedFrame | undefined
   private latestEmitted = false
+  private previousBlockPosition = -1
+  private draining = false
+  private idle: PromiseWithResolvers<void> | undefined
   private received = 0
   private stopping: Promise<void> | undefined
   private stopped = false
   private resolveFirstFrame: (() => void) | undefined
 
-  constructor(
-    session: CDPSession,
-    ffmpeg: ChildProcess,
-    fps: number,
-    monotonicNow: () => number,
-    dependencies: Pick<
-      ScreencastRecorderDependencies,
-      'clock' | 'terminateProcessTree'
-    > = {},
-  ) {
+  constructor(init: ScreencastRecorderInit) {
     super({ allowHalfOpen: false })
-    this.session = session
-    this.ffmpeg = ffmpeg
-    this.fps = fps
-    this.monotonicNow = monotonicNow
-    this.clock = dependencies.clock ?? systemClock
-    this.terminateProcessTree =
-      dependencies.terminateProcessTree ?? terminateFfmpegProcessTree
-    this.ffmpegClosed = new Promise((resolve) => {
-      ffmpeg.once('close', () => {
-        this.finishedDiagnostic ??= this.stderr.finish()
-        resolve()
+    this.session = init.session
+    this.ffmpeg = init.ffmpeg
+    this.fps = init.fps
+    this.playbackRate = init.fps * (init.speed ?? 1)
+    this.monotonicNow = init.monotonicNow
+    this.clock = init.clock ?? systemClock
+    this.limits = { ...DEFAULT_SCREENCAST_QUEUE_LIMITS, ...init.queueLimits }
+    this.encoder =
+      init.encoder ??
+      new ScreencastEncoder(init.ffmpeg, {
+        ...(init.clock ? { clock: init.clock } : {}),
+        ...(init.terminateProcessTree
+          ? { terminateProcessTree: init.terminateProcessTree }
+          : {}),
       })
-    })
-    // A write after FFmpeg exits must not crash the worker; the recording is
-    // reported through the stream it produced.
-    ffmpeg.stdin?.on('error', () => undefined)
-    ffmpeg.stderr?.on('data', (chunk: Buffer) => {
-      this.stderr.append(chunk)
-    })
-    ffmpeg.stdout?.pipe(this)
-    session.on('Page.screencastFrame', this.onFrame)
+    init.ffmpeg.stdin?.write(
+      createMatroskaHeader({
+        codec: 'png',
+        fps: this.playbackRate,
+        ...init.canvas,
+      }),
+    )
+    init.ffmpeg.stdout?.pipe(this)
+    init.session.on('Page.screencastFrame', this.onFrame)
+    // An encoder that exits early can take nothing more: stop retaining frames.
+    void this.encoder.closed.then(this.onEncoderClosed)
   }
 
   /** Frames Chrome has delivered with a timestamp since recording started. */
@@ -210,10 +274,21 @@ export class ScreencastRecorder extends PassThrough {
 
   /** How FFmpeg exited, once it has, and the end of its error output. */
   get ffmpegResult(): FfmpegResult {
+    return this.encoder.result
+  }
+
+  /** Why capture stopped before the recording was stopped, if it did. */
+  get incompleteReason(): string | undefined {
+    return this.incomplete
+  }
+
+  get queueStats(): ScreencastQueueStats {
     return {
-      code: this.ffmpeg.exitCode,
-      diagnostic: (this.finishedDiagnostic ?? this.stderr.peek()).trim(),
-      signal: this.ffmpeg.signalCode,
+      highWaterBlocks: this.highWaterBlocks,
+      highWaterBytes: this.highWaterBytes,
+      highWaterLagSeconds: this.highWaterLag / this.fps,
+      pendingBlocks: this.pending.length,
+      pendingBytes: this.retainedBytes(),
     }
   }
 
@@ -241,6 +316,11 @@ export class ScreencastRecorder extends PassThrough {
 
   /** Abandon a failed stop without leaving an encoder holding the worker open. */
   abort(): Promise<void> {
+    // Its close event may still be on its way. Report an exit that came
+    // first, but never the termination this requests.
+    if (this.encoderExited) {
+      this.noteEarlyExit()
+    }
     this.aborting ??= Promise.resolve().then(() => this.abortRecording())
     return this.aborting
   }
@@ -249,9 +329,7 @@ export class ScreencastRecorder extends PassThrough {
     error: Error | null,
     callback: (error?: Error | null) => void,
   ): void {
-    this.stopped = true
-    this.stopHolding()
-    this.session.off('Page.screencastFrame', this.onFrame)
+    this.stopCapturing()
     // Normal stream auto-destruction can precede FFmpeg's close event. An
     // explicit destroy during stop is different: it must still cancel stop.
     if (!this.readableEnded || !this.writableFinished) {
@@ -262,43 +340,52 @@ export class ScreencastRecorder extends PassThrough {
   }
 
   private async abortRecording(): Promise<void> {
-    this.stopped = true
-    this.session.off('Page.screencastFrame', this.onFrame)
+    this.stopCapturing()
     this.cancelled.resolve()
+    this.resolveFirstFrame?.()
+    this.releasePending()
     this.ffmpeg.stdout?.unpipe(this)
-    this.ffmpeg.stdin?.destroy()
     this.destroy()
-    try {
-      if (this.ffmpeg.exitCode === null && this.ffmpeg.signalCode === null) {
-        // The engine already allowed a graceful stop. Force only this owned
-        // encoder tree; never kill other workers' FFmpeg/browser processes.
-        await this.terminateProcessTree(this.ffmpeg, true)
-        await this.waitForEncoderClose()
-      }
-    } finally {
-      this.ffmpeg.stdout?.destroy()
-      this.ffmpeg.stderr?.destroy()
-      this.ffmpeg.unref()
-    }
-  }
-
-  private async waitForEncoderClose(): Promise<void> {
-    const { promise: expired, resolve } = Promise.withResolvers<void>()
-    const timer = this.clock.setTimeout(
-      resolve,
-      FFMPEG_TERMINATION_HELPER_TIMEOUT_MS,
-    )
-    timer.unref?.()
-    try {
-      await Promise.race([this.ffmpegClosed, expired])
-    } finally {
-      this.clock.clearTimeout(timer)
-    }
+    await this.encoder.abort()
   }
 
   private detachSession(): Promise<void> {
     this.detaching ??= this.session.detach().catch(() => undefined)
     return this.detaching
+  }
+
+  private stopCapturing(): void {
+    this.stopped = true
+    this.stopHolding()
+    this.session.off('Page.screencastFrame', this.onFrame)
+  }
+
+  private readonly onEncoderClosed = (): void => {
+    this.noteEarlyExit()
+    if (this.stopping || this.aborting) {
+      return
+    }
+    this.stopCapturing()
+    this.releasePending()
+    void this.session.send('Page.stopScreencast').catch(() => undefined)
+  }
+
+  private get encoderExited(): boolean {
+    return this.ffmpeg.exitCode !== null || this.ffmpeg.signalCode !== null
+  }
+
+  // Only stop ends FFmpeg's input, so an encoder that exits before then has
+  // not encoded the whole recording, whatever its exit code. Abort terminates
+  // it on purpose.
+  private noteEarlyExit(): void {
+    if (this.inputEnded || this.aborting || this.incomplete) {
+      return
+    }
+    const { code, diagnostic, signal } = this.encoder.result
+    const exit = signal
+      ? `was terminated by ${signal}`
+      : `exited with code ${String(code)}`
+    this.incomplete = `FFmpeg ${exit} before the recording was stopped${diagnostic ? `: ${diagnostic}` : '.'}`
   }
 
   private readonly onFrame = (event: ScreencastFrameEvent): void => {
@@ -315,34 +402,44 @@ export class ScreencastRecorder extends PassThrough {
     }
     const previous = this.latest
     const receivedAt = this.monotonicNow()
-    const first = this.first
+    const firstReceivedAt = this.firstReceivedAt
     const frame: ReceivedFrame = {
       data: event.data,
       encoded: undefined,
-      elapsedSeconds: first
-        ? Math.max(
-            // A timestamp that runs backwards would otherwise rewind the grid.
-            previous?.elapsedSeconds ?? 0,
-            Math.min(
-              timestamp - first.timestamp,
-              (receivedAt - first.receivedAt) / 1_000 +
-                TIMESTAMP_ARRIVAL_SLACK_SECONDS,
+      elapsedSeconds:
+        firstReceivedAt === undefined
+          ? 0
+          : Math.max(
+              // A timestamp that runs backwards would otherwise rewind the grid.
+              previous?.elapsedSeconds ?? 0,
+              Math.min(
+                timestamp - this.firstTimestamp,
+                (receivedAt - firstReceivedAt) / 1_000 +
+                  TIMESTAMP_ARRIVAL_SLACK_SECONDS,
+              ),
             ),
-          )
-        : 0,
       receivedAt,
       timestamp,
     }
     if (previous) {
       this.fillTo(previous, this.gridPosition(frame.elapsedSeconds))
     } else {
-      this.first = frame
+      this.firstReceivedAt = receivedAt
+      this.firstTimestamp = timestamp
       this.startHolding()
+    }
+    this.received += 1
+    this.resolveFirstFrame?.()
+    const overload = this.overloadFor(frame)
+    if (overload) {
+      // The previous frame already has its span; this one would start where
+      // the recording now ends.
+      this.overload(overload)
+      return
     }
     this.latest = frame
     this.latestEmitted = false
-    this.received += 1
-    this.resolveFirstFrame?.()
+    this.recordHighWater()
   }
 
   private async finish(): Promise<void> {
@@ -354,26 +451,39 @@ export class ScreencastRecorder extends PassThrough {
     if (await this.wasAborted()) {
       return
     }
-    this.stopped = true
-    this.stopHolding()
-    this.session.off('Page.screencastFrame', this.onFrame)
-    const { first, latest } = this
-    if (first && latest) {
-      // Hold the final frame until now, and show it at least once. A frame
-      // Chrome delivered late must not end the video before the capture's
-      // elapsed time. Only stop uses that bound: applied while capturing, it
-      // would run the timeline ahead of late frames and drop them.
-      this.fillTo(
-        latest,
-        Math.max(
+    const capturing = !this.stopped
+    this.stopCapturing()
+    const { firstReceivedAt, latest } = this
+    if (latest && firstReceivedAt !== undefined) {
+      // Show the final frame at least once, from where it starts. End markers
+      // written before it would show it in the previous frame's span.
+      let end = this.latestEmitted ? 0 : this.emitted + 1
+      if (capturing) {
+        // Hold the final frame until now. A frame Chrome delivered late must
+        // not end the video before the capture's elapsed time. Only stop uses
+        // that bound: applied while capturing, it would run the timeline ahead
+        // of late frames and drop them. Capture that stopped early ends there.
+        end = Math.max(
+          end,
           this.heldPosition(latest, 0),
-          this.heldPosition(first, 0),
-          this.latestEmitted ? 0 : this.emitted + 1,
-        ),
-      )
+          this.gridPosition((this.monotonicNow() - firstReceivedAt) / 1_000),
+        )
+      }
+      this.fillTo(latest, end)
+      this.writeEnd(latest)
     }
+    await Promise.race([this.pump(), this.cancelled.promise])
+    if (await this.wasAborted()) {
+      return
+    }
+    // Everything is with the encoder; the held frame is no longer needed.
+    this.releasePending()
+    if (this.encoderExited) {
+      this.noteEarlyExit()
+    }
+    this.inputEnded = true
     this.ffmpeg.stdin?.end()
-    await Promise.race([this.ffmpegClosed, this.cancelled.promise])
+    await Promise.race([this.encoder.closed, this.cancelled.promise])
     if (await this.wasAborted()) {
       return
     }
@@ -405,9 +515,7 @@ export class ScreencastRecorder extends PassThrough {
 
   private readonly holdLatest = (): void => {
     const latest = this.latest
-    // A backed-up encoder already has work queued; holding waits for it rather
-    // than growing the queue, and stop writes whatever remains.
-    if (this.stopped || !latest || this.ffmpeg.stdin?.writableNeedDrain) {
+    if (this.stopped || !latest) {
       return
     }
     this.fillTo(latest, this.heldPosition(latest, HOLD_LAG_SECONDS))
@@ -424,23 +532,197 @@ export class ScreencastRecorder extends PassThrough {
     return Math.round(elapsedSeconds * this.fps)
   }
 
-  // Extends the timeline with `frame` up to grid `position`. The timeline only
-  // moves forward: a frame placed before frames already written is not repeated.
+  // Extends the timeline with `frame` up to grid `position`, queueing one block
+  // at the start of the new range. The timeline only moves forward: a frame
+  // placed before positions already assigned is not shown. While the newest
+  // block waiting for the encoder already shows `frame`, the video holds it
+  // from there either way, so a stalled encoder does not collect a block per
+  // hold of an unchanged page.
   private fillTo(frame: ReceivedFrame, position: number): void {
-    const stdin = this.ffmpeg.stdin
-    const copies = position - this.emitted
-    if (!stdin || stdin.writableEnded || copies <= 0) {
+    if (position <= this.emitted) {
       return
     }
-    const bytes = frameBytes(frame)
-    for (let copy = 0; copy < copies; copy += 1) {
-      stdin.write(bytes)
+    if (this.pending.at(-1)?.frame !== frame) {
+      this.enqueue(frame, this.emitted)
     }
     this.emitted = position
     if (frame === this.latest) {
       this.latestEmitted = true
     }
+    this.recordLag()
   }
+
+  // The last frame lasts as long as the gap before it, to a player or a
+  // transcoder. End on two blocks one grid step apart so that gap is exact; if
+  // the final block already stands alone, extend by one step rather than
+  // stretching it by a whole hold interval.
+  private writeEnd(latest: ReceivedFrame): void {
+    const end = this.emitted
+    if (this.lastBlockPosition < end - 2) {
+      this.enqueue(latest, end - 2)
+    }
+    if (this.lastBlockPosition < end - 1) {
+      this.enqueue(latest, end - 1)
+    } else if (this.previousBlockPosition !== end - 2) {
+      this.enqueue(latest, end)
+      this.emitted = end + 1
+    }
+  }
+
+  private enqueue(frame: ReceivedFrame, position: number): void {
+    const stdin = this.ffmpeg.stdin
+    if (!stdin || stdin.writableEnded || stdin.destroyed) {
+      return
+    }
+    frameBytes(frame)
+    this.pending.push({ frame, position })
+    this.pendingFrames.set(frame, (this.pendingFrames.get(frame) ?? 0) + 1)
+    this.previousBlockPosition = this.lastBlockPosition
+    this.lastBlockPosition = position
+    this.recordHighWater()
+    void this.pump()
+  }
+
+  // Pending frames plus the held one. A superseded held frame that never got a
+  // span is released when the next arrives, so a check passes the newcomer.
+  private retainedBytes(held = this.latest): number {
+    let bytes = 0
+    for (const frame of this.pendingFrames.keys()) {
+      bytes += frameCost(frame)
+    }
+    if (held && !this.pendingFrames.has(held)) {
+      bytes += frameCost(held)
+    }
+    return bytes
+  }
+
+  // A frame is accepted only while its block fits: until the next frame, holds
+  // add at most that one block, and the next frame's arrival is checked again.
+  private overloadFor(frame: ReceivedFrame): string | undefined {
+    const bytes = this.retainedBytes(frame)
+    if (bytes > this.limits.maxPendingBytes) {
+      return `${formatBytes(bytes)} of frames waiting for the encoder exceeds ${formatBytes(this.limits.maxPendingBytes)}`
+    }
+    if (this.pending.length >= this.limits.maxPendingBlocks) {
+      return `${this.pending.length.toString()} frames waiting for the encoder reached the limit of ${this.limits.maxPendingBlocks.toString()}`
+    }
+    return undefined
+  }
+
+  private overload(detail: string): void {
+    const seconds = this.emitted / this.fps
+    this.incomplete = `The encoder fell behind the screencast (${detail}); capture stopped after ${seconds.toFixed(1)}s to bound memory.`
+    this.stopCapturing()
+    // Chrome need not keep encoding frames nobody will write.
+    void this.session.send('Page.stopScreencast').catch(() => undefined)
+  }
+
+  private recordHighWater(): void {
+    this.highWaterBlocks = Math.max(this.highWaterBlocks, this.pending.length)
+    this.highWaterBytes = Math.max(this.highWaterBytes, this.retainedBytes())
+    this.recordLag()
+  }
+
+  // Measured to the end of the timeline rather than the newest block: a held
+  // frame extends the timeline without queueing a block of its own.
+  private recordLag(): void {
+    const oldest = this.pending[0]
+    if (oldest) {
+      this.highWaterLag = Math.max(
+        this.highWaterLag,
+        this.emitted - oldest.position,
+      )
+    }
+  }
+
+  private releasePending(): void {
+    this.pending.length = 0
+    this.pendingFrames.clear()
+    this.latest = undefined
+  }
+
+  // Hands queued blocks to FFmpeg in order, one writer at a time, and resolves
+  // once nothing is queued. Waits for the input to drain whenever it reports
+  // backpressure, and yields between batches of small writes so timers,
+  // deadlines and abort still run.
+  private pump(): Promise<void> {
+    if (!this.draining) {
+      this.draining = true
+      void this.drainPending()
+    }
+    if (!this.draining && this.pending.length === 0) {
+      return Promise.resolve()
+    }
+    this.idle ??= Promise.withResolvers<void>()
+    return this.idle.promise
+  }
+
+  private async drainPending(): Promise<void> {
+    // No await between finding the queue empty and clearing the flag: a block
+    // queued in the same turn must start a new writer rather than wait.
+    try {
+      let batch = 0
+      let block = this.pending.shift()
+      while (block) {
+        const stdin = this.ffmpeg.stdin
+        if (!stdin || stdin.writableEnded || stdin.destroyed) {
+          this.releasePending()
+          return
+        }
+        let accepted = true
+        for (const chunk of this.blocks.frame(
+          frameBytes(block.frame),
+          Math.round((block.position * 1_000) / this.playbackRate),
+        )) {
+          accepted = stdin.write(chunk) && accepted
+        }
+        this.releaseBlock(block)
+        batch += 1
+        if (!accepted) {
+          batch = 0
+          await this.waitForDrain(stdin)
+        } else if (batch >= WRITE_BATCH) {
+          batch = 0
+          await new Promise<void>((resolve) => setImmediate(resolve))
+        }
+        block = this.pending.shift()
+      }
+    } finally {
+      this.draining = false
+      this.idle?.resolve()
+      this.idle = undefined
+    }
+  }
+
+  private releaseBlock(block: PendingBlock): void {
+    const references = (this.pendingFrames.get(block.frame) ?? 1) - 1
+    if (references > 0) {
+      this.pendingFrames.set(block.frame, references)
+    } else {
+      this.pendingFrames.delete(block.frame)
+    }
+  }
+
+  private async waitForDrain(
+    stdin: NonNullable<ChildProcess['stdin']>,
+  ): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    stdin.once('drain', resolve)
+    stdin.once('close', resolve)
+    try {
+      await Promise.race([promise, this.encoder.closed, this.cancelled.promise])
+    } finally {
+      stdin.off('drain', resolve)
+      stdin.off('close', resolve)
+    }
+  }
+}
+
+const formatBytes = (bytes: number): string => {
+  const mebibyte = 1024 * 1024
+  return bytes >= mebibyte
+    ? `${(bytes / mebibyte).toFixed(1)} MiB`
+    : `${bytes.toString()} bytes`
 }
 
 export const recordScreencast = async (
@@ -462,41 +744,115 @@ export const recordScreencast = async (
     options.ffmpegPath,
     createFfmpegArguments(options, canvas, crop),
   )
+  const encoder = new ScreencastEncoder(ffmpeg, dependencies, true)
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
+  let abandoned = false
+  let timer: NodeJS.Timeout | undefined
+  const cancelled = Promise.withResolvers<never>()
+  let cancellationError: Error | undefined
+  const cancel = (error: Error): void => {
+    cancellationError ??= error
+    cancelled.reject(cancellationError)
+  }
+  const onPageClosed = (): void => {
+    cancel(new Error('Page closed during screencast startup'))
+  }
+  const checkStartup = (): void => {
+    // Promise.race can prefer a ready success over a failure observed in the
+    // same turn. Never advance startup or hand off a known cancelled recorder.
+    if (cancellationError) {
+      throw cancellationError
+    }
+    encoder.throwIfFailed()
+  }
+  const encoderFailed = encoder.failed.then((error) => {
+    throw error
+  })
+  // Observe failures before any asynchronous startup operation can settle.
+  const interrupted = Promise.race([encoderFailed, cancelled.promise])
+  void interrupted.catch(() => undefined)
+  page.once?.('close', onPageClosed)
   try {
-    await once(ffmpeg, 'spawn')
-    session = await page.createCDPSession()
-    recorder = new ScreencastRecorder(
-      session,
+    await Promise.race([encoder.spawned, interrupted])
+    checkStartup()
+    timer = clock.setTimeout(() => {
+      cancel(
+        new Error(
+          `Screencast CDP startup timed out after ${CDP_STARTUP_TIMEOUT_MS}ms`,
+        ),
+      )
+    }, CDP_STARTUP_TIMEOUT_MS)
+    timer.unref?.()
+    session = await Promise.race([
+      page.createCDPSession().then((attached) => {
+        // A raced promise still runs. Dispose a late session without starting
+        // capture or changing the shared page behind the following test.
+        if (abandoned) {
+          void attached.detach().catch(() => undefined)
+        } else {
+          session = attached
+        }
+        return attached
+      }),
+      interrupted,
+    ])
+    checkStartup()
+    recorder = new ScreencastRecorder({
+      canvas,
+      clock,
+      encoder,
       ffmpeg,
-      options.fps,
-      dependencies.monotonicNow ?? (() => performance.now()),
-      dependencies,
-    )
-    await session.send('Page.startScreencast', {
-      format: 'png',
-      ...(options.maxWidth === undefined ? {} : { maxWidth: options.maxWidth }),
-      ...(options.maxHeight === undefined
-        ? {}
-        : { maxHeight: options.maxHeight }),
+      fps: options.fps,
+      speed: options.speed,
+      monotonicNow: dependencies.monotonicNow ?? (() => performance.now()),
+      ...(dependencies.queueLimits
+        ? { queueLimits: dependencies.queueLimits }
+        : {}),
+      session,
     })
-    await recorder.waitForFirstFrame(clock)
+    await Promise.race([
+      session.send('Page.startScreencast', {
+        format: 'png',
+        ...(options.maxWidth === undefined
+          ? {}
+          : { maxWidth: options.maxWidth }),
+        ...(options.maxHeight === undefined
+          ? {}
+          : { maxHeight: options.maxHeight }),
+      }),
+      interrupted,
+    ])
+    checkStartup()
+    clock.clearTimeout(timer)
+    timer = undefined
+    await Promise.race([recorder.waitForFirstFrame(clock), interrupted])
+    checkStartup()
+    if (recorder.destroyed) {
+      throw new Error('Recorder closed during screencast startup')
+    }
+    encoder.markStarted()
     return recorder
   } catch (error) {
+    abandoned = true
     if (recorder) {
       await recorder.abort()
     } else {
-      ffmpeg.kill()
-      await session?.detach().catch(() => undefined)
+      void session?.detach().catch(() => undefined)
+      await encoder.abort()
     }
     throw error
+  } finally {
+    if (timer) {
+      clock.clearTimeout(timer)
+    }
+    page.off?.('close', onPageClosed)
   }
 }
 
 export const createFfmpegArguments = (
-  options: Pick<ScreencastRecorderOptions, 'format' | 'fps' | 'quality'> &
-    Partial<Pick<ScreencastRecorderOptions, 'scale' | 'speed'>>,
+  options: Pick<ScreencastRecorderOptions, 'format' | 'quality'> &
+    Partial<Pick<ScreencastRecorderOptions, 'scale'>>,
   dimensions: Pick<PixelDimensions, 'width' | 'height'>,
   crop: Readonly<CaptureCrop> | undefined,
 ): string[] => {
@@ -505,31 +861,41 @@ export const createFfmpegArguments = (
     `crop='min(${width},iw):min(${height},ih):0:0'`,
     `pad=${width}:${height}:0:0`,
   ]
-  // `speed` and `scale` default to 1, which is truthy, so an unconfigured
-  // recording would otherwise pay for a `setpts` retime and a full Lanczos
-  // resample on every frame to produce the frame it already had.
-  if (options.speed !== undefined && options.speed !== 1) {
-    filters.push(`setpts=${1 / options.speed}*PTS`)
-  }
+  // `scale` defaults to 1, which is truthy, so an unconfigured recording would
+  // otherwise pay for a full Lanczos resample of every frame to produce the
+  // frame it already had. `speed` is applied to the frame timestamps.
   if (crop) {
     filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`)
   }
   if (options.scale !== undefined && options.scale !== 1) {
     filters.push(`scale=iw*${options.scale}:-1:flags=lanczos`)
   }
+  // RGB input would otherwise select VP9 profile 1 (planar RGB): about 2.5
+  // times the size of 4:2:0, and not playable by Safari or hardware decoders.
+  filters.push('format=yuv420p')
   return [
     ['-loglevel', 'error'],
-    // `-framerate` is an input option: after `-i`, FFmpeg ignores it and plays
-    // piped images at 25 fps. Keep input buffering and probing at their
-    // defaults; `-avioflags direct` or a tiny probe size loses the first frames.
-    ['-framerate', `${options.fps}`, '-f', 'image2pipe'],
-    ['-vcodec', 'png', '-i', 'pipe:0'],
+    // Frames arrive once each, timestamped on the grid, so the video holds an
+    // unchanged page instead of decoding and encoding it at every position.
+    // Keep input buffering and probing at their defaults; a tiny probe size or
+    // `-avioflags direct` loses the first frames.
+    ['-f', 'matroska', '-i', 'pipe:0'],
     ['-an', '-threads', '1', '-b:v', '0'],
     ['-vcodec', 'vp9', '-crf', `${options.quality}`],
     ['-deadline', 'realtime'],
     ['-cpu-used', `${VP9_REALTIME_SPEED}`],
+    // WebM keeps frame timestamps by default. MP4 would otherwise repeat each
+    // frame onto a constant rate; its `hybrid_fragmented` flag already needs an
+    // FFmpeg recent enough to accept `-fps_mode`.
     options.format === 'mp4'
-      ? ['-movflags', 'hybrid_fragmented', '-f', 'mp4']
+      ? [
+          '-fps_mode',
+          'passthrough',
+          '-movflags',
+          'hybrid_fragmented',
+          '-f',
+          'mp4',
+        ]
       : ['-f', 'webm'],
     ['-vf', filters.join()],
     ['-y', 'pipe:1'],
@@ -552,10 +918,10 @@ const readNativePixelDimensions = async (
   const viewport = page.viewport()
   const emulatedViewport =
     viewport && viewport.deviceScaleFactor !== 0 ? viewport : undefined
-  if (emulatedViewport) {
-    await page.setViewport({ ...emulatedViewport, deviceScaleFactor: 0 })
-  }
   try {
+    if (emulatedViewport) {
+      await page.setViewport({ ...emulatedViewport, deviceScaleFactor: 0 })
+    }
     return await page.evaluate((): PixelDimensions => {
       const view = globalThis as typeof globalThis & {
         devicePixelRatio: number
