@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.0-rc.6
+
+### Patch Changes
+
+- 400c6d4: Wait for the restored browser surface to paint whenever the page's viewport is restored while a recording starts. Chrome's screencast could otherwise stop delivering frames, so the first static test's video stayed blank while the manifest reported a healthy recording. Frame priming now makes a second bounded paint (up to 500 ms) after restoring the viewport. An explicit `capture.viewport` is also followed by one bounded paint once the screencast has started, which covers the `ci` profile and any recording with `capture.framePriming: false`. In a reproduction with minimum supported peers under BiDi, blank recordings dropped from 5 in 10 (primed) and 9 in 10 (unprimed, explicit viewport) to none. If paint requests never complete, frame priming can now take about 3.4 seconds instead of about 2.5 seconds.
+- 400c6d4: Observe encoder errors, exits and diagnostics immediately after spawning. Apply process-tree cleanup to failed starts, bound CDP attachment and screencast start to a shared 10-second deadline, and detach sessions that arrive after cancellation. Keep viewport restoration awaited, restore after partially failed viewport changes, and release partially created capture artifacts once.
+- 400c6d4: Match report outcomes by full test identity across the whole run before considering unambiguous short titles, so associations no longer depend on outcome order. Full titles must match exactly first; a title that differs only in case, spacing or Unicode form is joined only when no other capture's title normalizes the same way, so tests such as `ADMIN works` and `Admin works` no longer swap videos. Spec files whose paths differ only in case, such as `tests/ADMIN.ts` and `tests/admin.ts` on a case-sensitive filesystem, keep their own videos; a path in another case still matches when it is the one spelling recorded, and is reported as ambiguous when several are. An outcome whose own title has no capture left is reported as unmatched instead of receiving another title's video. Preserve scenario, retry and spec associations, including Cucumber `scenarioLevelReporter` outcomes. Index recording lookups and deduplicate media checks with bounded filesystem concurrency to improve large-report generation. Clean up owned temporary report and fragment files when publication fails while preserving existing reports and source fragments.
+- 400c6d4: Document the `ci` and `parallel` profile defaults in the published option types, so editor hints no longer show only the `default` profile's values. This covers `capture.fps`, `capture.framePriming`, `recording.windowChanges`, `processing.timing`, `processing.transcode.ffmpegArgs` and `concurrency.startMode`. Troubleshooting now quotes the incomplete-capture warnings (an encoder that fell behind, an encoder that exited before the recording was stopped, and a discarded recording that was already incomplete) and the static report's matching diagnostics, and explains what each means and how to respond. Node.js 24 is documented as the certified runtime; newer versions allowed by `engines.node` are supported on a best-effort basis. Support now explains why `npm audit` reports the `extract-zip` advisories against the service through its Puppeteer Core peer, when WebdriverIO's Chrome and ChromeDriver downloads reach that code, and how to avoid it with pre-installed binaries and a private driver cache.
+- 400c6d4: Report a recording as incomplete when FFmpeg exits before the recording is
+  stopped, even with exit code 0. The encoder never received the end of its
+  input, so it cannot have encoded the rest of the test; a configured FFmpeg
+  wrapper that ends early previously produced a short video that was accepted,
+  and transcoded, as a complete recording. The partial file is now kept as an
+  unclean segment, the manifest entry is `failed` with reason
+  `capture-incomplete`, and the warning names the exit code or signal with the
+  end of FFmpeg's error output.
+
+  Keep a capture failure that is already known when the retention policy discards
+  a passing test's recording, such as an overloaded or exited encoder. The
+  manifest records the entry as `failed` with reason `capture-incomplete` and no
+  segments, as the documentation already described, instead of as an ordinary
+  discard. The default `failurePolicy: 'warn'` logs one warning, and `'error'`
+  raises the failure after cleanup. A healthy discarded recording is still
+  terminated without draining the encoder.
+
+- 400c6d4: Send each distinct screencast frame to the encoder once, stamped with its place on the `capture.fps` grid, instead of re-sending an unchanged page at every grid position. On a two-CPU runner this cut recording CPU by about 40% and FFmpeg CPU by about 70%, reduced retained file sizes by about 80%, and removed the recorder stop timeouts a four-worker suite still hit. Videos keep real-time playback and hold an unchanged page as one frame, so their frame rate varies up to `capture.fps`. Recordings are now VP9 in 4:2:0 color, which Safari and hardware decoders can play, rather than planar RGB. H.264 transcodes keep each frame's timestamp, using the option spelling the detected FFmpeg supports, from 4.4 onward. Encoder input waits for the encoder instead of buffering without limit, and frames waiting for it are bounded per recording; an encoder that falls too far behind stops capture and reports the recording as incomplete.
+
 ## 1.0.0-rc.5
 
 ### Minor Changes
