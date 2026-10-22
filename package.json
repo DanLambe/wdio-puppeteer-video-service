@@ -1,6 +1,6 @@
 {
   "name": "wdio-puppeteer-video-service",
-  "version": "1.0.0-rc.6",
+  "version": "1.0.0",
   "description": "WebdriverIO v9 service that records Chromium test videos through Puppeteer and CDP",
   "type": "module",
   "sideEffects": false,
