@@ -7,10 +7,10 @@
 
 A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
-> **1.0 release candidate**
-> Install the `next` tag to opt in while the 1.0 release candidate is evaluated
-> before stable promotion. The `latest` tag remains on the stable `0.8.0` line
-> until `1.0.0` is explicitly released.
+> **WebdriverIO 9 only**
+> 1.x supports WebdriverIO 9. WebdriverIO 10 is not supported yet, and npm
+> refuses to install the service beside it on purpose. See
+> [WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what is planned.
 
 Features:
 
@@ -44,22 +44,30 @@ Chrome through BiDi while Puppeteer attaches through CDP for screencasting.
 
 ## Installation
 
-This guide documents the `1.0.0` release-candidate API. Install it explicitly
-from the opt-in `next` channel:
+Install the service with a supported Puppeteer Core release:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@next puppeteer-core@^24.11.2
+npm install --save-dev wdio-puppeteer-video-service puppeteer-core@^24.11.2
 ```
 
-An unqualified install continues to resolve to the stable `0.8.0` release,
-whose configuration API differs from this guide.
+The project must use WebdriverIO 9. WebdriverIO's npm `latest` tag is now 10,
+so an unpinned `npm install webdriverio` or `@wdio/*` package installs
+WebdriverIO 10 and npm reports a peer-dependency conflict. Pin every
+WebdriverIO package to 9, for example:
+
+```bash
+npm install --save-dev webdriverio@9 @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9
+```
 
 Install `@wdio/allure-reporter` separately when using the optional Allure
 integration:
 
 ```bash
-npm install --save-dev @wdio/allure-reporter
+npm install --save-dev @wdio/allure-reporter@9
 ```
+
+Upgrading from 0.8? The configuration API changed; see
+[Migrating from 0.8 to 1.0](#migrating-from-08-to-10).
 
 ## Configuration
 
@@ -102,7 +110,8 @@ keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 ## Prerequisites
 
 - Node.js 24 is certified. Newer versions are permitted by the package engine range and supported on a best-effort basis.
-- WebdriverIO `>=9.29.1 <10` using `runner: 'local'`
+- WebdriverIO `>=9.29.1 <10` using `runner: 'local'`. WebdriverIO 10 is not
+  supported yet ([details](./SUPPORT.md#webdriverio-10)).
 - Puppeteer Core `>=24.11.2 <25`
 - A Chromium-based browser session (Chrome or Edge)
 - FFmpeg supplied by the environment
@@ -506,6 +515,7 @@ browsers, connection timeout, and generic missing-CDP cases.
 
 ## Limitations
 
+- WebdriverIO 9 only; WebdriverIO 10 is not supported yet ([details](./SUPPORT.md#webdriverio-10)).
 - Chromium only; capture requires CDP even when WDIO controls the session through BiDi.
 - Audio, Firefox, Safari, Appium/mobile, component runner, multiremote, and cloud sessions without CDP are not supported.
 - Chrome sessions started with `--remote-debugging-pipe` are not supported by WDIO `getPuppeteer()`; expose a debugger address instead.

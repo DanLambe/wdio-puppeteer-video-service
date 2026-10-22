@@ -1,5 +1,28 @@
 # Troubleshooting
 
+## npm cannot install the service beside WebdriverIO 10
+
+```text
+npm error ERESOLVE unable to resolve dependency tree
+npm error Found: webdriverio@10.1.0
+npm error Could not resolve dependency:
+npm error peer webdriverio@">=9.29.1 <10" from wdio-puppeteer-video-service
+```
+
+The project uses WebdriverIO 10, which 1.x does not support yet. See
+[WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what is planned.
+WebdriverIO's npm `latest` tag is 10, so an unpinned install or a newly
+generated project picks it up. Pin every WebdriverIO package to 9, keeping the
+framework and reporter packages the project already uses:
+
+```bash
+npm install --save-dev webdriverio@9 @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9
+```
+
+The same conflict appears for `@wdio/allure-reporter`, `@wdio/reporter`, or
+`@wdio/types` at 10. Do not bypass it with `--force`, `--legacy-peer-deps`, or
+an override: the service could record a page the test has left.
+
 ## npm reports a Puppeteer peer-dependency conflict
 
 Install a Puppeteer Core version supported by both this service and

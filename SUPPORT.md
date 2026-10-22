@@ -3,7 +3,8 @@
 ## Supported 1.0 environment
 
 - Node.js 24 is the certified runtime. Newer versions are permitted by `engines.node` and supported on a best-effort basis; they are not part of the release certification matrix.
-- WebdriverIO `>=9.29.1 <10`
+- WebdriverIO `>=9.29.1 <10`. WebdriverIO 10 is not supported yet; see
+  [WebdriverIO 10](#webdriverio-10).
 - Puppeteer Core `>=24.11.2 <25`
 - Chrome through WebDriver BiDi or classic WebDriver with a usable CDP endpoint
 - Microsoft Edge classic/CDP smoke coverage
@@ -24,6 +25,41 @@ supports hard links; publication failures preserve the source recordings.
 The package is ESM-only. The base service does not require reporter peers;
 `@wdio/reporter` and `@wdio/allure-reporter` are optional and loaded only by
 their corresponding features.
+
+## WebdriverIO 10
+
+1.x supports WebdriverIO 9 only. Its peer ranges stop below 10 on purpose, so
+npm reports `ERESOLVE` when a project already uses WebdriverIO 10. Do not bypass
+that with `--force`, `--legacy-peer-deps`, or an override. The combination is
+untested, and the service could record the wrong page while reporting success.
+
+The blocker is how WebdriverIO 10 selects pages in WebDriver BiDi sessions, which
+it uses by default:
+
+- `browser.url()` and `browser.newWindow()` return a browsing context for the
+  test to hold, and `newWindow()` no longer switches to the new window.
+- `switchWindow()` throws.
+- Tests can drive a held browsing context directly, without the window commands
+  this service watches to follow the page under test.
+
+An unchanged recorder would then keep filming a page the test has left, and the
+video would look valid while showing the wrong tab. Supporting WebdriverIO 10
+needs an explicit way to follow the browsing context under test, not just wider
+peer ranges.
+
+Plan:
+
+- 1.x keeps supporting WebdriverIO 9 and receives fixes under the versioning
+  rules below.
+- WebdriverIO 10 support follows a compatibility spike after 1.0. If it can be
+  added beside WebdriverIO 9 without changing 1.x options, Manifest v1, or
+  behavior, it ships as a 1.x minor release that supports both. If it needs
+  breaking changes, it ships as 2.0.0, and 1.x stays available for
+  WebdriverIO 9 projects.
+- Until then, keep every WebdriverIO package on 9. Projects that must move to
+  WebdriverIO 10 now can evaluate WebdriverIO's own DevTools service, which
+  supports 9 and 10 and records per-test video alongside traces, with different
+  capture and retention behavior from this service.
 
 ## Versioning
 
@@ -48,15 +84,26 @@ a public issue.
 ## Advisories reported through peers
 
 The package has no runtime dependencies, but `npm audit` lists it as affected
-through its `puppeteer-core` peer. Every supported WDIO 9 and Puppeteer Core 24
-release depends on `@puppeteer/browsers` 2, which unpacks ZIP archives with
-`extract-zip` 2.0.1.
+through its WebdriverIO and Puppeteer Core peers. Every supported WDIO 9 and
+Puppeteer Core 24 release depends on `@puppeteer/browsers` 2, which unpacks ZIP
+archives with `extract-zip` 2.0.1.
 [GHSA-jmr9-qjv8-65gv](https://github.com/advisories/GHSA-jmr9-qjv8-65gv) and
 [GHSA-7pqw-9j4j-h8q3](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3)
 describe how a crafted archive can write files outside its extraction
-directory. No patched `extract-zip` exists. Do not clear the report with
-`npm audit fix --force`: it downgrades WDIO to 8, which this service does not
-support.
+directory. No patched `extract-zip` exists.
+
+The same package reaches `basic-ftp` 5 through its proxy support.
+[GHSA-c475-qrg2-pj4r](https://github.com/advisories/GHSA-c475-qrg2-pj4r) is a
+denial of service when parsing FTP directory listings, fixed only in
+`basic-ftp` 6.2.1, outside the range those releases accept. It is reached only
+when a browser or driver download goes through a proxy configured with a PAC
+file served over FTP (`pac+ftp://`).
+
+Do not clear these reports with `npm audit fix --force`. It proposes
+incompatible changes, such as downgrading this service to 0.8.0 or moving
+Puppeteer Core to 25, which this release does not support. Advisories that npm
+reports only through a WDIO framework adapter, such as `braces` through Mocha,
+belong to that framework and do not involve this service.
 
 The service never downloads or unpacks archives; it attaches to the browser
 WDIO has already started. `extract-zip` runs when WDIO prepares a local Chrome
