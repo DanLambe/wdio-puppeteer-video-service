@@ -9,8 +9,9 @@ npm error Could not resolve dependency:
 npm error peer webdriverio@">=9.29.1 <10" from wdio-puppeteer-video-service
 ```
 
-The project uses WebdriverIO 10, which 1.x does not support yet. See
-[WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what is planned.
+The project uses WebdriverIO 10, which 1.x does not support yet. Support is
+coming soon; see [WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what
+is planned.
 WebdriverIO's npm `latest` tag is 10, so an unpinned install or a newly
 generated project picks it up. Pin every WebdriverIO package to 9, keeping the
 framework and reporter packages the project already uses:

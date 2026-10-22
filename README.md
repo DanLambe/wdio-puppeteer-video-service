@@ -8,8 +8,8 @@
 A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
 
 > **WebdriverIO 9 only**
-> 1.x supports WebdriverIO 9. WebdriverIO 10 is not supported yet, and npm
-> refuses to install the service beside it on purpose. See
+> 1.x supports WebdriverIO 9. WebdriverIO 10 support is coming soon; until then
+> npm refuses to install the service beside WebdriverIO 10 on purpose. See
 > [WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what is planned.
 
 Features:

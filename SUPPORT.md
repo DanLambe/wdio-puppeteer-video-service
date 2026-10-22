@@ -47,19 +47,30 @@ video would look valid while showing the wrong tab. Supporting WebdriverIO 10
 needs an explicit way to follow the browsing context under test, not just wider
 peer ranges.
 
-Plan:
+WebdriverIO 10 support is coming soon. The plan:
 
 - 1.x keeps supporting WebdriverIO 9 and receives fixes under the versioning
   rules below.
-- WebdriverIO 10 support follows a compatibility spike after 1.0. If it can be
-  added beside WebdriverIO 9 without changing 1.x options, Manifest v1, or
-  behavior, it ships as a 1.x minor release that supports both. If it needs
-  breaking changes, it ships as 2.0.0, and 1.x stays available for
-  WebdriverIO 9 projects.
-- Until then, keep every WebdriverIO package on 9. Projects that must move to
-  WebdriverIO 10 now can evaluate WebdriverIO's own DevTools service, which
-  supports 9 and 10 and records per-test video alongside traces, with different
-  capture and retention behavior from this service.
+- WebdriverIO 10 support is the next planned release. If it can be added beside
+  WebdriverIO 9 without changing 1.x options, Manifest v1, or behavior, it ships
+  as a 1.x minor release that supports both. If it needs breaking changes, it
+  ships as 2.0.0, and 1.x stays available for WebdriverIO 9 projects.
+- Until then, keep every WebdriverIO package on 9.
+
+Projects that must move to WebdriverIO 10 before then can evaluate WebdriverIO's
+own DevTools service (`@wdio/devtools-service`), which supports WebdriverIO 9
+and 10 and records per-test video alongside traces. Its video works differently
+from this service's. As of DevTools 11.0.0:
+
+- It records only the first browser tab, so popups and new windows are not
+  followed.
+- It encodes the saved frames after the test, always as VP8 WebM at a fixed 10
+  frames per second and 1 Mb/s. There is no frame-rate, encoder quality, crop,
+  or MP4 output setting.
+- Its trace and video retention policies are not equivalent to
+  `recording.attempts` and `recording.retain`.
+
+Check those differences against the failures you need to diagnose.
 
 ## Versioning
 
