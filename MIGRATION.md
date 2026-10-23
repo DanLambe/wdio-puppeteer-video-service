@@ -3,6 +3,10 @@
 Version 1.0 intentionally rejects deprecated flat keys. Configuration errors
 are raised when the service is constructed, before a browser session starts.
 
+1.0 requires WebdriverIO `>=9.29.1 <10` and Puppeteer Core `>=24.11.2 <25`.
+Upgrade the service and WebdriverIO separately: WebdriverIO 10 is not supported
+yet ([details](./SUPPORT.md#webdriverio-10)).
+
 ## Option mapping
 
 | 0.8 option | 1.0 option |
@@ -114,5 +118,5 @@ programmatic use and testing, but they are not valid values in WDIO's
 and worker halves of the plugin.
 
 The reporter and Allure integration have optional peers. Install
-`@wdio/reporter` when using the reporter export and `@wdio/allure-reporter`
+`@wdio/reporter@9` when using the reporter export and `@wdio/allure-reporter@9`
 when enabling `integrations.allure`.
