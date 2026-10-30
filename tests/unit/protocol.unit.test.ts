@@ -3,6 +3,7 @@ import {
   classifySessionProtocol,
   connectPuppeteerWithTimeout,
   describePuppeteerConnectionFailure,
+  describeUnsupportedWorker,
   isChromiumSession,
   type ProtocolBrowser,
 } from '../../src/service/protocol.js'
@@ -45,6 +46,21 @@ describe('WDIO and Puppeteer protocol compatibility', () => {
     )
   })
 
+  it('prefers the session flag WDIO reports over the webSocketUrl capability', () => {
+    const withSocket = {
+      ...chromeCapabilities,
+      webSocketUrl: 'ws://localhost/bidi',
+    } as unknown as WebdriverIO.Capabilities
+
+    expect(classifySessionProtocol(chromeCapabilities, true, true)).toBe(
+      'bidi+cdp',
+    )
+    expect(classifySessionProtocol(withSocket, true, false)).toBe('classic+cdp')
+    expect(classifySessionProtocol(chromeCapabilities, false, true)).toBe(
+      'unsupported',
+    )
+  })
+
   it('returns the WDIO Puppeteer connection before the configured deadline', async () => {
     const puppeteerBrowser = { connected: true }
     const browser = {
@@ -79,7 +95,7 @@ describe('WDIO and Puppeteer protocol compatibility', () => {
     [
       {
         capabilities: chromeCapabilities,
-        isMultiremote: true,
+        isMultiRemote: true,
       },
       new Error('ignored'),
       'multiremote sessions are not supported',
@@ -130,4 +146,25 @@ describe('WDIO and Puppeteer protocol compatibility', () => {
       )
     },
   )
+})
+
+describe('worker eligibility before WDIO constructs the service', () => {
+  it('accepts a single Chromium browser', () => {
+    expect(describeUnsupportedWorker({ browserName: 'chrome' })).toBeUndefined()
+    expect(describeUnsupportedWorker({ 'ms:edgeOptions': {} })).toBeUndefined()
+  })
+
+  it('names why multiremote and non-Chromium workers cannot record', () => {
+    expect(
+      describeUnsupportedWorker({
+        first: { capabilities: { browserName: 'chrome' } },
+        second: { capabilities: { browserName: 'chrome' } },
+      }),
+    ).toMatch(/multiremote/u)
+    expect(describeUnsupportedWorker({ browserName: 'firefox' })).toMatch(
+      /Chromium-based/u,
+    )
+    expect(describeUnsupportedWorker({})).toMatch(/Chromium-based/u)
+    expect(describeUnsupportedWorker(undefined)).toMatch(/Chromium-based/u)
+  })
 })

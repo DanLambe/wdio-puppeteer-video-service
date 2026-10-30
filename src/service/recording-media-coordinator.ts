@@ -41,6 +41,8 @@ export class RecordingMediaCoordinator {
     'merge' | 'reportFailure' | 'transcode'
   >
   private readonly options: ResolvedWdioPuppeteerVideoServiceOptions
+  // Tasks that have reported their result to the manifest.
+  private readonly settledTasks = new WeakSet<DeferredPostProcessTask>()
   private readonly tasks: DeferredPostProcessTask[] = []
 
   constructor(options: RecordingMediaCoordinatorOptions) {
@@ -254,15 +256,21 @@ export class RecordingMediaCoordinator {
       'info',
       `[WdioPuppeteerVideoService] Processing ${this.tasks.length} deferred post-processing task(s).`,
     )
+    this.expectEntryTasks(this.tasks)
     const failures = await drainBoundedTaskQueue(
       this.tasks,
       this.options.concurrency.maxPostProcessesPerProcess,
       async (task) => {
-        if (task.kind === 'merge') {
-          await this.executeMerge(task)
-          return
+        try {
+          if (task.kind === 'merge') {
+            await this.executeMerge(task)
+            return
+          }
+          await this.executeTranscode(task)
+        } catch (error) {
+          await this.completeAbandonedTask(task, readReplacedPaths(task))
+          throw error
         }
-        await this.executeTranscode(task)
       },
     )
     for (const failure of failures) {
@@ -280,12 +288,20 @@ export class RecordingMediaCoordinator {
   }
 
   async executeTranscode(task: DeferredTranscodeTask): Promise<void> {
+    // A segment's output stands in for that segment alone.
+    await this.transcodeDeferred(task, [task.inputPath])
+  }
+
+  private async transcodeDeferred(
+    task: DeferredTranscodeTask,
+    replaces: readonly string[] | undefined,
+  ): Promise<void> {
     const inputExists = await this.fileSystem
       .stat(task.inputPath)
       .then(() => true)
       .catch(() => false)
     if (!inputExists) {
-      await this.completeMissingTranscodeInput(task)
+      await this.completeMissingTranscodeInput(task, replaces)
       this.mediaPipeline.reportFailure(
         `Deferred transcode input is missing: ${task.inputPath}`,
       )
@@ -299,14 +315,14 @@ export class RecordingMediaCoordinator {
       outputPath: task.outputPath,
     })
     if (!transcodedPath) {
-      await this.completeFailedTranscode(task)
+      await this.completeFailedTranscode(task, replaces)
       this.mediaPipeline.reportFailure(
         `Deferred transcode failed, keeping original recording: ${task.inputPath}`,
       )
       return
     }
 
-    await this.completeSuccessfulTranscode(task, transcodedPath)
+    await this.completeSuccessfulTranscode(task, transcodedPath, replaces)
   }
 
   async executeMerge(task: DeferredMergeTask): Promise<void> {
@@ -330,9 +346,23 @@ export class RecordingMediaCoordinator {
       return
     }
 
-    await this.executeTranscode(
-      createFollowUpTranscodeTask(task, mergedPath, task.transcodeToMp4),
+    // The merged output replaces every segment the entry listed.
+    const followUp = createFollowUpTranscodeTask(
+      task,
+      mergedPath,
+      task.transcodeToMp4,
     )
+    try {
+      await this.transcodeDeferred(followUp, undefined)
+    } catch (error) {
+      // The merge succeeded, so the files it left stand in for every segment.
+      await this.completeAbandonedTask(followUp, undefined)
+      throw error
+    } finally {
+      if (this.settledTasks.has(followUp)) {
+        this.settledTasks.add(task)
+      }
+    }
   }
 
   dropTasksForPaths(paths: readonly string[]): void {
@@ -396,9 +426,72 @@ export class RecordingMediaCoordinator {
     )
   }
 
+  /** Each manifest entry waits for all of its deferred tasks. */
+  private expectEntryTasks(tasks: readonly DeferredPostProcessTask[]): void {
+    const recorder = this.getManifestRecorder()
+    const counts = new Map<string, number>()
+    for (const task of tasks) {
+      if (task.manifestEntryId) {
+        counts.set(
+          task.manifestEntryId,
+          (counts.get(task.manifestEntryId) ?? 0) + 1,
+        )
+      }
+    }
+    for (const [entryId, count] of counts) {
+      recorder?.expectDeferredTasks(entryId, count)
+    }
+  }
+
+  /**
+   * A task that threw still settles its entry, as a failure. It lists the
+   * files that survived: an output published before the error replaces its
+   * inputs, which may already be deleted.
+   */
+  private async completeAbandonedTask(
+    task: DeferredPostProcessTask,
+    replaces: readonly string[] | undefined,
+  ): Promise<void> {
+    if (!task.manifestEntryId || this.settledTasks.has(task)) {
+      return
+    }
+    this.settledTasks.add(task)
+    const [outputs, inputs] =
+      task.kind === 'merge'
+        ? [[task.mergedPath], task.segmentPaths]
+        : [[task.outputPath], [task.inputPath]]
+    const published = await this.findExisting(outputs)
+    const paths =
+      published.length > 0 ? published : await this.findExisting(inputs)
+    await this.getManifestRecorder()
+      ?.completeDeferred(task.manifestEntryId, {
+        decision: paths.length > 0 ? 'recorded' : 'failed',
+        paths,
+        reason: 'deferred-processing-error',
+        processingOutcome: 'failed',
+        processingOperation: task.kind,
+        ...(replaces ? { replaces } : {}),
+      })
+      .catch(() => undefined)
+  }
+
+  private async findExisting(paths: readonly string[]): Promise<string[]> {
+    const found = await Promise.all(
+      paths.map(async (filePath) =>
+        this.fileSystem
+          .stat(filePath)
+          .then(() => filePath)
+          .catch(() => undefined),
+      ),
+    )
+    return found.filter((filePath) => filePath !== undefined)
+  }
+
   private async completeMissingTranscodeInput(
     task: DeferredTranscodeTask,
+    replaces: readonly string[] | undefined,
   ): Promise<void> {
+    this.settledTasks.add(task)
     if (!task.manifestEntryId) {
       return
     }
@@ -408,12 +501,15 @@ export class RecordingMediaCoordinator {
       reason: 'deferred-transcode-input-missing',
       processingOutcome: 'failed',
       processingOperation: 'transcode',
+      ...(replaces ? { replaces } : {}),
     })
   }
 
   private async completeFailedTranscode(
     task: DeferredTranscodeTask,
+    replaces: readonly string[] | undefined,
   ): Promise<void> {
+    this.settledTasks.add(task)
     if (!task.manifestEntryId) {
       return
     }
@@ -423,13 +519,16 @@ export class RecordingMediaCoordinator {
       reason: 'deferred-transcode-failed-original-preserved',
       processingOutcome: 'failed',
       processingOperation: 'transcode',
+      ...(replaces ? { replaces } : {}),
     })
   }
 
   private async completeSuccessfulTranscode(
     task: DeferredTranscodeTask,
     transcodedPath: string,
+    replaces: readonly string[] | undefined,
   ): Promise<void> {
+    this.settledTasks.add(task)
     if (!task.manifestEntryId) {
       return
     }
@@ -438,10 +537,12 @@ export class RecordingMediaCoordinator {
       paths: [transcodedPath],
       processingOutcome: 'completed',
       processingOperation: 'transcode',
+      ...(replaces ? { replaces } : {}),
     })
   }
 
   private async completeFailedMerge(task: DeferredMergeTask): Promise<void> {
+    this.settledTasks.add(task)
     if (!task.manifestEntryId) {
       return
     }
@@ -458,6 +559,7 @@ export class RecordingMediaCoordinator {
     task: DeferredMergeTask,
     mergedPath: string,
   ): Promise<void> {
+    this.settledTasks.add(task)
     if (!task.manifestEntryId) {
       return
     }
@@ -469,6 +571,10 @@ export class RecordingMediaCoordinator {
     })
   }
 }
+
+/** The entry paths a task's result supersedes, as its completions report them. */
+const readReplacedPaths = (task: DeferredPostProcessTask): string[] =>
+  task.kind === 'merge' ? [...task.segmentPaths] : [task.inputPath]
 
 const createFollowUpTranscodeTask = (
   task: DeferredMergeTask,

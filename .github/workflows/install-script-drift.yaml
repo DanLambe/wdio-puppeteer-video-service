@@ -20,14 +20,14 @@ permissions:
 # Keep identical to release-validation.yaml; a unit test enforces it.
 env:
   MINIMUM_SUPPORTED_PEERS: >-
-    webdriverio@9.29.1 puppeteer-core@24.11.2
-    @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
-    @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
-    @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
-    @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
-    @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
-    @wdio/types@9.29.1
-    expect-webdriverio@5.7.0
+    webdriverio@10.1.0 puppeteer-core@25.0.2
+    @wdio/allure-reporter@10.1.0 @wdio/cli@10.1.0
+    @wdio/cucumber-framework@10.1.0 @wdio/globals@10.1.0
+    @wdio/jasmine-framework@10.1.0 @wdio/local-runner@10.1.0
+    @wdio/mocha-framework@10.1.0 @wdio/reporter@10.1.0
+    @wdio/runner@10.1.0 @wdio/spec-reporter@10.1.0
+    @wdio/types@10.1.0
+    expect-webdriverio@8.0.0
 
 jobs:
   install-scripts:
@@ -63,12 +63,12 @@ jobs:
         if: matrix.dependencies == 'latest'
         run: >-
           corepack npm install --no-save --ignore-scripts
-          webdriverio@9 puppeteer-core@24
-          @wdio/allure-reporter@9 @wdio/cli@9
-          @wdio/cucumber-framework@9 @wdio/globals@9
-          @wdio/jasmine-framework@9 @wdio/local-runner@9
-          @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+          webdriverio@10 puppeteer-core@25
+          @wdio/allure-reporter@10 @wdio/cli@10
+          @wdio/cucumber-framework@10 @wdio/globals@10
+          @wdio/jasmine-framework@10 @wdio/local-runner@10
+          @wdio/mocha-framework@10 @wdio/reporter@10
+          @wdio/spec-reporter@10 @wdio/types@10 expect-webdriverio@8
 
       - name: Check Install Script Approvals
         run: corepack npm run check:install-scripts

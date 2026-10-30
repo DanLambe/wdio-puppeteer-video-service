@@ -4,15 +4,19 @@ import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
 import type {
   ManifestBrowser,
+  ManifestCapture,
   ManifestCaptureDecision,
   ManifestEntryV1,
+  ManifestFinalArtifact,
   ManifestFramework,
-  ManifestMediaArtifact,
   ManifestProcessingOutcome,
   ManifestProtocol,
   ManifestRecordingScope,
   ManifestResult,
+  ManifestSegmentArtifact,
+  ManifestTab,
 } from '../manifest.js'
+import type { SegmentTab } from './capture-session.js'
 import type { ManifestRunContext } from './manifest-context.js'
 import {
   createManifestJournalPath,
@@ -20,6 +24,7 @@ import {
 } from './manifest-journal.js'
 import { hashPrivateValue, normalizeManifestPath } from './manifest-paths.js'
 import type { MediaDimensions } from './media-metadata.js'
+import { extractPartNumber } from './paths.js'
 
 export { aggregateManifestRun } from './manifest-aggregation.js'
 export type {
@@ -59,6 +64,17 @@ export interface CompleteManifestEntryOptions {
   readonly reason?: string
   readonly processingOutcome?: ManifestProcessingOutcome
   readonly processingOperation?: 'capture' | 'merge' | 'transcode'
+  /** Tabs of the retained segments, keyed by part number. */
+  readonly tabs?: ReadonlyMap<number, SegmentTab>
+}
+
+export interface CompleteDeferredManifestOptions
+  extends Omit<CompleteManifestEntryOptions, 'result' | 'tabs'> {
+  /**
+   * The entry's paths this result supersedes; its other paths stay listed.
+   * Without it, `paths` replaces the entry's whole list.
+   */
+  readonly replaces?: readonly string[]
 }
 
 interface ManifestEntryDraft {
@@ -83,6 +99,8 @@ export class ManifestWorkerRecorder {
     | undefined
   private readonly attempts = new Map<string, number>()
   private readonly completedEntries = new Map<string, ManifestEntryV1>()
+  // Deferred tasks each entry still waits for.
+  private readonly outstandingTasks = new Map<string, number>()
   private browser: ManifestBrowser = {
     name: 'unknown',
     protocol: 'unsupported',
@@ -141,6 +159,51 @@ export class ManifestWorkerRecorder {
       return this.current.id
     }
 
+    const draft = this.createDraft(input)
+    this.current = draft
+    const interruptionCheckpoint = await this.buildEntry(
+      draft,
+      {
+        decision: 'failed',
+        result: 'unknown',
+        reason: 'worker-interrupted-before-finalization',
+        processingOutcome: 'failed',
+        processingOperation: 'capture',
+      },
+      'unknown',
+    )
+    this.completedEntries.set(interruptionCheckpoint.id, interruptionCheckpoint)
+    await this.journal.append({
+      type: 'entry',
+      entry: interruptionCheckpoint,
+    })
+    return draft.id
+  }
+
+  /**
+   * Writes a whole skipped entry in one step, apart from the current entity.
+   * Tests that run at the same time can each record one this way.
+   */
+  async recordSkippedEntity(
+    input: ManifestEntityInput,
+    options: { readonly reason: string; readonly result: ManifestResult },
+  ): Promise<string> {
+    const entry = await this.buildEntry(
+      this.createDraft(input),
+      {
+        decision: 'skipped',
+        result: options.result,
+        reason: options.reason,
+        processingOutcome: 'skipped',
+      },
+      options.result,
+    )
+    this.completedEntries.set(entry.id, entry)
+    await this.journal.append({ type: 'entry', entry })
+    return entry.id
+  }
+
+  private createDraft(input: ManifestEntityInput): ManifestEntryDraft {
     const spec = normalizeManifestPath(
       resolveEntitySpecPath(input),
       process.cwd(),
@@ -165,7 +228,7 @@ export class ManifestWorkerRecorder {
           }
         : undefined
 
-    const draft: ManifestEntryDraft = {
+    return {
       id: randomUUID(),
       attempt,
       scope: input.scope,
@@ -174,24 +237,6 @@ export class ManifestWorkerRecorder {
       startedAt,
       cumulativeResult: 'unknown',
     }
-    this.current = draft
-    const interruptionCheckpoint = await this.buildEntry(
-      draft,
-      {
-        decision: 'failed',
-        result: 'unknown',
-        reason: 'worker-interrupted-before-finalization',
-        processingOutcome: 'failed',
-        processingOperation: 'capture',
-      },
-      'unknown',
-    )
-    this.completedEntries.set(interruptionCheckpoint.id, interruptionCheckpoint)
-    await this.journal.append({
-      type: 'entry',
-      entry: interruptionCheckpoint,
-    })
-    return draft.id
   }
 
   markCaptureStarted(): void {
@@ -258,37 +303,87 @@ export class ManifestWorkerRecorder {
     return entry.id
   }
 
+  /**
+   * Registers deferred tasks for an entry. Until the last of them completes,
+   * a successful result leaves the entry's processing `pending`.
+   */
+  expectDeferredTasks(entryId: string, count: number): void {
+    if (count > 0 && this.completedEntries.has(entryId)) {
+      this.outstandingTasks.set(
+        entryId,
+        (this.outstandingTasks.get(entryId) ?? 0) + count,
+      )
+    }
+  }
+
   async completeDeferred(
     entryId: string,
-    options: Omit<CompleteManifestEntryOptions, 'result'>,
+    options: CompleteDeferredManifestOptions,
   ): Promise<void> {
-    const existing = this.completedEntries.get(entryId)
-    if (!existing) {
+    const pending = this.completedEntries.get(entryId)
+    if (!pending) {
       return
     }
-    const artifacts = await this.createArtifacts(
+    const measured = await this.measureArtifacts(
       options.paths ??
-        existing.capture.segments.map((item) =>
+        pending.capture.segments.map((item) =>
           path.resolve(this.context.outputDir, item.path),
         ),
       true,
     )
+    // Completions for one entry can overlap, so the result is merged into the
+    // entry as it is now, without another await before it is stored.
+    const existing = this.completedEntries.get(entryId) ?? pending
+    const outstanding = (this.outstandingTasks.get(entryId) ?? 1) - 1
+    if (outstanding > 0) {
+      this.outstandingTasks.set(entryId, outstanding)
+    } else {
+      this.outstandingTasks.delete(entryId)
+    }
+    const tabs = readTabHistory(existing.capture)
+    const produced = attachTabs(measured, tabs)
+    const segments = options.replaces
+      ? this.replaceSegments(
+          existing.capture.segments,
+          options.replaces,
+          produced,
+        )
+      : produced
+    const final = selectFinal(segments, true)
+    // Segments of one entry can finish processing separately, so an earlier
+    // segment's failure stays recorded when a later one succeeds, and a
+    // success leaves the entry pending while other tasks remain.
+    const outcome =
+      options.replaces && existing.processing.outcome === 'failed'
+        ? {
+            decision: existing.capture.decision,
+            processingOutcome: existing.processing.outcome,
+            processingOperation: existing.processing.operation,
+            reason: existing.processing.reason,
+          }
+        : {
+            ...options,
+            processingOutcome:
+              outstanding > 0 && options.processingOutcome !== 'failed'
+                ? ('pending' as const)
+                : options.processingOutcome,
+          }
     const completedAt = new Date().toISOString()
     const updated: ManifestEntryV1 = {
       ...existing,
       capture: {
-        decision: options.decision,
-        segments: artifacts.segments,
-        ...(artifacts.final ? { final: artifacts.final } : {}),
-        ...(options.reason ? { reason: options.reason } : {}),
+        decision: outcome.decision,
+        segments,
+        ...(final ? { final } : {}),
+        ...(outcome.reason ? { reason: outcome.reason } : {}),
       },
       processing: {
         timing: 'after-worker',
-        outcome: options.processingOutcome ?? 'completed',
-        ...(options.processingOperation
-          ? { operation: options.processingOperation }
+        outcome: outcome.processingOutcome ?? 'completed',
+        ...(outcome.processingOperation
+          ? { operation: outcome.processingOperation }
           : {}),
-        ...(options.reason ? { reason: options.reason } : {}),
+        ...(outcome.reason ? { reason: outcome.reason } : {}),
       },
       timings: {
         ...existing.timings,
@@ -322,10 +417,12 @@ export class ManifestWorkerRecorder {
     options: CompleteManifestEntryOptions,
     result: ManifestResult,
   ): Promise<ManifestEntryV1> {
-    const artifacts = await this.createArtifacts(
-      options.paths ?? [],
-      options.processingOutcome !== 'pending',
+    const finalized = options.processingOutcome !== 'pending'
+    const segments = attachTabs(
+      await this.measureArtifacts(options.paths ?? [], finalized),
+      createTabHistory(this.hashTabs(options.tabs)),
     )
+    const final = selectFinal(segments, finalized)
     const completedAt = new Date().toISOString()
     return {
       id: draft.id,
@@ -341,8 +438,8 @@ export class ManifestWorkerRecorder {
       result,
       capture: {
         decision: options.decision,
-        segments: artifacts.segments,
-        ...(artifacts.final ? { final: artifacts.final } : {}),
+        segments,
+        ...(final ? { final } : {}),
         ...(options.reason ? { reason: options.reason } : {}),
       },
       processing: {
@@ -373,14 +470,55 @@ export class ManifestWorkerRecorder {
     }
   }
 
-  private async createArtifacts(
-    paths: string[],
+  private hashTabs(
+    tabs: ReadonlyMap<number, SegmentTab> | undefined,
+  ): Map<number, ManifestTab> {
+    const hashed = new Map<number, ManifestTab>()
+    for (const [part, tab] of tabs ?? []) {
+      hashed.set(part, {
+        ordinal: tab.ordinal,
+        reason: tab.reason,
+        contextHash: hashPrivateValue(this.context.runId, tab.contextId),
+      })
+    }
+    return hashed
+  }
+
+  /** Lists `produced` where the first replaced segment was listed. */
+  private replaceSegments(
+    segments: readonly ManifestSegmentArtifact[],
+    replaces: readonly string[],
+    produced: readonly ManifestSegmentArtifact[],
+  ): ManifestSegmentArtifact[] {
+    const replaced = new Set(
+      replaces.map((filePath) =>
+        normalizeManifestPath(path.resolve(filePath), this.context.outputDir),
+      ),
+    )
+    const producedPaths = new Set(produced.map((item) => item.path))
+    const next: ManifestSegmentArtifact[] = []
+    let inserted = false
+    for (const segment of segments) {
+      if (replaced.has(segment.path)) {
+        if (!inserted) {
+          next.push(...produced)
+          inserted = true
+        }
+      } else if (!producedPaths.has(segment.path)) {
+        next.push(segment)
+      }
+    }
+    if (!inserted) {
+      next.push(...produced)
+    }
+    return next
+  }
+
+  private async measureArtifacts(
+    paths: readonly string[],
     finalized: boolean,
-  ): Promise<{
-    segments: ManifestMediaArtifact[]
-    final?: ManifestMediaArtifact
-  }> {
-    const artifacts = await Promise.all(
+  ): Promise<ManifestSegmentArtifact[]> {
+    return Promise.all(
       [...new Set(paths)].map(async (filePath) => {
         // Capture/processing paths already include outputDir; only persisted
         // manifest paths are relative to the manifest's directory.
@@ -394,7 +532,7 @@ export class ManifestWorkerRecorder {
           finalized && size > 0
             ? await this.readDimensions?.(absolutePath)
             : undefined
-        const artifact: ManifestMediaArtifact = {
+        const artifact: ManifestSegmentArtifact = {
           path: normalizeManifestPath(absolutePath, this.context.outputDir),
           mimeType:
             path.extname(absolutePath).toLowerCase() === '.mp4'
@@ -408,12 +546,72 @@ export class ManifestWorkerRecorder {
         return artifact
       }),
     )
-    const final = finalized && artifacts.length === 1 ? artifacts[0] : undefined
-    return {
-      segments: artifacts,
-      ...(final ? { final } : {}),
-    }
   }
+}
+
+interface TabHistory {
+  /** Each part file's tab, by part number. */
+  readonly parts: ReadonlyMap<number, ManifestTab>
+  /** The tabs a merged file holds, in part order. */
+  readonly merged: readonly ManifestTab[]
+}
+
+const createTabHistory = (
+  parts: ReadonlyMap<number, ManifestTab>,
+  merged?: readonly ManifestTab[],
+): TabHistory => ({
+  parts,
+  merged:
+    parts.size > 0
+      ? [...parts.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([, tab]) => tab)
+      : (merged ?? []),
+})
+
+/** Rebuilds the tab history a completed or pending entry recorded. */
+const readTabHistory = (capture: ManifestCapture): TabHistory => {
+  const parts = new Map<number, ManifestTab>()
+  let merged: readonly ManifestTab[] | undefined
+  for (const segment of capture.segments) {
+    if (segment.tab) {
+      parts.set(extractPartNumber(segment.path), segment.tab)
+    }
+    merged ??= segment.tabs
+  }
+  return createTabHistory(parts, merged ?? capture.final?.tabs)
+}
+
+// Part files are named `slug_partN`; a merged file is `slug` and holds them all.
+const isMergedFile = (filePath: string): boolean =>
+  extractPartNumber(filePath) === Number.MAX_SAFE_INTEGER
+
+const attachTabs = (
+  artifacts: readonly ManifestSegmentArtifact[],
+  history: TabHistory,
+): ManifestSegmentArtifact[] =>
+  artifacts.map((artifact) => {
+    if (isMergedFile(artifact.path)) {
+      return history.merged.length > 0
+        ? { ...artifact, tabs: [...history.merged] }
+        : artifact
+    }
+    const tab = history.parts.get(extractPartNumber(artifact.path))
+    return tab ? { ...artifact, tab } : artifact
+  })
+
+/** The one finalized file, with the tabs it holds. */
+const selectFinal = (
+  segments: readonly ManifestSegmentArtifact[],
+  finalized: boolean,
+): ManifestFinalArtifact | undefined => {
+  const [only] = segments
+  if (!finalized || !only || segments.length !== 1) {
+    return undefined
+  }
+  const { tab, tabs, ...final } = only
+  const finalTabs = tabs ?? (tab ? [tab] : [])
+  return finalTabs.length > 0 ? { ...final, tabs: finalTabs } : final
 }
 
 const resolveEntitySpecPath = (input: ManifestEntityInput): string => {

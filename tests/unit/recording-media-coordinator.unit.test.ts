@@ -10,6 +10,7 @@ import type {
   DeferredTranscodeTask,
 } from '../../src/service/constants.js'
 import {
+  aggregateManifestRun,
   createManifestRunContext,
   ManifestWorkerRecorder,
 } from '../../src/service/manifest-runtime.js'
@@ -89,6 +90,323 @@ describe('RecordingMediaCoordinator', () => {
       },
     ])
     expect(harness.transcode).not.toHaveBeenCalled()
+  })
+
+  it('lists every separately transcoded deferred segment in the manifest', async () => {
+    const tempDir = await createTempDir()
+    const context = await createManifestRunContext(tempDir)
+    const recorder = new ManifestWorkerRecorder({
+      cid: '0-0',
+      context,
+      framework: 'mocha',
+    })
+    await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['specs/tabs.ts'],
+      test: { title: 'uses two tabs' },
+    })
+    const harness = createHarness(
+      {
+        outputDir: tempDir,
+        processing: {
+          format: 'mp4',
+          timing: 'after-worker',
+          transcode: { enabled: true },
+        },
+      },
+      recorder,
+    )
+    harness.transcode.mockImplementation(async ({ outputPath }) => {
+      await fs.writeFile(outputPath, 'mp4', 'utf8')
+      return outputPath
+    })
+    harness.captureSession.beginRecording('tabs')
+    const recordingPaths = await createInputFiles(tempDir, [
+      'tabs_part1.webm',
+      'tabs_part2.webm',
+    ])
+    for (const recordingPath of recordingPaths) {
+      await harness.coordinator.finalizeSegment(
+        createSegment(
+          recordingPath,
+          recordingPath.replace('.webm', '.mp4'),
+          true,
+        ),
+      )
+    }
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [...harness.captureSession.recordedPaths],
+      processingOutcome: 'pending',
+      processingOperation: 'transcode',
+    })
+
+    await harness.coordinator.flush()
+    await recorder.flush()
+
+    const manifest = await aggregateManifestRun(context, 0)
+    const capture = manifest.runs[0]?.entries[0]?.capture
+    expect(capture?.segments.map((segment) => segment.path)).toEqual([
+      'tabs_part1.mp4',
+      'tabs_part2.mp4',
+    ])
+    expect(capture?.final).toBeUndefined()
+  })
+
+  it('keeps both segments when two deferred transcodes finish together', async () => {
+    const tempDir = await createTempDir()
+    const context = await createManifestRunContext(tempDir)
+    const entered = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ]
+    const released = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ]
+    const recorder = new ManifestWorkerRecorder({
+      cid: '0-0',
+      context,
+      framework: 'mocha',
+      // Holds each completion after it read the entry and before it publishes.
+      readDimensions: async (filePath) => {
+        const index = filePath.includes('_part1.') ? 0 : 1
+        entered[index]?.resolve()
+        await released[index]?.promise
+        return undefined
+      },
+    })
+    await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['specs/tabs.ts'],
+      test: { title: 'uses two tabs' },
+    })
+    const harness = createHarness(
+      {
+        outputDir: tempDir,
+        concurrency: { maxPostProcessesPerProcess: 2 },
+        processing: {
+          format: 'mp4',
+          timing: 'after-worker',
+          transcode: { enabled: true },
+        },
+      },
+      recorder,
+    )
+    harness.transcode.mockImplementation(async ({ outputPath }) => {
+      await fs.writeFile(outputPath, 'mp4', 'utf8')
+      return outputPath
+    })
+    harness.captureSession.beginRecording('tabs')
+    const recordingPaths = await createInputFiles(tempDir, [
+      'tabs_part1.webm',
+      'tabs_part2.webm',
+    ])
+    for (const recordingPath of recordingPaths) {
+      await harness.coordinator.finalizeSegment(
+        createSegment(
+          recordingPath,
+          recordingPath.replace('.webm', '.mp4'),
+          true,
+        ),
+      )
+    }
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [...harness.captureSession.recordedPaths],
+      processingOutcome: 'pending',
+      processingOperation: 'transcode',
+    })
+
+    const flushed = harness.coordinator.flush()
+    await Promise.all(entered.map((gate) => gate.promise))
+    released[1]?.resolve()
+    released[0]?.resolve()
+    await flushed
+    await recorder.flush()
+
+    const manifest = await aggregateManifestRun(context, 0)
+    const capture = manifest.runs[0]?.entries[0]?.capture
+    expect(capture?.segments.map((segment) => segment.path)).toEqual([
+      'tabs_part1.mp4',
+      'tabs_part2.mp4',
+    ])
+  })
+
+  it('settles an entry as failed when one of its deferred tasks throws', async () => {
+    const tempDir = await createTempDir()
+    const context = await createManifestRunContext(tempDir)
+    const recorder = new ManifestWorkerRecorder({
+      cid: '0-0',
+      context,
+      framework: 'mocha',
+    })
+    await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['specs/tabs.ts'],
+      test: { title: 'uses two tabs' },
+    })
+    const harness = createHarness(
+      {
+        outputDir: tempDir,
+        processing: {
+          format: 'mp4',
+          timing: 'after-worker',
+          transcode: { enabled: true },
+        },
+      },
+      recorder,
+    )
+    harness.transcode.mockImplementation(async ({ inputPath, outputPath }) => {
+      if (inputPath.includes('_part2.')) {
+        throw new Error('encoder crashed')
+      }
+      await fs.writeFile(outputPath, 'mp4', 'utf8')
+      return outputPath
+    })
+    harness.captureSession.beginRecording('tabs')
+    const recordingPaths = await createInputFiles(tempDir, [
+      'tabs_part1.webm',
+      'tabs_part2.webm',
+    ])
+    for (const recordingPath of recordingPaths) {
+      await harness.coordinator.finalizeSegment(
+        createSegment(
+          recordingPath,
+          recordingPath.replace('.webm', '.mp4'),
+          true,
+        ),
+      )
+    }
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [...harness.captureSession.recordedPaths],
+      processingOutcome: 'pending',
+      processingOperation: 'transcode',
+    })
+
+    await expect(harness.coordinator.flush()).rejects.toThrow('encoder crashed')
+    await recorder.flush()
+
+    const entry = (await aggregateManifestRun(context, 0)).runs[0]?.entries[0]
+    expect(entry?.capture.segments.map((segment) => segment.path)).toEqual([
+      'tabs_part1.mp4',
+      'tabs_part2.webm',
+    ])
+    expect(entry?.processing).toMatchObject({
+      outcome: 'failed',
+      operation: 'transcode',
+      reason: 'deferred-processing-error',
+    })
+  })
+
+  it.each([
+    ['throws', true, 'deferred-processing-error'],
+    ['throws', false, 'deferred-processing-error'],
+    ['fails', true, 'deferred-transcode-failed-original-preserved'],
+    ['fails', false, 'deferred-transcode-failed-original-preserved'],
+  ] as const)(
+    'lists the merged source when its MP4 transcode %s (deleteSegments: %s)',
+    async (failure, deleteSegments, reason) => {
+      const { context, coordinator, harness, inputs, mergedPath, recorder } =
+        await createMergeScenario(deleteSegments)
+      const crash = new Error('encoder crashed')
+      harness.transcode.mockImplementation(async () => {
+        if (failure === 'throws') {
+          throw crash
+        }
+        return undefined
+      })
+
+      if (failure === 'throws') {
+        await expect(coordinator.flush()).rejects.toBe(crash)
+      } else {
+        await coordinator.flush()
+      }
+      await recorder.flush()
+
+      const entry = (await aggregateManifestRun(context, 0)).runs[0]?.entries[0]
+      expect(entry?.capture.segments.map((segment) => segment.path)).toEqual([
+        'tabs.webm',
+      ])
+      expect(
+        entry?.capture.segments[0]?.tabs?.map((tab) => tab.reason),
+      ).toEqual(['start', 'command'])
+      expect(entry?.processing).toMatchObject({
+        outcome: 'failed',
+        operation: 'transcode',
+        reason,
+      })
+      // Deleted parts are never listed again; kept ones stay on disk.
+      for (const input of inputs) {
+        await expect(fileExists(input)).resolves.toBe(!deleteSegments)
+      }
+      await expect(fileExists(mergedPath)).resolves.toBe(true)
+    },
+  )
+
+  it('lists an MP4 published before its transcode threw', async () => {
+    const { context, coordinator, harness, inputs, mergedPath, recorder } =
+      await createMergeScenario(true)
+    const crash = new Error('could not remove the merged source')
+    harness.transcode.mockImplementation(async ({ outputPath }) => {
+      await fs.writeFile(outputPath, 'mp4', 'utf8')
+      throw crash
+    })
+
+    await expect(coordinator.flush()).rejects.toBe(crash)
+    await recorder.flush()
+
+    const entry = (await aggregateManifestRun(context, 0)).runs[0]?.entries[0]
+    expect(entry?.capture.segments.map((segment) => segment.path)).toEqual([
+      'tabs.mp4',
+    ])
+    expect(entry?.capture.final?.tabs).toHaveLength(2)
+    expect(entry?.processing.outcome).toBe('failed')
+    expect(inputs).toHaveLength(2)
+    await expect(fileExists(mergedPath)).resolves.toBe(true)
+  })
+
+  it('lists the surviving segments when the merge itself throws', async () => {
+    const { context, coordinator, harness, recorder } =
+      await createMergeScenario(true)
+    const crash = new Error('merge crashed')
+    harness.merge.mockRejectedValue(crash)
+
+    await expect(coordinator.flush()).rejects.toBe(crash)
+    await recorder.flush()
+
+    const entry = (await aggregateManifestRun(context, 0)).runs[0]?.entries[0]
+    expect(entry?.capture.segments.map((segment) => segment.path)).toEqual([
+      'tabs_part1.webm',
+      'tabs_part2.webm',
+    ])
+    expect(entry?.capture.decision).toBe('recorded')
+    expect(entry?.processing).toMatchObject({
+      outcome: 'failed',
+      operation: 'merge',
+      reason: 'deferred-processing-error',
+    })
+  })
+
+  it('fails an entry whose task threw and left no media', async () => {
+    const { context, coordinator, harness, inputs, recorder } =
+      await createMergeScenario(true)
+    const crash = new Error('merge crashed')
+    harness.merge.mockImplementation(async () => {
+      await Promise.all(inputs.map(async (input) => fs.rm(input)))
+      throw crash
+    })
+
+    await expect(coordinator.flush()).rejects.toBe(crash)
+    await recorder.flush()
+
+    const entry = (await aggregateManifestRun(context, 0)).runs[0]?.entries[0]
+    expect(entry?.capture.segments).toEqual([])
+    expect(entry?.capture.decision).toBe('failed')
   })
 
   it('queues one deferred merge, replaces segment tasks, and plans follow-up MP4 transcoding', async () => {
@@ -435,12 +753,14 @@ describe('RecordingMediaCoordinator', () => {
       processingOperation: 'transcode',
       processingOutcome: 'failed',
       reason: 'deferred-transcode-failed-original-preserved',
+      replaces: [failedInput],
     })
     expect(completeDeferred).toHaveBeenCalledWith('successful-entry', {
       decision: 'recorded',
       paths: [successfulOutput],
       processingOperation: 'transcode',
       processingOutcome: 'completed',
+      replaces: [successfulInput],
     })
     await expect(fs.readFile(failedInput, 'utf8')).resolves.toBe('failed.webm')
   })
@@ -476,6 +796,7 @@ describe('RecordingMediaCoordinator', () => {
       processingOperation: 'transcode',
       processingOutcome: 'failed',
       reason: 'deferred-transcode-input-missing',
+      replaces: [missingInput],
     })
 
     await harness.coordinator.executeTranscode({
@@ -856,6 +1177,82 @@ const createHarness = (
     merge,
     reportFailure,
     transcode,
+  }
+}
+
+const fileExists = async (filePath: string): Promise<boolean> =>
+  fs.stat(filePath).then(
+    () => true,
+    () => false,
+  )
+
+/** A two-tab recording queued for an after-worker merge and MP4 transcode. */
+const createMergeScenario = async (deleteSegments: boolean) => {
+  const tempDir = await createTempDir()
+  const context = await createManifestRunContext(tempDir)
+  const recorder = new ManifestWorkerRecorder({
+    cid: '0-0',
+    context,
+    framework: 'mocha',
+  })
+  await recorder.beginEntity({
+    scope: 'test',
+    specPaths: ['specs/tabs.ts'],
+    test: { title: 'uses two tabs' },
+  })
+  const inputs = await createInputFiles(tempDir, [
+    'tabs_part1.webm',
+    'tabs_part2.webm',
+  ])
+  const mergedPath = path.join(tempDir, 'tabs.webm')
+  const manifestEntryId = await recorder.completeCurrent({
+    decision: 'recorded',
+    result: 'passed',
+    paths: inputs,
+    processingOutcome: 'pending',
+    processingOperation: 'merge',
+    tabs: new Map([
+      [1, { ordinal: 1, contextId: 'tab-a', reason: 'start' }],
+      [2, { ordinal: 2, contextId: 'tab-b', reason: 'command' }],
+    ]),
+  })
+  const harness = createHarness(
+    {
+      outputDir: tempDir,
+      processing: {
+        format: 'mp4',
+        timing: 'after-worker',
+        merge: { deleteSegments, enabled: true },
+        transcode: { enabled: true },
+      },
+    },
+    recorder,
+  )
+  harness.merge.mockImplementation(async () => {
+    await fs.writeFile(mergedPath, 'merged', 'utf8')
+    if (deleteSegments) {
+      await Promise.all(inputs.map(async (input) => fs.rm(input)))
+    }
+    return mergedPath
+  })
+  harness.coordinator.enqueue({
+    kind: 'merge',
+    deleteSegments,
+    mergedPath,
+    segmentPaths: inputs,
+    transcodeToMp4: {
+      deleteOriginal: false,
+      outputPath: path.join(tempDir, 'tabs.mp4'),
+    },
+    ...(manifestEntryId ? { manifestEntryId } : {}),
+  })
+  return {
+    context,
+    coordinator: harness.coordinator,
+    harness,
+    inputs,
+    mergedPath,
+    recorder,
   }
 }
 

@@ -5,17 +5,18 @@
 [![License](https://img.shields.io/npm/l/wdio-puppeteer-video-service)](./LICENSE)
 [![Sonar Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=DanLambe_wdio-puppeteer-video-service&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=DanLambe_wdio-puppeteer-video-service)
 
-A WebdriverIO v9 service that records Chromium sessions through Puppeteer and CDP.
+A WebdriverIO 10 service that records Chromium sessions through Puppeteer and CDP.
 
-> **WebdriverIO 9 only**
-> 1.x supports WebdriverIO 9. WebdriverIO 10 support is coming soon; until then
-> npm refuses to install the service beside WebdriverIO 10 on purpose. See
-> [WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what is planned.
+> **2.0 release candidate for WebdriverIO 10**
+> Install the `next` tag to opt in while the 2.0 release candidate is evaluated
+> before stable promotion. The `latest` tag stays on `1.0.0`, for WebdriverIO 9,
+> until `2.0.0` is explicitly released. Upgrading from 1.x? See
+> [Migrating from 1.x to 2.0](./MIGRATION.md#migrating-from-1x-to-20).
 
 Features:
 
 - Records per test/scenario or per spec.
-- Handles multi-tab tests with optional segmented output and FFmpeg merging.
+- Follows the tab a WebDriver BiDi test drives, with optional segmented output and FFmpeg merging.
 - Supports retry-only capture and independent artifact retention rules.
 - Provides cross-worker recording limits and crash-tolerant lifecycle cleanup.
 - Uses local, deterministic Mocha, Jasmine, and Cucumber fixtures in CI.
@@ -46,28 +47,34 @@ Chrome through BiDi while Puppeteer attaches through CDP for screencasting.
 
 Install the service with a supported Puppeteer Core release:
 
+This guide documents the `2.0.0` release candidate. Install it explicitly from
+the opt-in `next` channel:
+
 ```bash
-npm install --save-dev wdio-puppeteer-video-service puppeteer-core@^24.11.2
+npm install --save-dev wdio-puppeteer-video-service@next puppeteer-core@^25.0.2
 ```
 
-The project must use WebdriverIO 9. WebdriverIO's npm `latest` tag is now 10,
-so an unpinned `npm install webdriverio` or `@wdio/*` package installs
-WebdriverIO 10 and npm reports a peer-dependency conflict. Pin every
-WebdriverIO package to 9, for example:
+An unqualified install still resolves to `1.0.0`, which supports WebdriverIO 9
+only ([WebdriverIO 9](./SUPPORT.md#webdriverio-9)).
+
+The project must use WebdriverIO 10, with every WebdriverIO package on the same
+major version, for example:
 
 ```bash
-npm install --save-dev webdriverio@9 @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9
+npm install --save-dev webdriverio@10 @wdio/cli@10 @wdio/local-runner@10 @wdio/mocha-framework@10
 ```
 
 Install `@wdio/allure-reporter` separately when using the optional Allure
 integration:
 
 ```bash
-npm install --save-dev @wdio/allure-reporter@9
+npm install --save-dev @wdio/allure-reporter@10
 ```
 
-Upgrading from 0.8? The configuration API changed; see
-[Migrating from 0.8 to 1.0](#migrating-from-08-to-10).
+Upgrading from 1.x? The options are unchanged, but recording now follows the
+tab a WebDriver BiDi test drives; see
+[Migrating from 1.x to 2.0](./MIGRATION.md#migrating-from-1x-to-20). From 0.8,
+see [Migrating from 0.8 to 1.0](#migrating-from-08-to-10) first.
 
 ## Configuration
 
@@ -101,7 +108,7 @@ defaults. Add options such as `capture.crop`, `recording.filters`,
 copying a full list, because each one changes what is recorded or what has to be
 installed.
 
-Register the service by package name so WDIO v9 can load both its named launcher
+Register the service by package name so WDIO can load both its named launcher
 export and its default worker export in the correct processes. Direct imported
 class registration is rejected before browser startup because it cannot load
 the launcher. Configuration is validated during plugin initialization. Unknown
@@ -110,9 +117,9 @@ keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 ## Prerequisites
 
 - Node.js 24 is certified. Newer versions are permitted by the package engine range and supported on a best-effort basis.
-- WebdriverIO `>=9.29.1 <10` using `runner: 'local'`. WebdriverIO 10 is not
-  supported yet ([details](./SUPPORT.md#webdriverio-10)).
-- Puppeteer Core `>=24.11.2 <25`
+- WebdriverIO `>=10.1.0 <11` using `runner: 'local'`. For WebdriverIO 9, use
+  1.x ([details](./SUPPORT.md#webdriverio-9)).
+- Puppeteer Core `>=25.0.2 <26`
 - A Chromium-based browser session (Chrome or Edge)
 - FFmpeg supplied by the environment
 
@@ -146,7 +153,7 @@ Top-level options:
 - `scope` (`'test' | 'spec'`, default `'test'`).
 - `attempts` (`'all' | 'retries'`, default `'all'`). WDIO `specFileRetries` worker retries count as retry attempts.
 - `retain` (`'failures' | 'retries' | 'all'`, default `'failures'`).
-- `windowChanges` (`'segment' | 'ignore'`, default `'segment'`; `'ignore'` on the `ci` profile).
+- `windowChanges` (`'segment' | 'ignore'`, default `'segment'`; `'ignore'` on the `ci` profile). `'segment'` starts a new segment whenever recording moves to another tab ([Tab Following](#tab-following)). `'ignore'` keeps recording the tab the test started on, in one file; while another tab is in front, Chrome does not repaint it, so the video holds its last frame.
 - `filters.includeSpecs`, `filters.excludeSpecs`, `filters.includeTags`, and `filters.excludeTags`: case-insensitive patterns supporting `*` wildcards.
 
 `capture`:
@@ -167,7 +174,7 @@ Top-level options:
 - `timing` (`'after-test' | 'after-worker'`, default `'after-test'`; `'after-worker'` on the `ci` profile). The Allure integration requires `'after-test'`, so `profile: 'ci'` plus `integrations.allure` is rejected at startup unless `timing` is set back.
 - `ffmpeg.path` and `ffmpeg.timeoutMs` (default `0`, which disables the processing timeout). Retained-video metadata inspection is always bounded to 5 seconds, or this timeout when it is shorter and positive.
 - `transcode.enabled` (default `false`), `deleteOriginal` (default `true`), and optional `ffmpegArgs`. Transcoding defaults to `-preset veryfast -crf 23` in every profile. The `ci` profile adds `-crf 28` for smaller artifacts and `-threads 1` so concurrent transcodes do not each claim every core. `ffmpegArgs` is appended last, so anything set there wins.
-- `merge.enabled` (default `false`) and `deleteSegments` (default `true`).
+- `merge.enabled` (default `false`) and `deleteSegments` (default `true`). With `deleteSegments: false`, the original segment files stay on disk beside the merged file. The manifest and HTML report list them too when processing runs `'after-test'`. With `'after-worker'`, they list only the merged file; the originals are still on disk.
 
 `concurrency`:
 
@@ -250,6 +257,53 @@ Unknown integrations are rejected instead of being silently ignored.
   configuration boundary; no retry-state files are written to the artifact
   directory.
 - `scope: 'spec'` records one artifact per spec and uses the aggregate spec result.
+
+## Tab Following
+
+In a WebDriver BiDi session, WebdriverIO 10's default, recording follows the tab
+the test drives:
+
+- A command on a held browsing context, from `browser.url()`,
+  `browser.newWindow()` or `browser.browsingContexts()`, moves recording to
+  that tab.
+- `browser.switchToWindow(handle)` moves recording to that window.
+- Element-free Classic commands, such as `browser.keys()`, act on WebdriverIO's
+  current window, and recording follows them there.
+- A frame is recorded as part of its tab.
+- When the recorded tab closes, recording continues on WebdriverIO's current
+  window.
+
+```typescript
+const page = await browser.url('/checkout')
+const help = await browser.newWindow('/help', { type: 'tab' })
+await help.$('#search').setValue('refunds') // recording moves to the help tab
+await page.$('#pay').click() // and back to the checkout tab
+```
+
+Recording moves before the command reaches the browser, so the command's own
+effect is filmed. Each move ends one segment and starts another, and the command
+waits while that happens: about 0.3 s, and 0.5 s at the 95th percentile, on a
+desktop Chrome or Edge. Tests that alternate between tabs run slower while
+recorded. The recorded tab is brought to the front, because Chrome does not
+paint tabs in the background; a page that checks its visibility or focus sees
+that change.
+
+Only tabs the test has been handed move recording. Contexts that WebdriverIO or
+another service sets up on their own, such as a script injected into a new
+frame, do not. The tab each segment filmed, and why, is in the manifest
+([Manifest v1](#manifest-v1)) and on each video in the HTML report.
+
+Recording cannot tell who sent a command:
+
+- With commands on different tabs at the same time, such as
+  `Promise.all([a.$('#x').click(), b.$('#y').click()])`, recording follows the
+  most recent one, so the other tab's action may not be filmed.
+- A command that another service, or a promise the test did not await, sends
+  to a tab the test holds moves recording there, even while the test works in
+  a different tab.
+
+Sessions that set `'wdio:enforceWebDriverClassic': true` follow
+`switchWindow`, `switchToWindow`, `newWindow` and `closeWindow`, as 1.x did.
 
 ## Migrating from 0.8 to 1.0
 
@@ -339,6 +393,32 @@ without mixing worker journals. Existing valid run records are retained whenever
 the manifest is aggregated; the service does not prune old runs, so archive or
 remove `manifest.json` when a long-lived `outputDir` should start a new history.
 
+Each segment records which browser tab or window it filmed as an optional
+`tab`: an `ordinal` that numbers the recording's tabs from 1 in the order it
+first used them, a `reason` the segment started there, and a `contextHash`.
+Ordinals are local to one recording; they do not identify a tab across tests.
+The hash is salted with the run ID, like `sessionHash`, so raw browser
+identifiers are never stored. A `reason` is one of:
+
+- `start`: the recording's first tab.
+- `command`: a test command targeted that tab.
+- `switch-to-window`: a `switchToWindow` command selected it. WebdriverIO issues
+  this command itself when it recovers from a closed window, so it is not
+  always the test's own switch.
+- `tab-closed`: the recorded tab closed.
+- `close-failed`: the browser refused to close the recorded tab, so recording
+  continues on it in a new segment.
+- `switch-failed`: the browser rejected a `switchToWindow` to a window that had
+  closed, so recording returns to WebdriverIO's current window in a new
+  segment.
+
+A validator only accepts the reasons it knows, so a manifest that uses a reason
+added in a later release fails validation with an older release.
+
+A merged file carries `tabs`, the tabs of its parts in recording order. So does
+a `final` file. The tab sequence is recorded whether the merge removes the
+segments or keeps them beside the merged file.
+
 An incomplete capture (for example, an encoder error, an encoder that exits
 before the recording stops even with exit code 0, an overloaded encoder, or a
 stop timeout) is recorded in the manifest as `failed` with reason
@@ -349,6 +429,23 @@ otherwise processed; unretained media is discarded normally. The default
 `failurePolicy: 'warn'` logs one warning when the segment stops and does not
 fail the test. With `'error'`, the failure is raised after manifest
 finalization and recording cleanup.
+
+In a WebDriver BiDi session, a tab the test drives but whose recording cannot
+start is a gap in the recording, reported the same way. A tab gets at most two
+consecutive attempts to start recording. Switching to another tab and back does
+not reset that count; a recording that starts does, as does the next test. While the
+test drives a tab that cannot be recorded, no other tab is filmed in its place.
+Segments recorded before and after the gap are kept, and a later successful
+segment does not clear the failure. A `switchToWindow` the browser rejects is
+not a gap, because the test never left its window.
+
+WebdriverIO's `parallelMode` (`mochaOpts` or `cucumberOpts`, with
+`'wdio:experimentalBiDiCommands': true`) runs a spec file's tests at the same
+time in one browser session. Recording follows one tab per worker, so the
+service does not record such a worker: it logs one warning, and the manifest
+lists each test as `skipped` with the reason. Because the tests overlap, these
+entries do not record each test's result. Turn `parallelMode` off for runs you
+want recorded.
 
 Optional artifact `width` and `height` describe the encoded retained file, not
 an estimate of the page's CSS viewport. A lightweight FFmpeg inspection reads
@@ -400,7 +497,9 @@ ambiguous outcomes receive a diagnostic instead of a potentially incorrect
 video.
 Skipped tests and tests without retained video remain visible. The report has
 status, spec, browser, and retry filters, inline playback, diagnostics, and
-error details.
+error details. When a recording used more than one segment, each video is
+labelled with its tab, such as "Tab 2 · test command". A merged video lists its
+tab sequence, such as "Tabs 1 → 2 → 1".
 
 ```typescript
 import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
@@ -501,21 +600,27 @@ accepted are still encoded, and the recording is reported as incomplete
 applied after cleanup) rather than letting worker memory grow without bound.
 Debug logging reports each recording's queue high-water mark.
 
-WDIO v9 attempts WebDriver BiDi for supported browsers by default. This service
-classifies a successful recording session as `bidi+cdp` or `classic+cdp`:
-WDIO may issue automation commands through BiDi, while the service still attaches
-to Chrome or Edge through Puppeteer's CDP connection to record the screencast.
+WebdriverIO 10 uses WebDriver BiDi for supported browsers by default. This
+service classifies a successful recording session as `bidi+cdp` or
+`classic+cdp` from WebdriverIO's `browser.isBidi`: WDIO may issue automation
+commands through BiDi, while the service still attaches to Chrome or Edge
+through Puppeteer's CDP connection to record the screencast.
 
 Set `'wdio:enforceWebDriverClassic': true` in the browser capability when a
 classic-only validation run is required. Both modes use the same CDP capture
-path. A session is `unsupported` when no usable CDP endpoint is available.
+path; they differ in how recording follows tabs ([Tab Following](#tab-following)).
+WDIO does not start the service for non-Chromium browsers or multiremote
+sessions: the service's static `shouldRun` declines them, with one warning, and
+those workers write no manifest entries. A session is `unsupported` when no usable CDP endpoint is available.
 Diagnostics distinguish multiremote, WDIO browser/component runner, remote
 debugging pipes, remote/cloud endpoints without `se:cdp`, non-Chromium
 browsers, connection timeout, and generic missing-CDP cases.
 
 ## Limitations
 
-- WebdriverIO 9 only; WebdriverIO 10 is not supported yet ([details](./SUPPORT.md#webdriverio-10)).
+- WebdriverIO 10 only; use 1.x for WebdriverIO 9 ([details](./SUPPORT.md#webdriverio-9)).
+- WebdriverIO's `parallelMode` is not recorded.
+- Commands on different tabs at the same time, or sent to a tab in the background, are not all filmed ([Tab Following](#tab-following)).
 - Chromium only; capture requires CDP even when WDIO controls the session through BiDi.
 - Audio, Firefox, Safari, Appium/mobile, component runner, multiremote, and cloud sessions without CDP are not supported.
 - Chrome sessions started with `--remote-debugging-pipe` are not supported by WDIO `getPuppeteer()`; expose a debugger address instead.
@@ -529,14 +634,16 @@ The repository uses an ephemeral two-origin fixture server; E2E runs never
 depend on a public website. Fixtures cover static and animated pages, same- and
 cross-origin frames, dialogs, viewport changes, tabs, and target closure.
 
-- `npm run test:e2e:both`: multipart and merged Mocha runs.
+- `npm run test:e2e:both`: multipart and merged Mocha runs in WebDriver BiDi, including tab following with decoded per-segment colors. `test:e2e:classic` runs the window-switching suite under classic WebDriver, `test:e2e:merge-kept` merges while keeping the segments, and `test:e2e:edge` runs the BiDi suite on Edge.
+- `npm run test:e2e:parallel`: `parallelMode` (`contexts` and `userContexts`) in Mocha and Cucumber is reported as skipped, not recorded.
+- `npm run test:e2e:faults`: an injected capture-start failure on a driven tab leaves the recording `failed` with `capture-incomplete`.
 - `npm run test:e2e:frameworks`: Jasmine and Cucumber runs.
 - `npm run test:e2e:capture`: Chrome BiDi/classic, exact crop/scale dimensions, speed duration, viewport restoration, static-page priming, Edge smoke, bounded capture width, decoded-pixel crop region, and retained-file metadata checks.
 - `npm run test:e2e:capture:metadata`: high-DPI, odd-size fractional scaling, H264 padding, and custom-filter dimensions compared with Manifest v1.
 - `npm run test:e2e:advanced`: retry policies, spec scope, window changes, naming, deferred merge, filters, retention, global concurrency, and FFmpeg failure preservation.
 - Advanced retry mode also opens the generated report through `file://` with network access disabled and verifies filtering, CSP, and actual video playback.
 - `npm run test:consumer`: builds declarations and compiles an ESM package consumer.
-- `npm run test:consumer:e2e`: installs a tarball into a fresh consumer with normal peer resolution, then verifies package-name WDIO registration, decoded media, Manifest v1, the HTML report, and Allure attachments. Use `-- --peers minimum --protocol bidi` (or `latest` / `classic`) to select the compatibility leg, and `--priming off` to record without frame priming, as the `ci` profile does. The existing peer-free import check remains separate.
+- `npm run test:consumer:e2e`: installs a tarball into a fresh consumer with normal peer resolution, then verifies package-name WDIO registration, decoded media, Manifest v1, the HTML report, and Allure attachments. Under BiDi it also follows a held tab and checks which tab each segment shows. Use `-- --peers minimum --protocol bidi` (or `latest` / `classic`) to select the compatibility leg, and `--priming off` to record without frame priming, as the `ci` profile does. The existing peer-free import check remains separate.
 - `npm run test:coverage`: runs the deterministic unit/integration suite with
   96% statements and lines, 95% functions, and a 93% branch gate.
 - `npm run package:check`: validates the compiled tarball with publint, Are the Types Wrong, and a peer-free ESM consumer install.
@@ -549,7 +656,7 @@ is unavailable. A local browser-only run may explicitly opt out with
 
 ## Release and support documentation
 
-- [0.8 to 1.0 migration](./MIGRATION.md)
+- [1.x to 2.0 and 0.8 to 1.0 migration](./MIGRATION.md)
 - [Support policy](./SUPPORT.md)
 - [Troubleshooting](./TROUBLESHOOTING.md)
 - [Maintainer release procedure](https://github.com/DanLambe/wdio-puppeteer-video-service/blob/master/RELEASING.md)

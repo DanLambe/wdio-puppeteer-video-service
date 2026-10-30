@@ -12,7 +12,9 @@ import {
   createWorkerCompositionRoot,
   type WorkerCompositionOverrides,
 } from './composition.js'
+import { ContextFollower } from './context-follower.js'
 import { FfmpegRuntime } from './ffmpeg-runtime.js'
+import { isInternalOperation } from './internal-operation.js'
 import {
   createLauncherRegistrationError,
   inspectLauncherWorkerContext,
@@ -29,6 +31,11 @@ import {
 import { MediaPipeline } from './media-pipeline.js'
 import * as normalization from './normalization.js'
 import { resolveServiceConfiguration } from './options.js'
+import {
+  isInParallelContext,
+  PARALLEL_MODE_UNSUPPORTED_REASON,
+  usesParallelMode,
+} from './parallel-mode.js'
 import { isChromiumSession } from './protocol.js'
 import { PuppeteerCaptureEngine } from './puppeteer-capture-engine.js'
 import { RecordingController } from './recording-controller.js'
@@ -74,6 +81,9 @@ export class WdioPuppeteerVideoWorkerRuntime
   private readonly _ffmpegRuntime: FfmpegRuntime
   private readonly _mediaCoordinator: RecordingMediaCoordinator
   private readonly _recordingController: RecordingController
+  private readonly _contextFollower: ContextFollower
+  private readonly _config: unknown
+  private _followContexts = false
   private _isChromium = false
   private _recordingDisabledReason: string | undefined
   private _logLevel: LogLevel = 'warn'
@@ -93,6 +103,7 @@ export class WdioPuppeteerVideoWorkerRuntime
         ? undefined
         : validateLauncherWorkerConfiguration(config)
     const resolvedConfiguration = resolveServiceConfiguration(options)
+    this._config = config
     this._hasExplicitLogLevel = resolvedConfiguration.hasExplicitLogLevel
     this._logLevel = resolvedConfiguration.logLevel
     this._options = resolvedConfiguration.options
@@ -189,6 +200,13 @@ export class WdioPuppeteerVideoWorkerRuntime
       recordingSlotScheduler,
     })
     recordingController = this._recordingController
+    this._contextFollower = new ContextFollower({
+      getBrowser: () => this._captureSession.browser,
+      log: (level, message, details) => {
+        this._log(level, message, details)
+      },
+      target: this._recordingController,
+    })
     this._recordingCoordinator = composition.createRecordingCoordinator({
       actions: {
         finalizeMedia: (passed, keepArtifacts) =>
@@ -285,6 +303,14 @@ export class WdioPuppeteerVideoWorkerRuntime
       protocol: this._captureSession.protocol,
     })
 
+    // Multiremote capabilities never look like one Chromium session, so check
+    // it first: the Chromium warning alone would leave recording enabled.
+    if (browser.isMultiRemote) {
+      this._disableRecordingForWorker(
+        'multiremote sessions are not supported; configure recording for a single-browser WDIO worker',
+      )
+      return
+    }
     if (!this._isChromium) {
       this._log(
         'warn',
@@ -292,12 +318,11 @@ export class WdioPuppeteerVideoWorkerRuntime
       )
       return
     }
-    if (browser.isMultiremote) {
-      this._disableRecordingForWorker(
-        'multiremote sessions are not supported; configure recording for a single-browser WDIO worker',
-      )
+    if (usesParallelMode(this._config, browser)) {
+      this._disableRecordingForWorker(PARALLEL_MODE_UNSUPPORTED_REASON)
       return
     }
+    this._configureContextFollowing(browser)
     this._ffmpegRuntime.resetForSession()
 
     await this._fileSystem.mkdir(this._options.outputDir).catch((error) => {
@@ -321,6 +346,7 @@ export class WdioPuppeteerVideoWorkerRuntime
   }
 
   async beforeTest(test: Frameworks.Test, context: unknown): Promise<void> {
+    this._rejectParallelContext()
     await this._recordingCoordinator.beginEntity(
       normalizeTestEntity(
         test,
@@ -345,6 +371,7 @@ export class WdioPuppeteerVideoWorkerRuntime
     world: Frameworks.World,
     context: unknown,
   ): Promise<void> {
+    this._rejectParallelContext()
     await this._recordingCoordinator.beginEntity(
       normalizeScenarioEntity(
         world,
@@ -390,6 +417,16 @@ export class WdioPuppeteerVideoWorkerRuntime
     this._ffmpegRuntime.resumeAfterTeardown()
     this._captureEngine.resetConnection()
     this._recordingController.setSessionId(newSessionId)
+    const reloadedBrowser = this._captureSession.browser
+    if (reloadedBrowser) {
+      // A reloaded session may differ from the old one, for example by being
+      // started with different capabilities; check eligibility again.
+      this._isChromium = isChromiumSession(reloadedBrowser.capabilities)
+      if (usesParallelMode(this._config, reloadedBrowser)) {
+        this._disableRecordingForWorker(PARALLEL_MODE_UNSUPPORTED_REASON)
+      }
+      this._configureContextFollowing(reloadedBrowser)
+    }
     const capabilities = this._captureSession.browser?.capabilities as
       | WebdriverIO.Capabilities
       | undefined
@@ -467,20 +504,56 @@ export class WdioPuppeteerVideoWorkerRuntime
     }
   }
 
-  async beforeCommand(commandName: string): Promise<void> {
-    if (!this._canUseRecordingHooks()) {
+  async beforeCommand(
+    commandName: string,
+    args: readonly unknown[] = [],
+  ): Promise<void> {
+    if (isInternalOperation() || !this._canUseRecordingHooks()) {
       return
     }
-
+    if (this._followContexts) {
+      await this._contextFollower.beforeCommand(commandName, args)
+      return
+    }
     await this._recordingController.beforeWindowCommand(commandName)
   }
 
-  async afterCommand(commandName: string): Promise<void> {
-    if (!this._canUseRecordingHooks()) {
+  async afterCommand(
+    commandName: string,
+    args: readonly unknown[] = [],
+    result?: unknown,
+    error?: unknown,
+  ): Promise<void> {
+    if (isInternalOperation() || !this._canUseRecordingHooks()) {
       return
     }
-
+    if (this._followContexts) {
+      await this._contextFollower.afterCommand(commandName, args, result, error)
+      return
+    }
     await this._recordingController.afterWindowCommand(commandName)
+  }
+
+  /**
+   * The configuration check covers the documented options; this catches a
+   * test or scenario that runs in a parallel-mode context regardless.
+   */
+  private _rejectParallelContext(): void {
+    if (isInParallelContext(this._captureSession.browser)) {
+      this._disableRecordingForWorker(PARALLEL_MODE_UNSUPPORTED_REASON)
+    }
+  }
+
+  /**
+   * A WebDriver BiDi test can drive a tab it holds without switching to it,
+   * so recording follows the commands' browsing contexts. Classic sessions
+   * keep following WDIO's window commands.
+   */
+  private _configureContextFollowing(browser: Browser): void {
+    this._contextFollower.reset()
+    this._followContexts =
+      browser.isBidi === true &&
+      this._options.recording.windowChanges === 'segment'
   }
 
   private _log(level: LogLevel, message: string, details?: unknown): void {

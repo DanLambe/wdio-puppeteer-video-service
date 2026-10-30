@@ -81,20 +81,47 @@ describe('release package validation', () => {
   })
 
   it('requires package versions to match the selected npm release channel', () => {
-    expect(resolveReleaseDistTag('1.0.0-rc.2', 'prerelease')).toBe('next')
-    expect(resolveReleaseDistTag('1.0.0', 'stable')).toBe('latest')
-    expect(() => resolveReleaseDistTag('1.0.0', 'prerelease')).toThrow(
+    expect(resolveReleaseDistTag('2.0.0-rc.0', 'prerelease')).toBe('next')
+    expect(resolveReleaseDistTag('2.0.0', 'stable')).toBe('latest')
+    expect(resolveReleaseDistTag('3.1.0', 'stable', 'master')).toBe('latest')
+    expect(() => resolveReleaseDistTag('2.0.0', 'prerelease')).toThrow(
       'requires a prerelease package version',
     )
-    expect(() => resolveReleaseDistTag('1.0.0-rc.2', 'stable')).toThrow(
+    expect(() => resolveReleaseDistTag('2.0.0-rc.2', 'stable')).toThrow(
       'cannot use prerelease package version',
     )
-    expect(() => resolveReleaseDistTag('1.0.0', 'preview')).toThrow(
+    expect(() => resolveReleaseDistTag('2.0.0', 'preview')).toThrow(
       'Unsupported release channel',
     )
     expect(() => resolveReleaseDistTag('not-semver', 'stable')).toThrow(
       'Invalid package version',
     )
+  })
+
+  it('publishes each major only from its own branch and npm tag', () => {
+    // 1.x is maintained for WebdriverIO 9 under its own tag.
+    expect(resolveReleaseDistTag('1.0.1', 'stable', 'release/1.x')).toBe(
+      'wdio9',
+    )
+    expect(() => resolveReleaseDistTag('1.0.1', 'stable', 'master')).toThrow(
+      'is published from release/1.x',
+    )
+    expect(() => resolveReleaseDistTag('1.0.1', 'stable')).toThrow(
+      'is published from release/1.x',
+    )
+    expect(() =>
+      resolveReleaseDistTag('1.1.0-rc.0', 'prerelease', 'release/1.x'),
+    ).toThrow('stable versions on the stable channel only')
+    expect(() =>
+      resolveReleaseDistTag('1.0.1', 'prerelease', 'release/1.x'),
+    ).toThrow('stable versions on the stable channel only')
+    // Later majors never publish from a maintenance or feature branch.
+    expect(() =>
+      resolveReleaseDistTag('2.0.1', 'stable', 'release/1.x'),
+    ).toThrow('is published from master')
+    expect(() =>
+      resolveReleaseDistTag('2.0.0-rc.1', 'prerelease', 'release/2.0.0'),
+    ).toThrow('is published from master')
   })
 
   it('requires packed source-map sources to be embedded or packaged', async () => {
@@ -199,6 +226,11 @@ describe('release package validation', () => {
     expect(workflow).toContain(
       "needs.verify-and-pack.outputs.release_dist_tag == 'next'",
     )
+    // The branch decides which majors and npm tags a dispatch may publish.
+    expect(workflow).toContain('"$RELEASE_CHANNEL" "$GITHUB_REF_NAME"')
+    expect(workflow).toMatch(
+      /make_latest:\s*\$\{\{\s*needs\.verify-and-pack\.outputs\.release_dist_tag == 'latest'\s*\}\}/u,
+    )
     expect(workflow).not.toContain(
       "contains(needs.verify-and-pack.outputs.package_version, '-')",
     )
@@ -301,7 +333,7 @@ describe('release package validation', () => {
     }
   })
 
-  it('aligns Puppeteer support with the WebdriverIO v9 compatibility band', async () => {
+  it('aligns Puppeteer support with the WebdriverIO v10 compatibility band', async () => {
     const [workflow, packageJsonText] = await Promise.all([
       fs.readFile('.github/workflows/release-validation.yaml', 'utf8'),
       fs.readFile('package.json', 'utf8'),
@@ -319,21 +351,21 @@ describe('release package validation', () => {
       packageJson.devDependencies?.['puppeteer-core'] ?? ''
     const developmentExpect =
       packageJson.devDependencies?.['expect-webdriverio'] ?? ''
-    expect(peerPuppeteer).toBe('>=24.11.2 <25')
+    expect(peerPuppeteer).toBe('>=25.0.2 <26')
     expect(semver.intersects(developmentPuppeteer, peerPuppeteer)).toBe(true)
-    expect(semver.satisfies('25.0.0', developmentPuppeteer)).toBe(false)
+    expect(semver.satisfies('26.0.0', developmentPuppeteer)).toBe(false)
     const minimumDevelopmentExpect = semver.minVersion(developmentExpect)
     expect(minimumDevelopmentExpect).not.toBeNull()
-    expect(semver.gte(minimumDevelopmentExpect ?? '0.0.0', '6.0.9')).toBe(true)
-    expect(semver.satisfies('7.0.0', developmentExpect)).toBe(false)
+    expect(semver.gte(minimumDevelopmentExpect ?? '0.0.0', '8.0.0')).toBe(true)
+    expect(semver.satisfies('9.0.0', developmentExpect)).toBe(false)
     expect(
       packageJson.peerDependenciesMeta?.['puppeteer-core']?.optional,
     ).not.toBe(true)
-    expect(workflow).toContain('webdriverio@9.29.1 puppeteer-core@24.11.2')
-    expect(workflow).toContain('expect-webdriverio@5.7.0')
-    expect(workflow).toContain('@wdio/runner@9.29.1')
-    expect(workflow).toContain('webdriverio@9 puppeteer-core@24')
-    expect(workflow).toContain('@wdio/types@9 expect-webdriverio@6')
-    expect(workflow).not.toContain('puppeteer-core@25')
+    expect(workflow).toContain('webdriverio@10.1.0 puppeteer-core@25.0.2')
+    expect(workflow).toContain('expect-webdriverio@8.0.0')
+    expect(workflow).toContain('@wdio/runner@10.1.0')
+    expect(workflow).toContain('webdriverio@10 puppeteer-core@25')
+    expect(workflow).toContain('@wdio/types@10 expect-webdriverio@8')
+    expect(workflow).not.toContain('puppeteer-core@24')
   })
 })

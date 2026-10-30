@@ -11,6 +11,7 @@ import type {
 } from '../../src/manifest.js'
 import { isVideoManifest } from '../../src/manifest.js'
 import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
+import type { SegmentTab } from '../../src/service/capture-session.js'
 import {
   aggregateManifestRun,
   assignManifestRunContext,
@@ -1008,5 +1009,468 @@ describe('manifest runtime', () => {
     [undefined, 'unknown'],
   ] as const)('normalizes framework %s to %s', (input, expected) => {
     expect(normalizeManifestFramework(input)).toBe(expected)
+  })
+})
+
+describe('skipped entities written whole', () => {
+  it('keeps overlapping skipped entries apart from the current entity', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const current = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['parallel.ts'],
+      test: { title: 'a sequential test' },
+    })
+
+    const ids = await Promise.all(
+      ['first', 'second'].map((title) =>
+        recorder.recordSkippedEntity(
+          { scope: 'test', specPaths: ['parallel.ts'], test: { title } },
+          { reason: 'parallel-mode', result: 'unknown' },
+        ),
+      ),
+    )
+    await recorder.flush()
+
+    expect(recorder.currentEntryId).toBe(current)
+    const entries = firstRun(await aggregateManifestRun(context, 0)).entries
+    const skipped = entries.filter((entry) => ids.includes(entry.id))
+    expect(
+      skipped.map((entry) => [
+        entry.test?.name,
+        entry.capture.decision,
+        entry.capture.reason,
+        entry.processing.outcome,
+      ]),
+    ).toEqual([
+      ['first', 'skipped', 'parallel-mode', 'skipped'],
+      ['second', 'skipped', 'parallel-mode', 'skipped'],
+    ])
+  })
+})
+
+describe('manifest tab provenance', () => {
+  const tabA: SegmentTab = {
+    contextId: 'raw-tab-a',
+    ordinal: 1,
+    reason: 'start',
+  }
+  const tabB: SegmentTab = {
+    contextId: 'raw-tab-b',
+    ordinal: 2,
+    reason: 'command',
+  }
+
+  const writeMedia = async (
+    outputDir: string,
+    names: string[],
+  ): Promise<string[]> => {
+    return Promise.all(
+      names.map(async (name) => {
+        const filePath = path.join(outputDir, name)
+        await fs.writeFile(filePath, Buffer.alloc(8))
+        return filePath
+      }),
+    )
+  }
+
+  it('records each segment’s tab with a hashed tab identity', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const paths = await writeMedia(outputDir, ['t_part1.webm', 't_part2.webm'])
+    await recorder.beginEntity({ scope: 'test', specPaths: ['tabs.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths,
+      tabs: new Map([
+        [1, tabA],
+        [2, tabB],
+      ]),
+    })
+    await recorder.flush()
+
+    const manifest = await aggregateManifestRun(context, 0)
+    const { capture } = firstEntry(manifest)
+    expect(isVideoManifest(manifest)).toBe(true)
+    expect(capture.segments.map((segment) => segment.tab)).toEqual([
+      {
+        ordinal: 1,
+        reason: 'start',
+        contextHash: hashPrivateValue(context.runId, 'raw-tab-a'),
+      },
+      {
+        ordinal: 2,
+        reason: 'command',
+        contextHash: hashPrivateValue(context.runId, 'raw-tab-b'),
+      },
+    ])
+    expect(capture.final).toBeUndefined()
+    expect(JSON.stringify(manifest)).not.toContain('raw-tab')
+  })
+
+  it('lists the tabs of a merged file in part order', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const [merged] = await writeMedia(outputDir, ['t.webm'])
+    await recorder.beginEntity({ scope: 'test', specPaths: ['tabs.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [merged ?? ''],
+      tabs: new Map([
+        [2, tabB],
+        [1, tabA],
+      ]),
+    })
+    await recorder.flush()
+
+    const { capture } = firstEntry(await aggregateManifestRun(context, 0))
+    expect(capture.segments[0]?.tab).toBeUndefined()
+    expect(capture.segments[0]?.tabs).toEqual(capture.final?.tabs)
+    expect(capture.final?.tabs?.map((tab) => tab.ordinal)).toEqual([1, 2])
+  })
+
+  it('lists the tabs on a merged file kept beside its parts', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const paths = await writeMedia(outputDir, [
+      't_part1.webm',
+      't_part2.webm',
+      't.webm',
+    ])
+    await recorder.beginEntity({ scope: 'test', specPaths: ['tabs.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths,
+      tabs: new Map([
+        [1, tabA],
+        [2, tabB],
+      ]),
+    })
+    await recorder.flush()
+
+    const manifest = await aggregateManifestRun(context, 0)
+    const { capture } = firstEntry(manifest)
+    expect(isVideoManifest(manifest)).toBe(true)
+    expect(
+      capture.segments.map((segment) => [
+        segment.path,
+        segment.tab?.ordinal,
+        segment.tabs?.map((tab) => tab.ordinal),
+      ]),
+    ).toEqual([
+      ['t_part1.webm', 1, undefined],
+      ['t_part2.webm', 2, undefined],
+      ['t.webm', undefined, [1, 2]],
+    ])
+    expect(capture.final).toBeUndefined()
+  })
+
+  it('keeps a merged file’s tabs when it is transcoded later', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const [part1, part2, merged, mergedMp4] = await writeMedia(outputDir, [
+      't_part1.webm',
+      't_part2.webm',
+      't.webm',
+      't.mp4',
+    ])
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['tabs.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [part1 ?? '', part2 ?? ''],
+      processingOutcome: 'pending',
+      tabs: new Map([
+        [1, tabA],
+        [2, tabB],
+      ]),
+    })
+    for (const output of [merged, mergedMp4]) {
+      await recorder.completeDeferred(entryId, {
+        decision: 'recorded',
+        paths: [output ?? ''],
+        processingOutcome: 'completed',
+      })
+    }
+    await recorder.flush()
+
+    const { capture } = firstEntry(await aggregateManifestRun(context, 0))
+    expect(capture.segments.map((segment) => segment.path)).toEqual(['t.mp4'])
+    expect(capture.final?.tabs?.map((tab) => tab.ordinal)).toEqual([1, 2])
+  })
+
+  it('gives a single-segment final file that segment’s tab', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const paths = await writeMedia(outputDir, ['t_part3.webm'])
+    await recorder.beginEntity({ scope: 'test', specPaths: ['tabs.ts'] })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths,
+      tabs: new Map([[3, tabB]]),
+    })
+    await recorder.flush()
+
+    const { capture } = firstEntry(await aggregateManifestRun(context, 0))
+    expect(capture.segments[0]?.tab?.ordinal).toBe(2)
+    expect(capture.final).not.toHaveProperty('tab')
+    expect(capture.final?.tabs).toEqual([capture.segments[0]?.tab])
+  })
+
+  it('keeps the tabs through a deferred merge', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const paths = await writeMedia(outputDir, [
+      't_part1.webm',
+      't_part2.webm',
+      't.webm',
+    ])
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['tabs.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: paths.slice(0, 2),
+      processingOutcome: 'pending',
+      tabs: new Map([
+        [1, tabA],
+        [2, tabB],
+      ]),
+    })
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: paths.slice(2),
+      processingOutcome: 'completed',
+      processingOperation: 'merge',
+    })
+    await recorder.flush()
+
+    const { capture } = firstEntry(await aggregateManifestRun(context, 0))
+    expect(capture.segments.map((segment) => segment.path)).toEqual(['t.webm'])
+    expect(capture.final?.tabs?.map((tab) => tab.reason)).toEqual([
+      'start',
+      'command',
+    ])
+  })
+
+  it.each([
+    { firstFails: false, partOneFirst: true },
+    { firstFails: false, partOneFirst: false },
+    { firstFails: true, partOneFirst: true },
+    { firstFails: true, partOneFirst: false },
+  ])(
+    'keeps both results when completions overlap (part 1 fails: $firstFails, part 1 first: $partOneFirst)',
+    async ({ firstFails, partOneFirst }) => {
+      const outputDir = await createTempDir()
+      const { context, recorder, readDimensions } =
+        await createRecorder(outputDir)
+      const [part1, part2, part1Mp4, part2Mp4] = await writeMedia(outputDir, [
+        't_part1.webm',
+        't_part2.webm',
+        't_part1.mp4',
+        't_part2.mp4',
+      ])
+      const entered = [
+        Promise.withResolvers<void>(),
+        Promise.withResolvers<void>(),
+      ]
+      const released = [
+        Promise.withResolvers<void>(),
+        Promise.withResolvers<void>(),
+      ]
+      readDimensions.mockImplementation(async (filePath) => {
+        const index = filePath.includes('_part1.') ? 0 : 1
+        entered[index]?.resolve()
+        await released[index]?.promise
+        return undefined
+      })
+      const entryId = await recorder.beginEntity({
+        scope: 'test',
+        specPaths: ['tabs.ts'],
+      })
+      await recorder.completeCurrent({
+        decision: 'recorded',
+        result: 'passed',
+        paths: [part1 ?? '', part2 ?? ''],
+        processingOutcome: 'pending',
+        processingOperation: 'transcode',
+        tabs: new Map([
+          [1, tabA],
+          [2, tabB],
+        ]),
+      })
+      recorder.expectDeferredTasks(entryId, 2)
+
+      const completions = [
+        recorder.completeDeferred(entryId, {
+          decision: firstFails ? 'failed' : 'recorded',
+          paths: [firstFails ? (part1 ?? '') : (part1Mp4 ?? '')],
+          replaces: [part1 ?? ''],
+          processingOutcome: firstFails ? 'failed' : 'completed',
+          processingOperation: 'transcode',
+          ...(firstFails ? { reason: 'part-one-failed' } : {}),
+        }),
+        recorder.completeDeferred(entryId, {
+          decision: 'recorded',
+          paths: [part2Mp4 ?? ''],
+          replaces: [part2 ?? ''],
+          processingOutcome: 'completed',
+          processingOperation: 'transcode',
+        }),
+      ]
+      // Both hold the pending entry before either publishes.
+      await Promise.all(entered.map((gate) => gate.promise))
+      for (const index of partOneFirst ? [0, 1] : [1, 0]) {
+        released[index]?.resolve()
+        await completions[index]
+      }
+      await recorder.flush()
+
+      const { capture, processing } = firstEntry(
+        await aggregateManifestRun(context, 0),
+      )
+      expect(
+        capture.segments.map((segment) => [segment.path, segment.tab?.ordinal]),
+      ).toEqual([
+        [firstFails ? 't_part1.webm' : 't_part1.mp4', 1],
+        ['t_part2.mp4', 2],
+      ])
+      expect(capture.decision).toBe(firstFails ? 'failed' : 'recorded')
+      expect(processing.outcome).toBe(firstFails ? 'failed' : 'completed')
+      expect(processing.reason).toBe(firstFails ? 'part-one-failed' : undefined)
+    },
+  )
+
+  it('stays pending until every deferred task of the entry completes', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const [part1, part2, part1Mp4, part2Mp4] = await writeMedia(outputDir, [
+      't_part1.webm',
+      't_part2.webm',
+      't_part1.mp4',
+      't_part2.mp4',
+    ])
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['tabs.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [part1 ?? '', part2 ?? ''],
+      processingOutcome: 'pending',
+      processingOperation: 'transcode',
+    })
+    recorder.expectDeferredTasks(entryId, 2)
+    recorder.expectDeferredTasks('unknown-entry', 1)
+
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: [part1Mp4 ?? ''],
+      replaces: [part1 ?? ''],
+      processingOutcome: 'completed',
+      processingOperation: 'transcode',
+    })
+    await recorder.flush()
+    // A worker stopped here leaves an entry that does not claim completion.
+    const interrupted = firstEntry(await aggregateManifestRun(context, 0))
+    expect(interrupted.processing.outcome).toBe('pending')
+    expect(interrupted.capture.segments.map((segment) => segment.path)).toEqual(
+      ['t_part1.mp4', 't_part2.webm'],
+    )
+
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: [part2Mp4 ?? ''],
+      replaces: [part2 ?? ''],
+      processingOutcome: 'completed',
+      processingOperation: 'transcode',
+    })
+    await recorder.flush()
+    const completed = firstEntry(await aggregateManifestRun(context, 0))
+    expect(completed.processing.outcome).toBe('completed')
+  })
+
+  it('keeps every segment when each finishes deferred processing separately', async () => {
+    const outputDir = await createTempDir()
+    const { context, recorder } = await createRecorder(outputDir)
+    const [part1, part2, part2Mp4, extra] = await writeMedia(outputDir, [
+      't_part1.webm',
+      't_part2.webm',
+      't_part2.mp4',
+      'extra.webm',
+    ])
+    const entryId = await recorder.beginEntity({
+      scope: 'test',
+      specPaths: ['tabs.ts'],
+    })
+    await recorder.completeCurrent({
+      decision: 'recorded',
+      result: 'passed',
+      paths: [part1 ?? '', part2 ?? ''],
+      processingOutcome: 'pending',
+      processingOperation: 'transcode',
+      tabs: new Map([
+        [1, tabA],
+        [2, tabB],
+      ]),
+    })
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: [part1 ?? ''],
+      replaces: [part1 ?? ''],
+      reason: 'deferred-transcode-failed-original-preserved',
+      processingOutcome: 'failed',
+      processingOperation: 'transcode',
+    })
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: [part2Mp4 ?? ''],
+      replaces: [part2 ?? ''],
+      processingOutcome: 'completed',
+      processingOperation: 'transcode',
+    })
+    await recorder.flush()
+
+    const { capture, processing } = firstEntry(
+      await aggregateManifestRun(context, 0),
+    )
+    expect(
+      capture.segments.map((segment) => [segment.path, segment.tab?.ordinal]),
+    ).toEqual([
+      ['t_part1.webm', 1],
+      ['t_part2.mp4', 2],
+    ])
+    expect(capture.final).toBeUndefined()
+    expect(capture.reason).toBe('deferred-transcode-failed-original-preserved')
+    expect(processing).toMatchObject({
+      outcome: 'failed',
+      operation: 'transcode',
+      reason: 'deferred-transcode-failed-original-preserved',
+    })
+
+    // A result for a path the entry never listed is added after the others.
+    await recorder.completeDeferred(entryId, {
+      decision: 'recorded',
+      paths: [extra ?? ''],
+      replaces: [path.join(outputDir, 'unlisted.webm')],
+      processingOutcome: 'completed',
+    })
+    await recorder.flush()
+    const latest = firstEntry(await aggregateManifestRun(context, 0))
+    expect(latest.capture.segments.map((segment) => segment.path)).toEqual([
+      't_part1.webm',
+      't_part2.mp4',
+      'extra.webm',
+    ])
   })
 })

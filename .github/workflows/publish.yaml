@@ -36,10 +36,13 @@ jobs:
       package_version: ${{ steps.package_meta.outputs.version }}
       release_dist_tag: ${{ steps.release_channel.outputs.dist_tag }}
     steps:
-      - name: Require master
-        if: github.ref != 'refs/heads/master'
+      # master publishes the current major; release/N.x publishes an older
+      # major under its own npm tag. resolve-release-channel.ts checks that the
+      # version belongs to the branch.
+      - name: Require A Release Branch
+        if: github.ref != 'refs/heads/master' && !(startsWith(github.ref, 'refs/heads/release/') && endsWith(github.ref, '.x'))
         run: |
-          echo 'Releases must be dispatched from master.' >&2
+          echo 'Releases must be dispatched from master or a release/N.x branch.' >&2
           exit 1
 
       - name: Validate Independent RC Runs
@@ -63,8 +66,8 @@ jobs:
               echo "Run $run_id is not a dispatched Release Candidate Validation run." >&2
               exit 1
             fi
-            if [[ "$head_sha" != "$GITHUB_SHA" || "$head_branch" != 'master' || "$conclusion" != 'success' ]]; then
-              echo "Run $run_id must pass against commit $GITHUB_SHA on master." >&2
+            if [[ "$head_sha" != "$GITHUB_SHA" || "$head_branch" != "$GITHUB_REF_NAME" || "$conclusion" != 'success' ]]; then
+              echo "Run $run_id must pass against commit $GITHUB_SHA on $GITHUB_REF_NAME." >&2
               exit 1
             fi
           done
@@ -104,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dist_tag="$(./node_modules/.bin/tsx scripts/resolve-release-channel.ts "$PACKAGE_VERSION" "$RELEASE_CHANNEL")"
+          dist_tag="$(./node_modules/.bin/tsx scripts/resolve-release-channel.ts "$PACKAGE_VERSION" "$RELEASE_CHANNEL" "$GITHUB_REF_NAME")"
           echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
 
       - name: Require An Unpublished Version
@@ -251,3 +254,5 @@ jobs:
             release-artifacts/*.tgz
             release-artifacts/sbom.cdx.json
           prerelease: ${{ needs.verify-and-pack.outputs.release_dist_tag == 'next' }}
+          # A maintenance release must not become the repository's latest.
+          make_latest: ${{ needs.verify-and-pack.outputs.release_dist_tag == 'latest' }}

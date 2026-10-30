@@ -126,13 +126,56 @@ describe('WdioPuppeteerVideoService worker adapter', () => {
     })
     const browser = {
       sessionId: 'abc123',
-      isMultiremote: false,
+      isMultiRemote: false,
       capabilities: { browserName: 'chrome' },
     } as Parameters<WdioPuppeteerVideoService['before']>[2]
 
     await service.before({}, ['tests/specs/e2e.test.ts'], browser)
 
     expect(runFfmpeg).not.toHaveBeenCalled()
+  })
+
+  it('skips workers it can never record before WDIO constructs them', () => {
+    expect(
+      WdioPuppeteerVideoService.shouldRun({}, { browserName: 'chrome' }),
+    ).toBe(true)
+    expect(
+      WdioPuppeteerVideoService.shouldRun(
+        { logLevel: 'silent' },
+        { browserName: 'firefox' },
+      ),
+    ).toBe(false)
+    expect(
+      WdioPuppeteerVideoService.shouldRun(
+        { logLevel: 'silent' },
+        { first: { capabilities: { browserName: 'chrome' } } },
+      ),
+    ).toBe(false)
+    expect(
+      WdioPuppeteerVideoService.shouldRun(undefined, { browserName: 'x' }),
+    ).toBe(false)
+  })
+
+  it('forwards command arguments, results and errors to the worker', async () => {
+    const service = new WdioPuppeteerVideoService()
+    const worker = Reflect.get(service, 'worker') as {
+      afterCommand: (...args: unknown[]) => Promise<void>
+      beforeCommand: (...args: unknown[]) => Promise<void>
+    }
+    const before = vi.spyOn(worker, 'beforeCommand')
+    const after = vi.spyOn(worker, 'afterCommand')
+    const error = new Error('failed')
+
+    await service.beforeCommand('url', ['/'])
+    await service.afterCommand('url', ['/'], { contextId: 'tab' }, error)
+
+    expect(before).toHaveBeenCalledWith('url', ['/'])
+    expect(after).toHaveBeenCalledWith(
+      'url',
+      ['/'],
+      { contextId: 'tab' },
+      error,
+    )
   })
 
   it('ignores window commands safely before worker initialization', async () => {
@@ -162,7 +205,7 @@ describe('WdioPuppeteerVideoService worker adapter', () => {
     )
     const browser = {
       sessionId: 'abc123',
-      isMultiremote: false,
+      isMultiRemote: false,
       capabilities: { browserName: 'chrome' },
     } as Parameters<WdioPuppeteerVideoService['before']>[2]
 

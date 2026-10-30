@@ -63,7 +63,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -94,8 +94,28 @@ jobs:
       - name: Exercise Installed Tarball Without Frame Priming
         run: corepack npm run test:consumer:e2e -- --priming off
 
+      # Tab following relies on WebdriverIO internals (its context manager,
+      # and context ids that equal CDP target ids), so each PR also installs
+      # the newest WebdriverIO 10 and Puppeteer 25. The installed consumer
+      # drives a held tab and an implicit current-tab action, decodes which
+      # tab each part shows, and prints the peer versions npm resolved.
+      - name: Exercise Installed Tarball On Latest WebdriverIO 10
+        run: corepack npm run test:consumer:e2e -- --peers latest
+
       - name: Run E2E Tests
         run: corepack npm run test:e2e:both && corepack npm run test:e2e:frameworks && corepack npm run test:e2e:advanced
+
+      - name: Run WebDriver Classic E2E Tests
+        run: corepack npm run test:e2e:classic
+
+      - name: Verify Merge That Keeps Segments
+        run: corepack npm run test:e2e:merge-kept
+
+      - name: Verify parallelMode Is Not Recorded
+        run: corepack npm run test:e2e:parallel
+
+      - name: Verify Injected Capture Failures Are Reported
+        run: corepack npm run test:e2e:faults
 
       - name: Verify Retained Media Dimensions
         run: corepack npm run test:e2e:capture:metadata
