@@ -3,10 +3,10 @@ name: Changesets Release Pull Request
 on:
   push:
     branches:
-      - master
+      - release/1.x
 
 concurrency:
-  group: changesets-release-pr
+  group: changesets-release-pr-1.x
   cancel-in-progress: false
 
 permissions:
@@ -35,8 +35,8 @@ jobs:
         uses: changesets/action@d94a5c301145045a0960133674e003b265942a22 # v1.8.0
         with:
           version: corepack npm run version-packages
-          title: Release package versions
-          commit: Release package versions
+          title: Release 1.x package versions
+          commit: Release 1.x package versions
           createGithubReleases: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

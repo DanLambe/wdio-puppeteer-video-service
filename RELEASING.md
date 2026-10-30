@@ -52,6 +52,29 @@ prepared before Changesets was enabled, so its empty bootstrap changeset does
 not create another version bump. Every later RC and stable release requires a
 non-empty consumer-facing changeset and follows the release-PR flow above.
 
+## Maintenance releases from release/1.x
+
+This branch maintains 1.x for WebdriverIO 9. `master` carries 2.x for
+WebdriverIO 10. 1.x releases are stable patches published under npm's `wdio9`
+tag, so they never move `latest`. `scripts/resolve-release-channel.ts`
+enforces this. It refuses a 1.x version from any branch but `release/1.x`, a
+1.x prerelease, and a later major from any branch but `master`. The publish
+workflow passes it the dispatched branch.
+
+For each 1.x fix:
+
+1. Open the pull request against `release/1.x` with a patch changeset. A fix
+   that applies to both majors lands on `master` first and is then ported here,
+   leaving out anything that needs WebdriverIO 10.
+2. Merge the Changesets release pull request on `release/1.x`.
+3. Dispatch `Release Candidate Validation` twice on `release/1.x` for the
+   release commit. Then dispatch `Publish To npm` from `release/1.x` with the
+   `stable` channel and both run IDs. The package is published under `wdio9`.
+   Its GitHub release is not marked latest.
+
+The steps below describe the shared validation and publish process; on this
+branch, read `master` as `release/1.x` and `latest` as `wdio9`.
+
 ## Validate and publish
 
 1. Merge the release commit to `master`, then dispatch `Release Candidate
