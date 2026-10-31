@@ -18,13 +18,16 @@ The default is a new timestamped directory there.
 `--smoke` runs one pair at 2 CPUs / 2 workers without a soak and explicitly marks
 its output as **not qualification**.
 
-This is a local developer tool. Use trusted Git, tar and Docker executables on
-your PATH, a trusted image and source revision, and keep `tests/results`
-writable only by the test user. Resume only your own trusted saved runs. The
-disposable measurement container runs as root to retain the pinned benchmark
-environment and output permissions. It has no privileged mode or Docker socket;
-source mounts are read-only and the selected results directory is the only
-writable host mount.
+This is a local developer tool. Use trusted Git, tar and Docker executables, a
+trusted image and source revision, and keep `tests/results` writable only by the
+test user. The runner resolves each tool once, from the absolute directories on
+`PATH` (never the working directory or a relative entry), records the paths in
+`environment.json`, and uses them for the whole run. Resume only your own
+trusted saved runs. The disposable measurement container runs as the image's
+unprivileged `node` user; on a POSIX host it runs as the host user instead, who
+owns the results directory. It has no privileged mode or Docker socket; source
+mounts are read-only and the selected results directory is the only writable
+host mount.
 Do not use this harness to execute untrusted images, source or saved metadata.
 
 After an interrupted full run, use `--resume <output-directory>`. Resume verifies

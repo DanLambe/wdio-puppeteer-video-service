@@ -139,34 +139,52 @@ const presentPairs = (
   return present ? pairs : undefined
 }
 
+const invalidLabels = (
+  observations: RunResult[],
+  variant: RunResult['variant'],
+): string[] =>
+  observations
+    .filter((run) => run.variant === variant && !run.valid)
+    .map((run) => run.label)
+
+/** A workload whose candidate or recording-disabled run is invalid has no comparison. */
+const findInvalid = (observations: RunResult[]) => {
+  const candidateInvalid = invalidLabels(observations, 'candidate')
+  if (candidateInvalid.length) {
+    return {
+      status: 'candidate-invalid' as const,
+      invalid: candidateInvalid,
+    }
+  }
+  // Without a valid recording-disabled run, the environment itself is suspect.
+  const controlInvalid = invalidLabels(observations, 'off')
+  if (controlInvalid.length) {
+    return { status: 'incomplete' as const, invalid: controlInvalid }
+  }
+  return undefined
+}
+
+/** The one run of `variant` in `pair`; callers have checked every pair is present. */
+const pickRun = (
+  observations: RunResult[],
+  pair: number,
+  variant: RunResult['variant'],
+): RunResult =>
+  observations.find(
+    (run) => run.pair === pair && run.variant === variant,
+  ) as RunResult
+
 export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
   return [...groupWorkloads(runs)].map(([workload, observations]) => {
     const pairs = presentPairs(observations, VARIANTS, requiredPairs)
     if (!pairs) {
       return { workload, status: 'incomplete' as const }
     }
-    const invalid = (variant: RunResult['variant']) =>
-      observations
-        .filter((run) => run.variant === variant && !run.valid)
-        .map((run) => run.label)
-    const candidateInvalid = invalid('candidate')
-    if (candidateInvalid.length) {
-      return {
-        workload,
-        status: 'candidate-invalid' as const,
-        invalid: candidateInvalid,
-      }
+    const invalid = findInvalid(observations)
+    if (invalid) {
+      return { workload, status: invalid.status, invalid: invalid.invalid }
     }
-    // Without a valid recording-disabled run, the environment itself is suspect.
-    const controlInvalid = invalid('off')
-    if (controlInvalid.length) {
-      return {
-        workload,
-        status: 'incomplete' as const,
-        invalid: controlInvalid,
-      }
-    }
-    const baselineInvalid = invalid('baseline')
+    const baselineInvalid = invalidLabels(observations, 'baseline')
     if (baselineInvalid.length) {
       return {
         workload,
@@ -175,13 +193,9 @@ export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
       }
     }
     const ratios = pairs.map((pair) => {
-      const pick = (variant: RunResult['variant']) =>
-        observations.find(
-          (run) => run.pair === pair && run.variant === variant,
-        ) as RunResult
-      const baseline = pick('baseline')
-      const candidate = pick('candidate')
-      const off = pick('off')
+      const baseline = pickRun(observations, pair, 'baseline')
+      const candidate = pickRun(observations, pair, 'candidate')
+      const off = pickRun(observations, pair, 'off')
       if (
         Math.min(off.suiteMs, baseline.suiteMs, peakWorkerRss(baseline)) <= 0
       ) {
@@ -282,36 +296,16 @@ export const compareSwitching = (runs: RunResult[], requiredPairs = 5) => {
     if (!pairs) {
       return { workload, status: 'incomplete' as const }
     }
-    const invalid = (variant: RunResult['variant']) =>
-      observations
-        .filter((run) => run.variant === variant && !run.valid)
-        .map((run) => run.label)
-    const candidateInvalid = invalid('candidate')
-    if (candidateInvalid.length) {
-      return {
-        workload,
-        status: 'candidate-invalid' as const,
-        invalid: candidateInvalid,
-      }
-    }
-    const controlInvalid = invalid('off')
-    if (controlInvalid.length) {
-      return {
-        workload,
-        status: 'incomplete' as const,
-        invalid: controlInvalid,
-      }
+    const invalid = findInvalid(observations)
+    if (invalid) {
+      return { workload, status: invalid.status, invalid: invalid.invalid }
     }
     const crossing: number[] = []
     const sameTab: number[] = []
     const overhead: number[] = []
     for (const pair of pairs) {
-      const pick = (variant: RunResult['variant']) =>
-        observations.find(
-          (run) => run.pair === pair && run.variant === variant,
-        ) as RunResult
-      const off = pick('off')
-      const candidate = pick('candidate')
+      const off = pickRun(observations, pair, 'off')
+      const candidate = pickRun(observations, pair, 'candidate')
       if (!off.switching || !candidate.switching || off.suiteMs <= 0) {
         throw new Error(`Missing switch timings in ${workload} pair ${pair}`)
       }

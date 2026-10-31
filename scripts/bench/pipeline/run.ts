@@ -38,14 +38,15 @@ const result: RunResult = {
   media: [],
 }
 await fs.mkdir(path.join(directory, 'specs'), { recursive: true })
-for (let i = 0; i < specCount; i += 1) {
-  await fs.writeFile(
-    path.join(directory, `specs/${i}.spec.ts`),
-    switching
-      ? `import { switchingWorkload } from '/work/scripts/bench/pipeline/workload.ts'\nswitchingWorkload(${i})\n`
-      : `import { workload } from '/work/scripts/bench/pipeline/workload.ts'\nworkload(${i})\n`,
-  )
-}
+const workloadName = switching ? 'switchingWorkload' : 'workload'
+await Promise.all(
+  Array.from({ length: specCount }, (_, i) =>
+    fs.writeFile(
+      path.join(directory, `specs/${i}.spec.ts`),
+      `import { ${workloadName} } from '/work/scripts/bench/pipeline/workload.ts'\n${workloadName}(${i})\n`,
+    ),
+  ),
+)
 const fixture = await startPipelineFixture()
 try {
   const metadata = {

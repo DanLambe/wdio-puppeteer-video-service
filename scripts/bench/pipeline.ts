@@ -6,6 +6,7 @@ import { parseArgs, promisify } from 'node:util'
 import {
   prepareOutputDirectory,
   resolveBaseline,
+  resolveExecutable,
   resolveImage,
 } from './pipeline/inputs.js'
 import { hashTree } from './pipeline/snapshot.js'
@@ -71,13 +72,19 @@ if (previous && (previous.workload ?? 'standard') !== values.workload) {
     `Resume requires --workload ${previous.workload ?? 'standard'}`,
   )
 }
+// Resolved once: every call in a run uses the same binaries, recorded below.
+const executables = {
+  docker: resolveExecutable('docker'),
+  git: resolveExecutable('git'),
+  tar: resolveExecutable('tar'),
+}
 const execute = (
-  command: string,
+  command: keyof typeof executables,
   args: string[],
   timeout = 60_000,
   cwd = root,
 ) => {
-  const run = spawnSync(command, args, {
+  const run = spawnSync(executables[command], args, {
     cwd,
     encoding: 'utf8',
     timeout,
@@ -119,19 +126,21 @@ if (!previous) {
   // Relative paths: GNU tar, first on PATH in Git Bash and MSYS shells, reads
   // an absolute Windows path's drive letter as a remote host.
   execute('tar', ['-xf', 'baseline.tar', '-C', 'baseline'], undefined, snapshot)
-  for (const relative of [
-    'src',
-    'scripts/bench/pipeline',
-    'tests/utils',
-    'tsconfig.json',
-    'tsconfig.spec.json',
-  ]) {
-    await fs.cp(
-      path.join(root, relative),
-      path.join(snapshot, 'candidate', relative),
-      { recursive: true },
-    )
-  }
+  await Promise.all(
+    [
+      'src',
+      'scripts/bench/pipeline',
+      'tests/utils',
+      'tsconfig.json',
+      'tsconfig.spec.json',
+    ].map((relative) =>
+      fs.cp(
+        path.join(root, relative),
+        path.join(snapshot, 'candidate', relative),
+        { recursive: true },
+      ),
+    ),
+  )
 }
 if (!previous) {
   await fs.writeFile(
@@ -151,6 +160,7 @@ if (!previous) {
           .digest('hex'),
         imageId,
         availableCpus,
+        executables,
         dockerVersion: execute('docker', [
           'version',
           '--format',
@@ -200,6 +210,16 @@ const cancel = () =>
   interruption.abort(new Error('Pipeline measurement interrupted'))
 process.once('SIGINT', cancel)
 process.once('SIGTERM', cancel)
+const hostUser =
+  process.getuid && process.getgid
+    ? ['--user', `${process.getuid()}:${process.getgid()}`, '-e', 'HOME=/tmp']
+    : []
+const dwellMs = (soak: boolean): number => {
+  if (soak) {
+    return 300_000
+  }
+  return switching ? 1_000 : 2_000
+}
 const run = async (
   cpus: number,
   workers: number,
@@ -208,7 +228,8 @@ const run = async (
   variant: RunResult['variant'],
   soak = false,
 ) => {
-  const label = `${cpus}cpu-${workers}worker-${retain}-${pair}-${variant}${soak ? '-soak' : ''}${previous ? `-resumed-${resumeStamp}` : ''}`
+  const resumed = previous ? `-resumed-${resumeStamp}` : ''
+  const label = `${cpus}cpu-${workers}worker-${retain}-${pair}-${variant}${soak ? '-soak' : ''}${resumed}`
   const name = `wdio-pipeline-${process.pid}-${label}`
   const source = path.join(
     snapshot,
@@ -229,6 +250,9 @@ const run = async (
     '--memory=7g',
     '--memory-swap=7g',
     '--shm-size=2g',
+    // The image runs as its unprivileged user. A POSIX host runs it as the
+    // host user instead, who owns the results directory it writes to.
+    ...hostUser,
     ...mount(source, '/work/src'),
     ...mount(
       path.join(snapshot, 'candidate/scripts/bench/pipeline'),
@@ -253,7 +277,7 @@ const run = async (
       PIPELINE_CPUS: cpus,
       PIPELINE_WORKERS: workers,
       PIPELINE_RETAIN: retain,
-      PIPELINE_DWELL_MS: soak ? 300_000 : switching ? 1_000 : 2_000,
+      PIPELINE_DWELL_MS: dwellMs(soak),
       PIPELINE_SOAK: soak ? '1' : '0',
       PIPELINE_WORKLOAD: values.workload,
     }).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
@@ -264,7 +288,7 @@ const run = async (
     '/work/scripts/bench/pipeline/run.ts',
   ]
   try {
-    const { stdout } = await promisify(execFile)('docker', args, {
+    const { stdout } = await promisify(execFile)(executables.docker, args, {
       cwd: root,
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
@@ -278,7 +302,7 @@ const run = async (
     console.error(error instanceof Error ? error.message : error)
   } finally {
     // Removing this owned container also terminates any remaining browser/encoder descendants.
-    spawnSync('docker', ['rm', '-f', name], {
+    spawnSync(executables.docker, ['rm', '-f', name], {
       windowsHide: true,
       stdio: 'ignore',
       timeout: 30_000,

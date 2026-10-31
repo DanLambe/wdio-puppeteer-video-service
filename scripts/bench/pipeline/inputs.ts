@@ -1,8 +1,52 @@
-import { existsSync } from 'node:fs'
+import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-type Execute = (command: string, args: string[]) => string
+type Execute = (command: 'docker' | 'git', args: string[]) => string
+
+export interface ExecutableLookup {
+  readonly env?: NodeJS.ProcessEnv
+  readonly isFile?: (candidate: string) => boolean
+  readonly platform?: NodeJS.Platform
+}
+
+const isExecutableFile = (candidate: string): boolean => {
+  try {
+    accessSync(candidate, constants.X_OK)
+    return statSync(candidate).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The absolute path of a command, from the absolute `PATH` entries in order.
+ * The runner resolves each tool once, so it uses one binary throughout and
+ * never runs one from the working directory or a relative `PATH` entry.
+ */
+export const resolveExecutable = (
+  name: string,
+  lookup: ExecutableLookup = {},
+): string => {
+  const platform = lookup.platform ?? process.platform
+  const isFile = lookup.isFile ?? isExecutableFile
+  const paths = platform === 'win32' ? path.win32 : path.posix
+  // libuv, which spawns these tools, tries these extensions on Windows.
+  const extensions = platform === 'win32' ? ['.com', '.exe'] : ['']
+  const directories = (lookup.env ?? process.env).PATH?.split(paths.delimiter)
+  for (const directory of directories ?? []) {
+    if (!paths.isAbsolute(directory)) {
+      continue
+    }
+    for (const extension of extensions) {
+      const candidate = paths.join(directory, `${name}${extension}`)
+      if (isFile(candidate)) {
+        return candidate
+      }
+    }
+  }
+  throw new Error(`${name} was not found in an absolute PATH directory`)
+}
 
 export const resolveBaseline = (
   execute: Execute,
