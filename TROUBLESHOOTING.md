@@ -10,10 +10,10 @@ npm error peer webdriverio@">=10.1.0 <11" from wdio-puppeteer-video-service
 ```
 
 2.x supports WebdriverIO 10 only. A project that stays on WebdriverIO 9 uses
-1.x, published under the `wdio9` npm tag:
+1.x:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@wdio9 puppeteer-core@^24.11.2
+npm install --save-dev wdio-puppeteer-video-service@^1 puppeteer-core@^24.11.2
 ```
 
 To move to 2.x instead, upgrade every WebdriverIO package to 10 together; see

@@ -41,12 +41,14 @@ separate personal access token.
    resulting release changes separately.
 6. A stable release also has to correct the README, which npm renders on the
    package page. Two passages describe the opt-in candidate and stop being true
-   the moment `latest` moves to the new major: the **release candidate** callout
-   below the badges, and the install section that documents the `next` channel
-   and says an unqualified install still resolves to the previous major. Update
-   both in the release pull request, not afterwards. `SUPPORT.md`'s description
-   of the `next` tag stays correct, because it describes the process rather
-   than the current state.
+   the moment `latest` moves to the new major: the **not stable yet** callout
+   below the badges, and the install section, which installs a candidate with
+   an explicit `^N.0.0-rc.0` range and says an unqualified install still
+   resolves to the previous major. Update both in the release pull request, not
+   afterwards. `SUPPORT.md`'s description of the `next` tag stays correct,
+   because it describes the process rather than the current state. The docs
+   never install a new major from `@next`: until its first candidate is
+   published, `next` still points to the previous major's last candidate.
 
 `1.0.0-rc.1` was a one-time bootstrap exception: its version and changelog were
 prepared before Changesets was enabled. Every other RC and stable release
@@ -73,6 +75,20 @@ Setting up the branch, once:
    - `release/1.x` added to the branch filters of `release-pr.yaml` and
      `pull-request-checks.yaml`.
 3. Protect `release/1.x` like `master`.
+4. Allow `release/1.x` in the `npm` environment's deployment branches. Pull
+   request checks never use that environment, so passing checks do not show
+   that a maintenance publish is authorized.
+5. Optionally, have an npm owner point `wdio9` at the newest 1.x release, so
+   `@wdio9` resolves before the first maintenance patch:
+
+   ```bash
+   npm dist-tag add wdio-puppeteer-video-service@1.0.0 wdio9
+   npm view wdio-puppeteer-video-service dist-tags
+   ```
+
+   The publish workflow tags only what it publishes and will not republish
+   `1.0.0`, so without this step the first 1.x patch creates the tag. The docs
+   install 1.x with `@^1`, which works either way.
 
 Then, for each 1.x fix:
 

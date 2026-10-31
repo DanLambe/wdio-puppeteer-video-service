@@ -1,11 +1,14 @@
 # Migrating from 1.x to 2.0
 
 2.0 supports WebdriverIO 10 only. Projects that stay on WebdriverIO 9 keep
-using 1.x, which still receives fixes under the `wdio9` npm tag:
+using 1.x:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@wdio9
+npm install --save-dev wdio-puppeteer-video-service@^1
 ```
+
+1.x keeps receiving fixes, published under npm's `wdio9` tag; the `^1` range
+picks them up.
 
 ## Upgrade the packages together
 
@@ -17,8 +20,9 @@ framework, reporters and `expect-webdriverio` 8:
 npm install --save-dev wdio-puppeteer-video-service@2 puppeteer-core@^25.0.2 webdriverio@10 @wdio/cli@10 @wdio/local-runner@10 @wdio/mocha-framework@10
 ```
 
-While 2.0 is a release candidate, install `wdio-puppeteer-video-service@next`
-instead of `@2`.
+Until `2.0.0` is stable, install a release candidate with
+`wdio-puppeteer-video-service@^2.0.0-rc.0` instead of `@2`; see
+[Installation](./README.md#installation).
 
 The service's options are unchanged, so a 1.x configuration works as it is.
 

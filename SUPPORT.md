@@ -39,6 +39,13 @@ installs the newest WebdriverIO 10 and Puppeteer 25 and checks which tab each
 recorded segment shows, so a WebdriverIO release that changes either detail
 fails the next pull request's checks.
 
+The id mapping was last measured for 2.0.0 with WebdriverIO 10.1.0, Puppeteer
+Core 25.16.0, Chrome 156.0.8078.80 and Edge 156.0.4314.50 on Windows. The
+initial tab, plus 20 each of `newWindow()` tabs, `_blank` popups and separate
+`window.open()` windows, made 61 contexts per browser. Every one was found by
+target id, and the marker fallback was never used. Pull request checks cover
+Chrome only; release validation adds Edge.
+
 These are not supported:
 
 - WebdriverIO's `parallelMode`. Workers that use it are not recorded, and the
@@ -50,14 +57,23 @@ These are not supported:
   the test did not await, while the test works in a different tab. Recording
   cannot tell who sent a command, so it moves to that tab.
 
+## WebdriverIO 10
+
+2.x is the WebdriverIO 10 line; see
+[Supported 2.x environment](#supported-2x-environment). The 1.0.0 changelog
+links here from when WebdriverIO 10 support was still planned.
+[Migrating from 1.x to 2.0](./MIGRATION.md#migrating-from-1x-to-20) explains
+what changed and why it needed a major release.
+
 ## WebdriverIO 9
 
 1.x supports WebdriverIO 9 (`>=9.29.1 <10`) with Puppeteer Core
-`>=24.11.2 <25`. It is published under the `wdio9` npm tag and receives
-compatible fixes under the versioning rules below; new features land in 2.x.
+`>=24.11.2 <25`. It receives compatible fixes under the versioning rules below,
+published under the `wdio9` npm tag; new features land in 2.x. Install it with a
+1.x range, which also picks up those fixes:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@wdio9
+npm install --save-dev wdio-puppeteer-video-service@^1
 ```
 
 2.x refuses to install beside WebdriverIO 9 on purpose, and 1.x refuses

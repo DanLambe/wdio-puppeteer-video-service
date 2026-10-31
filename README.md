@@ -7,10 +7,11 @@
 
 A WebdriverIO 10 service that records Chromium sessions through Puppeteer and CDP.
 
-> **2.0 release candidate for WebdriverIO 10**
-> Install the `next` tag to opt in while the 2.0 release candidate is evaluated
-> before stable promotion. The `latest` tag stays on `1.0.0`, for WebdriverIO 9,
-> until `2.0.0` is explicitly released. Upgrading from 1.x? See
+> **2.0, for WebdriverIO 10, is not stable yet**
+> It is released as `2.0.0-rc.N` candidates under npm's `next` tag and
+> evaluated before `2.0.0` becomes `latest`. Until then, `latest` stays on 1.x,
+> for WebdriverIO 9. See [Installation](#installation) for how to install a 2.0
+> candidate. Upgrading from 1.x? See
 > [Migrating from 1.x to 2.0](./MIGRATION.md#migrating-from-1x-to-20).
 
 Features:
@@ -47,15 +48,18 @@ Chrome through BiDi while Puppeteer attaches through CDP for screencasting.
 
 Install the service with a supported Puppeteer Core release:
 
-This guide documents the `2.0.0` release candidate. Install it explicitly from
-the opt-in `next` channel:
+This guide documents 2.0. Until `2.0.0` is stable, install a 2.0 release
+candidate with an explicit range:
 
 ```bash
-npm install --save-dev wdio-puppeteer-video-service@next puppeteer-core@^25.0.2
+npm install --save-dev wdio-puppeteer-video-service@^2.0.0-rc.0 puppeteer-core@^25.0.2
 ```
 
-An unqualified install still resolves to `1.0.0`, which supports WebdriverIO 9
-only ([WebdriverIO 9](./SUPPORT.md#webdriverio-9)).
+The range matches 2.x only, so if no 2.0 candidate is on npm yet, npm stops with
+`ETARGET` instead of installing 1.x. Don't install `@next` for this: until the
+first 2.0 candidate is published, `next` still points to the last 1.0
+candidate. An unqualified install resolves to `latest`, which is 1.x and
+supports WebdriverIO 9 only ([WebdriverIO 9](./SUPPORT.md#webdriverio-9)).
 
 The project must use WebdriverIO 10, with every WebdriverIO package on the same
 major version, for example:
@@ -283,8 +287,21 @@ await page.$('#pay').click() // and back to the checkout tab
 Recording moves before the command reaches the browser, so the command's own
 effect is filmed. Each move ends one segment and starts another, and the command
 waits while that happens: about 0.3 s, and 0.5 s at the 95th percentile, on a
-desktop Chrome or Edge. Tests that alternate between tabs run slower while
-recorded. The recorded tab is brought to the front, because Chrome does not
+desktop Chrome or Edge with the default WebM output. Tests that alternate
+between tabs run slower while recorded. With `format: 'mp4'` and the default
+`processing.timing: 'after-test'`, the finished segment is also transcoded
+during the move; `'after-worker'` moves that work out of the test.
+
+Those times are for a browser that answers promptly. The service puts its own
+limits on finding the new tab's page (2 s, and 2 s more if it falls back to
+marking the tab) and on stopping the previous segment's recorder (5 s). The
+WebdriverIO commands it sends to work out which tab a command drives, such as
+reading the current window or the frame tree, wait as long as WebdriverIO
+allows any command: `bidiResponseTimeout` (180 s by default) for BiDi commands,
+and `connectionRetryTimeout` (120 s by default, retried `connectionRetryCount`
+times) for Classic ones.
+
+The recorded tab is brought to the front, because Chrome does not
 paint tabs in the background; a page that checks its visibility or focus sees
 that change.
 
