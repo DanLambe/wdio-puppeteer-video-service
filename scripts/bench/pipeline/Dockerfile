@@ -10,8 +10,8 @@ COPY scripts/check-install-scripts.ts scripts/check-install-scripts.ts
 RUN corepack npm ci --ignore-scripts \
  && corepack npm run check:install-scripts \
  && corepack npm rebuild esbuild ffmpeg-static
-RUN node node_modules/@puppeteer/browsers/lib/cjs/main-cli.js install chrome@154.0.8037.57 --path /browsers \
- && node node_modules/@puppeteer/browsers/lib/cjs/main-cli.js install chromedriver@154.0.8037.57 --path /browsers
+RUN node node_modules/@puppeteer/browsers/lib/main-cli.js install chrome@154.0.8037.57 --path /browsers \
+ && node node_modules/@puppeteer/browsers/lib/main-cli.js install chromedriver@154.0.8037.57 --path /browsers
 ENV CHROME_BINARY=/browsers/chrome/linux-154.0.8037.57/chrome-linux64/chrome \
     CHROMEDRIVER_BINARY=/browsers/chromedriver/linux-154.0.8037.57/chromedriver-linux64/chromedriver \
     FFMPEG_PATH=/work/node_modules/ffmpeg-static/ffmpeg
