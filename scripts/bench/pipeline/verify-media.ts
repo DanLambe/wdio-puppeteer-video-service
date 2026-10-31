@@ -10,12 +10,17 @@ export const verifyPipelineMedia = async (
   retain: string,
   expectedTests: number,
   dwellMs: number,
+  segmentsPerEntry = 1,
 ) => {
   // Keep the validation oracle independent of the product revision under test.
   const probeModule = '/validation/tests/utils/media-probe.ts'
   const { probeMediaFile } = (await import(
     probeModule
   )) as typeof import('../../../tests/utils/media-probe.js')
+  const segmentModule = '/validation/tests/utils/segment-colors.ts'
+  const { orderSegments } = (await import(
+    segmentModule
+  )) as typeof import('../../../tests/utils/segment-colors.js')
   const manifest: unknown = JSON.parse(
     await readFile(path.join(directory, 'manifest.json'), 'utf8'),
   )
@@ -31,8 +36,26 @@ export const verifyPipelineMedia = async (
       retain === 'all' ? 'recorded' : 'discarded',
     )
     assert.notEqual(entry.processing.outcome, 'failed')
-    assert.equal(entry.capture.segments.length, retain === 'all' ? 1 : 0)
-    for (const artifact of entry.capture.segments) {
+    assert.equal(
+      entry.capture.segments.length,
+      retain === 'all' ? segmentsPerEntry : 0,
+    )
+    const segments =
+      segmentsPerEntry > 1
+        ? orderSegments(entry.capture.segments)
+        : entry.capture.segments
+    if (segmentsPerEntry > 1) {
+      // The tabs alternate, starting on the first one.
+      assert.deepEqual(
+        segments.map((segment) => [segment.tab?.ordinal, segment.tab?.reason]),
+        segments.map((_, index) => [
+          (index % 2) + 1,
+          index ? 'command' : 'start',
+        ]),
+        'Expected each segment to record the tab its command drove',
+      )
+    }
+    for (const artifact of segments) {
       const file = path.resolve(directory, artifact.path)
       const ffmpeg = process.env.FFMPEG_PATH as string
       const probe = await probeMediaFile(ffmpeg, file, { timeoutMs: 120_000 })
@@ -83,10 +106,21 @@ export const verifyPipelineMedia = async (
         colors.green > colors.total * 0.1,
         'Missing green fixture content',
       )
-      if (entry.test?.name.includes('animated')) {
+      // In the switching workload, the second tab is the animated one.
+      const switching = segmentsPerEntry > 1
+      const animated = switching
+        ? artifact.tab?.ordinal === 2
+        : entry.test?.name.includes('animated')
+      if (animated) {
         assert.ok(
           colors.red > colors.total * 0.1,
           'Animation did not preserve both colors',
+        )
+      } else if (switching) {
+        // A frame or two of the previous tab may open a segment.
+        assert.ok(
+          colors.red < colors.total * 0.25,
+          `Expected the static tab in ${artifact.path}`,
         )
       }
       const bytes = (await stat(file)).size

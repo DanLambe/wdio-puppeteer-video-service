@@ -4,7 +4,7 @@ Run from the repository root with Docker and at least four available CPUs:
 
 ```sh
 docker build -f scripts/bench/pipeline/Dockerfile -t wdio-video-pipeline:local .
-corepack npm run bench:pipeline -- --baseline 0b61d4f8a79be92dd4ffce315d4d2cc9e0a8a798
+corepack npm run bench:pipeline -- --baseline d4bae0f72226340866c85179e1e1956036eec181
 ```
 
 `--image` selects an existing image. The runner resolves its immutable image ID

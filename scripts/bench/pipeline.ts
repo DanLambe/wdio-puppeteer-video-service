@@ -11,23 +11,33 @@ import {
 import { hashTree } from './pipeline/snapshot.js'
 import {
   compareRuns,
+  compareSwitching,
   completedPairs,
   qualificationPassed,
   type RunResult,
+  SWITCHING_VARIANTS,
+  VARIANTS,
 } from './pipeline/statistics.js'
 
 const { values } = parseArgs({
   options: {
     baseline: {
       type: 'string',
-      default: '0b61d4f8a79be92dd4ffce315d4d2cc9e0a8a798',
+      default: 'd4bae0f72226340866c85179e1e1956036eec181',
     },
     image: { type: 'string', default: 'wdio-video-pipeline:local' },
     output: { type: 'string' },
     resume: { type: 'string' },
     smoke: { type: 'boolean', default: false },
+    workload: { type: 'string', default: 'standard' },
   },
 })
+if (values.workload !== 'standard' && values.workload !== 'switching') {
+  throw new Error('--workload must be standard or switching')
+}
+// Tab switching is measured against recording off: 1.0.0 cannot follow tabs.
+const switching = values.workload === 'switching'
+const variants = switching ? SWITCHING_VARIANTS : VARIANTS
 const root = path.resolve(import.meta.dirname, '../..')
 const outputRoot = path.join(root, 'tests', 'results', 'pipeline')
 const directory = await prepareOutputDirectory(
@@ -44,6 +54,7 @@ interface Environment {
   availableCpus: number
   dockerVersion: string
   smoke: boolean
+  workload?: 'standard' | 'switching'
 }
 const previous: Environment | undefined = values.resume
   ? (JSON.parse(
@@ -53,6 +64,11 @@ const previous: Environment | undefined = values.resume
 if (previous?.smoke || (values.resume && (values.smoke || values.output))) {
   throw new Error(
     'Resume requires an interrupted full run and cannot be combined with smoke or output',
+  )
+}
+if (previous && (previous.workload ?? 'standard') !== values.workload) {
+  throw new Error(
+    `Resume requires --workload ${previous.workload ?? 'standard'}`,
   )
 }
 const execute = (
@@ -142,6 +158,7 @@ if (!previous) {
         ]),
         startedAt: new Date().toISOString(),
         smoke: values.smoke,
+        workload: values.workload,
       },
       null,
       2,
@@ -168,7 +185,7 @@ if (previous) {
     )
   }
   const prior = await fs.readFile(path.join(directory, 'results.json'), 'utf8')
-  results = completedPairs(JSON.parse(prior) as RunResult[])
+  results = completedPairs(JSON.parse(prior) as RunResult[], variants)
   await fs.writeFile(
     path.join(directory, `before-resume-${resumeStamp}.json`),
     prior,
@@ -236,8 +253,9 @@ const run = async (
       PIPELINE_CPUS: cpus,
       PIPELINE_WORKERS: workers,
       PIPELINE_RETAIN: retain,
-      PIPELINE_DWELL_MS: soak ? 300_000 : 2_000,
+      PIPELINE_DWELL_MS: soak ? 300_000 : switching ? 1_000 : 2_000,
       PIPELINE_SOAK: soak ? '1' : '0',
+      PIPELINE_WORKLOAD: values.workload,
     }).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
     imageId,
     'node',
@@ -311,24 +329,28 @@ const run = async (
   )
 }
 
-const shapes = values.smoke
-  ? [[2, 2]]
-  : [
-      [2, 2],
-      [4, 4],
-      [2, 4],
-    ]
-const retentions = values.smoke
-  ? (['all'] as const)
-  : (['all', 'failures'] as const)
+let shapes = [
+  [2, 2],
+  [4, 4],
+  [2, 4],
+]
+if (values.smoke) {
+  shapes = [[2, 2]]
+} else if (switching) {
+  shapes = [
+    [2, 2],
+    [2, 4],
+  ]
+}
+const retentions =
+  values.smoke || switching
+    ? (['all'] as const)
+    : (['all', 'failures'] as const)
 for (const [cpus, workers] of shapes) {
   for (const retain of retentions) {
     for (let pair = 1; pair <= (values.smoke ? 1 : 5); pair += 1) {
       // Alternate ordering to expose rather than systematically favor warm-cache effects.
-      const order: RunResult['variant'][] =
-        pair % 2
-          ? ['off', 'baseline', 'candidate']
-          : ['candidate', 'baseline', 'off']
+      const order = pair % 2 ? [...variants] : [...variants].reverse()
       for (const variant of order) {
         if (
           results.some(
@@ -348,22 +370,31 @@ for (const [cpus, workers] of shapes) {
     }
   }
 }
-if (!values.smoke && !results.some((result) => result.soak)) {
+const soakRequired = !values.smoke && !switching
+if (soakRequired && !results.some((result) => result.soak)) {
   await run(2, 1, 'all', 1, 'candidate', true)
 }
-const comparisons = compareRuns(results, values.smoke ? 1 : 5)
+const comparisons = (switching ? compareSwitching : compareRuns)(
+  results,
+  values.smoke ? 1 : 5,
+)
 // An invalid baseline stays in results.json and is reported, but it cannot
 // make a valid candidate fail or an invalid one pass.
 const passed = qualificationPassed(results, comparisons, {
   workloads: shapes.length * retentions.length,
-  soak: !values.smoke,
+  soak: soakRequired,
 })
 process.off('SIGINT', cancel)
 process.off('SIGTERM', cancel)
 await fs.writeFile(
   path.join(directory, 'comparison.json'),
   JSON.stringify(
-    { qualification: !values.smoke, passed, comparisons },
+    {
+      qualification: !values.smoke,
+      workload: values.workload,
+      passed,
+      comparisons,
+    },
     null,
     2,
   ),

@@ -30,7 +30,31 @@ export interface RunResult {
   workerMetrics: WorkerMetrics[]
   artifactBytes: number
   media: unknown[]
+  /** Command timings from the tab-switching workload, across all workers. */
+  switching?: SwitchTimings
 }
+
+/** Crossings between the two held tabs in each switching test. */
+export const SWITCH_CROSSINGS = 10
+
+export interface SwitchTimings {
+  /** The first driving command after moving to the other tab. */
+  crossingMs: number[]
+  /** The same command again, on the tab just moved to. */
+  sameTabMs: number[]
+}
+
+export const VARIANTS: readonly RunResult['variant'][] = [
+  'off',
+  'baseline',
+  'candidate',
+]
+
+/** 1.0.0 cannot follow held tabs, so tab switching compares with recording off. */
+export const SWITCHING_VARIANTS: readonly RunResult['variant'][] = [
+  'off',
+  'candidate',
+]
 
 export const median = (values: number[]): number => {
   if (!values.length || values.some((value) => !Number.isFinite(value))) {
@@ -51,7 +75,10 @@ export const peakWorkerRss = (run: RunResult): number => {
 }
 
 /** Preserve complete pairs when resuming; rerun an interrupted pair together. */
-export const completedPairs = (runs: RunResult[]): RunResult[] => {
+export const completedPairs = (
+  runs: RunResult[],
+  variants: readonly RunResult['variant'][] = VARIANTS,
+): RunResult[] => {
   return runs.filter((run) => {
     if (run.soak) {
       return true
@@ -66,8 +93,8 @@ export const completedPairs = (runs: RunResult[]): RunResult[] => {
     )
     return (
       pair.some((observation) => !observation.valid) ||
-      (pair.length === 3 &&
-        ['off', 'baseline', 'candidate'].every(
+      (pair.length === variants.length &&
+        variants.every(
           (variant) =>
             pair.filter((other) => other.variant === variant).length === 1,
         ))
@@ -75,39 +102,47 @@ export const completedPairs = (runs: RunResult[]): RunResult[] => {
   })
 }
 
-const VARIANTS: readonly RunResult['variant'][] = [
-  'off',
-  'baseline',
-  'candidate',
-]
-
 /**
  * Compare complete pairs only. Invalid or missing measurements cannot pass a
  * gate, and each status names whose measurement failed: an invalid candidate
  * fails qualification, while a baseline that cannot record a workload validly
  * is reported without ratios and does not hide the candidate's own result.
  */
-export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
+const groupWorkloads = (runs: RunResult[]) => {
   const groups = new Map<string, RunResult[]>()
   for (const run of runs.filter((run) => !run.soak)) {
     const key = `${run.cpus}cpu-${run.workers}worker-${run.retain}`
     groups.set(key, [...(groups.get(key) ?? []), run])
   }
-  return [...groups].map(([workload, observations]) => {
-    const pairs = [...new Set(observations.map((run) => run.pair))].sort(
-      (left, right) => left - right,
+  return groups
+}
+
+/** The sorted pair numbers, when every pair has exactly one of each variant. */
+const presentPairs = (
+  observations: RunResult[],
+  variants: readonly RunResult['variant'][],
+  requiredPairs: number,
+): number[] | undefined => {
+  const pairs = [...new Set(observations.map((run) => run.pair))].sort(
+    (left, right) => left - right,
+  )
+  const present =
+    pairs.length === requiredPairs &&
+    pairs.every((pair) =>
+      variants.every(
+        (variant) =>
+          observations.filter(
+            (run) => run.pair === pair && run.variant === variant,
+          ).length === 1,
+      ),
     )
-    const present =
-      pairs.length === requiredPairs &&
-      pairs.every((pair) =>
-        VARIANTS.every(
-          (variant) =>
-            observations.filter(
-              (run) => run.pair === pair && run.variant === variant,
-            ).length === 1,
-        ),
-      )
-    if (!present) {
+  return present ? pairs : undefined
+}
+
+export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
+  return [...groupWorkloads(runs)].map(([workload, observations]) => {
+    const pairs = presentPairs(observations, VARIANTS, requiredPairs)
+    if (!pairs) {
       return { workload, status: 'incomplete' as const }
     }
     const invalid = (variant: RunResult['variant']) =>
@@ -190,7 +225,7 @@ export const compareRuns = (runs: RunResult[], requiredPairs = 5) => {
  */
 export const qualificationPassed = (
   runs: RunResult[],
-  comparisons: ReturnType<typeof compareRuns>,
+  comparisons: readonly Readonly<{ status: string }>[],
   expected: { readonly workloads: number; readonly soak: boolean },
 ): boolean => {
   const soak = runs.filter((run) => run.soak)
@@ -203,6 +238,113 @@ export const qualificationPassed = (
     ) &&
     (!expected.soak || (soak.length > 0 && soak.every((run) => run.valid)))
   )
+}
+
+/** Nearest-rank percentile of finite observations. */
+export const percentile = (values: number[], fraction: number): number => {
+  if (!values.length || values.some((value) => !Number.isFinite(value))) {
+    throw new Error('A percentile needs finite observations')
+  }
+  const sorted = [...values].sort((a, b) => a - b)
+  const rank = Math.min(
+    sorted.length,
+    Math.max(1, Math.ceil(fraction * sorted.length)),
+  )
+  return sorted[rank - 1] as number
+}
+
+export interface SwitchingBudget {
+  readonly crossingP50Ms?: number
+  readonly crossingP95Ms: number
+  readonly sameTabMs: number
+}
+
+/**
+ * Written before the first 2.0 measurement: milliseconds a recorded run adds
+ * to each tab crossing and to a same-tab command, compared with recording off.
+ */
+export const SWITCHING_BUDGETS: Readonly<Record<string, SwitchingBudget>> = {
+  '2cpu-2worker-all': {
+    crossingP50Ms: 600,
+    crossingP95Ms: 1_000,
+    sameTabMs: 20,
+  },
+  '2cpu-4worker-all': { crossingP95Ms: 2_000, sameTabMs: 20 },
+}
+
+/**
+ * Pools every candidate crossing, each less its pair's median recording-off
+ * crossing, so a slow pair cannot hide behind a median of medians.
+ */
+export const compareSwitching = (runs: RunResult[], requiredPairs = 5) => {
+  return [...groupWorkloads(runs)].map(([workload, observations]) => {
+    const pairs = presentPairs(observations, SWITCHING_VARIANTS, requiredPairs)
+    if (!pairs) {
+      return { workload, status: 'incomplete' as const }
+    }
+    const invalid = (variant: RunResult['variant']) =>
+      observations
+        .filter((run) => run.variant === variant && !run.valid)
+        .map((run) => run.label)
+    const candidateInvalid = invalid('candidate')
+    if (candidateInvalid.length) {
+      return {
+        workload,
+        status: 'candidate-invalid' as const,
+        invalid: candidateInvalid,
+      }
+    }
+    const controlInvalid = invalid('off')
+    if (controlInvalid.length) {
+      return {
+        workload,
+        status: 'incomplete' as const,
+        invalid: controlInvalid,
+      }
+    }
+    const crossing: number[] = []
+    const sameTab: number[] = []
+    const overhead: number[] = []
+    for (const pair of pairs) {
+      const pick = (variant: RunResult['variant']) =>
+        observations.find(
+          (run) => run.pair === pair && run.variant === variant,
+        ) as RunResult
+      const off = pick('off')
+      const candidate = pick('candidate')
+      if (!off.switching || !candidate.switching || off.suiteMs <= 0) {
+        throw new Error(`Missing switch timings in ${workload} pair ${pair}`)
+      }
+      const offCrossing = median(off.switching.crossingMs)
+      crossing.push(
+        ...candidate.switching.crossingMs.map((ms) => ms - offCrossing),
+      )
+      sameTab.push(
+        median(candidate.switching.sameTabMs) - median(off.switching.sameTabMs),
+      )
+      overhead.push(candidate.suiteMs / off.suiteMs - 1)
+    }
+    const budget = SWITCHING_BUDGETS[workload]
+    const crossingP50Ms = percentile(crossing, 0.5)
+    const crossingP95Ms = percentile(crossing, 0.95)
+    const sameTabMs = median(sameTab)
+    const withinBudget =
+      budget !== undefined &&
+      crossingP95Ms <= budget.crossingP95Ms &&
+      (budget.crossingP50Ms === undefined ||
+        crossingP50Ms <= budget.crossingP50Ms) &&
+      sameTabMs <= budget.sameTabMs
+    return {
+      workload,
+      status: withinBudget ? ('pass' as const) : ('investigate' as const),
+      ...(budget ? { budget } : {}),
+      crossings: crossing.length,
+      crossingP50Ms,
+      crossingP95Ms,
+      sameTabMs,
+      candidateOverhead: median(overhead),
+    }
+  })
 }
 
 /** Ignore warm-up and compare successive one-minute medians, retaining raw samples. */
