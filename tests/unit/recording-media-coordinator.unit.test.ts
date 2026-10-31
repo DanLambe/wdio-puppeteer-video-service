@@ -1,8 +1,9 @@
+import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nodeFileSystem } from '../../src/service/boundaries.js'
+import { nodeFileSystem, nodeProcess } from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type {
   ActiveSegment,
@@ -14,7 +15,7 @@ import {
   createManifestRunContext,
   ManifestWorkerRecorder,
 } from '../../src/service/manifest-runtime.js'
-import type { MediaPipeline } from '../../src/service/media-pipeline.js'
+import { MediaPipeline } from '../../src/service/media-pipeline.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import {
   RecordingMediaCoordinator,
@@ -352,10 +353,13 @@ describe('RecordingMediaCoordinator', () => {
     const { context, coordinator, harness, inputs, mergedPath, recorder } =
       await createMergeScenario(true)
     const crash = new Error('could not remove the merged source')
-    harness.transcode.mockImplementation(async ({ outputPath }) => {
-      await fs.writeFile(outputPath, 'mp4', 'utf8')
-      throw crash
-    })
+    harness.transcode.mockImplementation(
+      async ({ onPublished, outputPath }) => {
+        await fs.writeFile(outputPath, 'mp4', 'utf8')
+        onPublished?.(outputPath)
+        throw crash
+      },
+    )
 
     await expect(coordinator.flush()).rejects.toBe(crash)
     await recorder.flush()
@@ -391,6 +395,51 @@ describe('RecordingMediaCoordinator', () => {
       reason: 'deferred-processing-error',
     })
   })
+
+  it.each([
+    ['transcode', 'after', ['checkout_run2_part1.mp4']],
+    ['transcode', 'before', ['checkout_part1.webm']],
+    ['merge', 'after', ['checkout_run2.webm']],
+    ['merge', 'before', ['checkout_part1.webm', 'checkout_part2.webm']],
+    ['merge-then-transcode', 'after', ['checkout_run2.mp4']],
+    ['merge-then-transcode', 'before', ['checkout.webm']],
+  ] as const)(
+    'never lists an earlier recording at the planned output when a %s throws %s publishing',
+    async (kind, timing, expectedPaths) => {
+      const scenario = await createCollisionScenario(kind, timing)
+
+      await expect(scenario.coordinator.flush()).rejects.toBe(
+        scenario.slotError,
+      )
+      await scenario.recorder.flush()
+
+      const entry = (await aggregateManifestRun(scenario.context, 0)).runs[0]
+        ?.entries[0]
+      const segments = entry?.capture.segments ?? []
+      expect(segments.map((segment) => segment.path)).toEqual(expectedPaths)
+      for (const segment of segments) {
+        await expect(
+          fs.readFile(path.join(scenario.outputDir, segment.path), 'utf8'),
+        ).resolves.not.toBe(EARLIER_RECORDING)
+      }
+      await expect(fs.readFile(scenario.earlierPath, 'utf8')).resolves.toBe(
+        EARLIER_RECORDING,
+      )
+      expect(
+        segments
+          .flatMap(
+            (segment) => segment.tabs ?? (segment.tab ? [segment.tab] : []),
+          )
+          .map((tab) => tab.reason),
+      ).toEqual(scenario.tabReasons)
+      expect(entry?.processing).toMatchObject({
+        outcome: 'failed',
+        operation: kind === 'merge' ? 'merge' : 'transcode',
+        reason: 'deferred-processing-error',
+      })
+      expect(scenario.completeDeferred).toHaveBeenCalledOnce()
+    },
+  )
 
   it('fails an entry whose task threw and left no media', async () => {
     const { context, coordinator, harness, inputs, recorder } =
@@ -811,6 +860,7 @@ describe('RecordingMediaCoordinator', () => {
       deleteOriginal: false,
       ffmpegArgs: ['-preset', 'slow'],
       inputPath: existingInput,
+      onPublished: expect.any(Function),
       outputPath,
     })
   })
@@ -851,6 +901,7 @@ describe('RecordingMediaCoordinator', () => {
       deleteSegments: true,
       ffmpegOperation: 'deferred segment merge',
       mergedPath,
+      onPublished: expect.any(Function),
       segmentPaths,
       writeFailureContext: 'deferred merge',
     })
@@ -858,6 +909,7 @@ describe('RecordingMediaCoordinator', () => {
       deleteOriginal: true,
       ffmpegArgs: ['-preset', 'slow'],
       inputPath: mergedPath,
+      onPublished: expect.any(Function),
       outputPath,
     })
     expect(completeDeferred).toHaveBeenCalledOnce()
@@ -1253,6 +1305,136 @@ const createMergeScenario = async (deleteSegments: boolean) => {
     inputs,
     mergedPath,
     recorder,
+  }
+}
+
+const EARLIER_RECORDING = 'earlier recording'
+
+/**
+ * A deferred task, run through the real pipeline and atomic publication, whose
+ * planned output already holds another recording. The post-processing slot
+ * throws before or after the task publishes.
+ */
+const createCollisionScenario = async (
+  kind: 'merge' | 'merge-then-transcode' | 'transcode',
+  timing: 'after' | 'before',
+) => {
+  const outputDir = await createTempDir()
+  const context = await createManifestRunContext(outputDir)
+  const recorder = new ManifestWorkerRecorder({
+    cid: '0-0',
+    context,
+    framework: 'mocha',
+  })
+  await recorder.beginEntity({
+    scope: 'test',
+    specPaths: ['specs/checkout.ts'],
+    test: { title: 'checks out' },
+  })
+  const inputs = await createInputFiles(
+    outputDir,
+    kind === 'transcode'
+      ? ['checkout_part1.webm']
+      : ['checkout_part1.webm', 'checkout_part2.webm'],
+  )
+  const tabReasons: readonly ('command' | 'start')[] =
+    kind === 'transcode' ? ['start'] : ['start', 'command']
+  const earlierPath = path.join(
+    outputDir,
+    {
+      merge: 'checkout.webm',
+      'merge-then-transcode': 'checkout.mp4',
+      transcode: 'checkout_part1.mp4',
+    }[kind],
+  )
+  await fs.writeFile(earlierPath, EARLIER_RECORDING, 'utf8')
+  const manifestEntryId = await recorder.completeCurrent({
+    decision: 'recorded',
+    result: 'passed',
+    paths: inputs,
+    processingOutcome: 'pending',
+    processingOperation: kind === 'transcode' ? 'transcode' : 'merge',
+    tabs: new Map(
+      tabReasons.map((reason, index) => [
+        index + 1,
+        { contextId: `tab-${index.toString()}`, ordinal: index + 1, reason },
+      ]),
+    ),
+  })
+  const slotError = new Error('post-processing slot failed')
+  const failingOperation =
+    kind === 'merge' ? 'deferred segment merge' : 'transcode'
+  const mediaPipeline = new MediaPipeline({
+    failurePolicy: 'warn',
+    fileSystem: nodeFileSystem,
+    log: () => undefined,
+    outputDir,
+    process: nodeProcess,
+    runtime: {
+      timestampPassthroughArgs: [],
+      run: async (args, operation) => {
+        const output = args.at(-1)
+        if (output && !operation.endsWith('validation')) {
+          await fs.writeFile(output, `${operation} output`, 'utf8')
+        }
+        return true
+      },
+      withPostProcessSlot: async (operation, task) => {
+        if (operation !== failingOperation) {
+          return task()
+        }
+        if (timing === 'after') {
+          await task()
+        }
+        throw slotError
+      },
+    },
+  })
+  const coordinator = new RecordingMediaCoordinator({
+    captureSession: new CaptureSession(),
+    ffmpegRuntime: { shouldTranscode: () => true },
+    fileSystem: nodeFileSystem,
+    getManifestRecorder: () => recorder,
+    log: () => undefined,
+    mediaPipeline,
+    options: resolveServiceConfiguration({ outputDir }).options,
+  })
+  const [firstInput] = inputs
+  assert.ok(firstInput && manifestEntryId)
+  coordinator.enqueue(
+    kind === 'transcode'
+      ? {
+          kind: 'transcode',
+          deleteOriginal: true,
+          inputPath: firstInput,
+          manifestEntryId,
+          outputPath: earlierPath,
+        }
+      : {
+          kind: 'merge',
+          deleteSegments: true,
+          manifestEntryId,
+          mergedPath: path.join(outputDir, 'checkout.webm'),
+          segmentPaths: inputs,
+          ...(kind === 'merge-then-transcode'
+            ? {
+                transcodeToMp4: {
+                  deleteOriginal: true,
+                  outputPath: earlierPath,
+                },
+              }
+            : {}),
+        },
+  )
+  return {
+    completeDeferred: vi.spyOn(recorder, 'completeDeferred'),
+    context,
+    coordinator,
+    earlierPath,
+    outputDir,
+    recorder,
+    slotError,
+    tabReasons,
   }
 }
 

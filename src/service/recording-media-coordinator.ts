@@ -41,6 +41,12 @@ export class RecordingMediaCoordinator {
     'merge' | 'reportFailure' | 'transcode'
   >
   private readonly options: ResolvedWdioPuppeteerVideoServiceOptions
+  // Where each task published its output. Collision renaming can move it off
+  // the planned path, which may hold another recording.
+  private readonly publishedPaths = new WeakMap<
+    DeferredPostProcessTask,
+    string
+  >()
   // Tasks that have reported their result to the manifest.
   private readonly settledTasks = new WeakSet<DeferredPostProcessTask>()
   private readonly tasks: DeferredPostProcessTask[] = []
@@ -312,6 +318,9 @@ export class RecordingMediaCoordinator {
       deleteOriginal: task.deleteOriginal,
       ...(task.ffmpegArgs === undefined ? {} : { ffmpegArgs: task.ffmpegArgs }),
       inputPath: task.inputPath,
+      onPublished: (publishedPath) => {
+        this.publishedPaths.set(task, publishedPath)
+      },
       outputPath: task.outputPath,
     })
     if (!transcodedPath) {
@@ -332,6 +341,9 @@ export class RecordingMediaCoordinator {
       deleteSegments: task.deleteSegments,
       writeFailureContext: 'deferred merge',
       ffmpegOperation: 'deferred segment merge',
+      onPublished: (publishedPath) => {
+        this.publishedPaths.set(task, publishedPath)
+      },
     })
     if (!mergedPath) {
       await this.completeFailedMerge(task)
@@ -445,8 +457,9 @@ export class RecordingMediaCoordinator {
 
   /**
    * A task that threw still settles its entry, as a failure. It lists the
-   * files that survived: an output published before the error replaces its
-   * inputs, which may already be deleted.
+   * files that survived: an output it published before the error replaces its
+   * inputs, which may already be deleted. A file at the planned output path is
+   * not evidence of publication.
    */
   private async completeAbandonedTask(
     task: DeferredPostProcessTask,
@@ -456,13 +469,16 @@ export class RecordingMediaCoordinator {
       return
     }
     this.settledTasks.add(task)
-    const [outputs, inputs] =
-      task.kind === 'merge'
-        ? [[task.mergedPath], task.segmentPaths]
-        : [[task.outputPath], [task.inputPath]]
-    const published = await this.findExisting(outputs)
+    const publishedPath = this.publishedPaths.get(task)
+    const published = publishedPath
+      ? await this.findExisting([publishedPath])
+      : []
     const paths =
-      published.length > 0 ? published : await this.findExisting(inputs)
+      published.length > 0
+        ? published
+        : await this.findExisting(
+            task.kind === 'merge' ? task.segmentPaths : [task.inputPath],
+          )
     await this.getManifestRecorder()
       ?.completeDeferred(task.manifestEntryId, {
         decision: paths.length > 0 ? 'recorded' : 'failed',
