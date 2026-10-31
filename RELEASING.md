@@ -61,6 +61,24 @@ enforces this. It refuses a 1.x version from any branch but `release/1.x`, a
 1.x prerelease, and a later major from any branch but `master`. The publish
 workflow passes it the dispatched branch.
 
+Before the first maintenance release:
+
+1. Protect `release/1.x` like `master`.
+2. Allow `release/1.x` in the `npm` environment's deployment branches. Pull
+   request checks never use that environment, so passing checks do not show
+   that a maintenance publish is authorized.
+3. Optionally, have an npm owner point `wdio9` at the newest 1.x release, so
+   `@wdio9` resolves before the first maintenance patch:
+
+   ```bash
+   npm dist-tag add wdio-puppeteer-video-service@1.0.0 wdio9
+   npm view wdio-puppeteer-video-service dist-tags
+   ```
+
+   The publish workflow tags only what it publishes and will not republish
+   `1.0.0`, so without this step the first 1.x patch creates the tag. A 1.x
+   range such as `@^1` installs 1.x either way.
+
 For each 1.x fix:
 
 1. Open the pull request against `release/1.x` with a patch changeset. A fix
