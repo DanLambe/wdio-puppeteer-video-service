@@ -42,6 +42,19 @@ Each test holds its page for two seconds. These dwells are the recording workloa
 element assertions perform synchronization. The separate five-minute animated
 soak uses one worker on two CPUs. It is not folded into suite-time comparisons.
 
+`--workload switching` measures tab following instead. Each spec opens a static
+tab with `browser.url()` and an animated one with `browser.newWindow()`, then
+makes 10 crossings between the two held WebDriver BiDi contexts, with a
+one-second dwell after each. It times the first command after each crossing,
+and the same command again on that tab. A version that cannot follow held tabs
+has nothing comparable to measure, so each pair runs recording disabled and the
+candidate only, on 2 CPUs / 2 workers and 2 CPUs / 4 workers, retained, with no
+soak. A recorded test must have 12 segments alternating between the tabs, each
+showing its own tab's fixture. `comparison.json` pools every crossing's added
+latency, its candidate time less the pair's median recording-disabled time, and
+gates its p50 and p95 and the added cost of a same-tab command against
+`SWITCHING_BUDGETS` in `statistics.ts`.
+
 Each of five pairs runs recording disabled, baseline, and candidate sequentially.
 Alternate pairs reverse the order. Run on an otherwise idle host, and compare
 within the same invocation rather than between unrelated CI machines. CPU quota
