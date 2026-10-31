@@ -140,33 +140,44 @@ export class ContextFollower {
       }
     }
     if (commandName === 'switchToWindow') {
-      const pending = this.pendingSwitch
-      this.pendingSwitch = undefined
-      if (error !== undefined && pending) {
-        await this.recoverFailedSwitch(pending)
-      }
+      await this.afterSwitch(error)
+    } else if (commandName === 'browsingContextClose') {
+      await this.afterContextClose(args, error)
+    } else if (commandName === 'closeWindow') {
+      await this.afterCloseWindow(error)
+    }
+  }
+
+  private async afterSwitch(error: unknown): Promise<void> {
+    const pending = this.pendingSwitch
+    this.pendingSwitch = undefined
+    if (error !== undefined && pending) {
+      await this.recoverFailedSwitch(pending)
+    }
+  }
+
+  private async afterContextClose(
+    args: readonly unknown[],
+    error: unknown,
+  ): Promise<void> {
+    const signal = classifyCommand('browsingContextClose', args)
+    if (error !== undefined && signal?.kind === 'close') {
+      await this.target.recoverFailedClose(signal.contextId)
       return
     }
-    if (commandName === 'browsingContextClose') {
-      const signal = classifyCommand(commandName, args)
-      if (error !== undefined && signal?.kind === 'close') {
-        await this.target.recoverFailedClose(signal.contextId)
-        return
-      }
-      if (signal?.kind === 'close' && signal.contextId === this.currentWindow) {
-        this.currentWindow = undefined
-      }
-      await this.target.resumeAfterClose()
-      return
+    if (signal?.kind === 'close' && signal.contextId === this.currentWindow) {
+      this.currentWindow = undefined
     }
-    if (commandName === 'closeWindow') {
-      // A Classic close of the current window leaves no current window until
-      // WDIO switches to another, which the next switchToWindow reports.
-      if (error === undefined) {
-        this.currentWindow = undefined
-      }
-      await this.target.resumeAfterClose()
+    await this.target.resumeAfterClose()
+  }
+
+  private async afterCloseWindow(error: unknown): Promise<void> {
+    // A Classic close of the current window leaves no current window until
+    // WDIO switches to another, which the next switchToWindow reports.
+    if (error === undefined) {
+      this.currentWindow = undefined
     }
+    await this.target.resumeAfterClose()
   }
 
   /**

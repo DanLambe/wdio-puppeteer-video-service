@@ -94,7 +94,7 @@ export class RecordingMediaCoordinator {
     this.captureSession.clearRecordedPaths()
   }
 
-  async queueDeferredMerge(): Promise<void> {
+  queueDeferredMerge(): void {
     const currentTestSlug = this.captureSession.currentTestSlug
     if (!currentTestSlug) {
       return
@@ -274,7 +274,7 @@ export class RecordingMediaCoordinator {
           }
           await this.executeTranscode(task)
         } catch (error) {
-          await this.completeAbandonedTask(task, readReplacedPaths(task))
+          await this.completeAbandonedTask(task, readInputPaths(task))
           throw error
         }
       },
@@ -476,9 +476,7 @@ export class RecordingMediaCoordinator {
     const paths =
       published.length > 0
         ? published
-        : await this.findExisting(
-            task.kind === 'merge' ? task.segmentPaths : [task.inputPath],
-          )
+        : await this.findExisting(readInputPaths(task))
     await this.getManifestRecorder()
       ?.completeDeferred(task.manifestEntryId, {
         decision: paths.length > 0 ? 'recorded' : 'failed',
@@ -588,8 +586,11 @@ export class RecordingMediaCoordinator {
   }
 }
 
-/** The entry paths a task's result supersedes, as its completions report them. */
-const readReplacedPaths = (task: DeferredPostProcessTask): string[] =>
+/**
+ * A task's own inputs. They are also the entry paths its result supersedes,
+ * as its completions report them.
+ */
+const readInputPaths = (task: DeferredPostProcessTask): string[] =>
   task.kind === 'merge' ? [...task.segmentPaths] : [task.inputPath]
 
 const createFollowUpTranscodeTask = (

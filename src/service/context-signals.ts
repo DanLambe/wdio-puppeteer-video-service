@@ -67,39 +67,47 @@ const readRecord = (value: unknown): Readonly<Record<string, unknown>> => {
     : {}
 }
 
-export const classifyCommand = (
+const signalFor = (
+  kind: 'close' | 'drive' | 'switch',
+  contextId: string | undefined,
+): ContextSignal | undefined => {
+  return contextId ? { kind, contextId } : undefined
+}
+
+/** The context a driving command names in its parameters or element reference. */
+const readDrivenContext = (
   commandName: string,
   args: readonly unknown[],
-): ContextSignal | undefined => {
-  if (commandName === 'switchToWindow') {
-    const contextId = readString(args[0])
-    return contextId ? { kind: 'switch', contextId } : undefined
-  }
-  if (commandName === 'browsingContextClose') {
-    const contextId = readString(readRecord(args[0]).context)
-    return contextId ? { kind: 'close', contextId } : undefined
-  }
-  if (CURRENT_WINDOW_COMMANDS.has(commandName)) {
-    return { kind: 'current' }
-  }
+): string | undefined => {
   if (CONTEXT_PARAMETER_COMMANDS.has(commandName)) {
-    const contextId = readString(readRecord(args[0]).context)
-    return contextId ? { kind: 'drive', contextId } : undefined
+    return readString(readRecord(args[0]).context)
   }
   if (SCRIPT_TARGET_COMMANDS.has(commandName)) {
-    const target = readRecord(readRecord(args[0]).target)
-    const contextId = readString(target.context)
-    return contextId ? { kind: 'drive', contextId } : undefined
+    return readString(readRecord(readRecord(args[0]).target).context)
   }
   if (
     ELEMENT_COMMAND.test(commandName) &&
     !EXCLUDED_ELEMENT_COMMANDS.has(commandName)
   ) {
-    const reference = readString(args[0])
-    const contextId = reference?.match(SHARED_ELEMENT_REFERENCE)?.[1]
-    return contextId ? { kind: 'drive', contextId } : undefined
+    return readString(args[0])?.match(SHARED_ELEMENT_REFERENCE)?.[1]
   }
   return undefined
+}
+
+export const classifyCommand = (
+  commandName: string,
+  args: readonly unknown[],
+): ContextSignal | undefined => {
+  if (commandName === 'switchToWindow') {
+    return signalFor('switch', readString(args[0]))
+  }
+  if (commandName === 'browsingContextClose') {
+    return signalFor('close', readString(readRecord(args[0]).context))
+  }
+  if (CURRENT_WINDOW_COMMANDS.has(commandName)) {
+    return { kind: 'current' }
+  }
+  return signalFor('drive', readDrivenContext(commandName, args))
 }
 
 const readContextId = (value: unknown): string | undefined => {

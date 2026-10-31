@@ -233,12 +233,20 @@ export class WdioPuppeteerVideoWorkerRuntime
     })
   }
 
-  async beforeSession(
+  beforeSession(
     config: unknown,
     _capabilities: WebdriverIO.Capabilities,
     _specs: string[],
     cid: string,
   ): Promise<void> {
+    // Nothing here waits, but an invalid configuration still rejects the hook.
+    return new Promise((resolve) => {
+      this.configureSession(config, cid)
+      resolve()
+    })
+  }
+
+  private configureSession(config: unknown, cid: string): void {
     validateLauncherWorkerConfiguration(config)
     const manifestContext = readManifestRunContext(config)
     const framework = normalizeManifestFramework(

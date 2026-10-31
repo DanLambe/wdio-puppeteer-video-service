@@ -31,12 +31,12 @@ interface ParallelModeBrowser {
 
 const configuredMode = (config: unknown): string | undefined => {
   const options = (config ?? {}) as ParallelModeConfig
-  const value =
-    options.framework === 'cucumber'
-      ? options.cucumberOpts?.parallelMode
-      : options.framework === 'mocha'
-        ? options.mochaOpts?.parallelMode
-        : undefined
+  let value: unknown
+  if (options.framework === 'cucumber') {
+    value = options.cucumberOpts?.parallelMode
+  } else if (options.framework === 'mocha') {
+    value = options.mochaOpts?.parallelMode
+  }
   return typeof value === 'string' && PARALLEL_MODES.has(value)
     ? value
     : undefined

@@ -542,7 +542,7 @@ describe('RecordingController', () => {
       .mockResolvedValue(undefined)
     const queueDeferredMerge = vi
       .spyOn(harness.media, 'queueDeferredMerge')
-      .mockImplementation(async () => {
+      .mockImplementation(() => {
         harness.media.enqueue({
           kind: 'transcode',
           inputPath: 'input.webm',

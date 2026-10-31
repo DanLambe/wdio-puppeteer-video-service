@@ -499,7 +499,7 @@ describe('RecordingMediaCoordinator', () => {
     }
     harness.coordinator.enqueue(unrelatedTask)
 
-    await harness.coordinator.queueDeferredMerge()
+    harness.coordinator.queueDeferredMerge()
 
     expect(harness.coordinator.pendingTasks).toEqual([
       unrelatedTask,
@@ -1176,15 +1176,15 @@ describe('RecordingMediaCoordinator', () => {
     const tempDir = await createTempDir()
     const harness = createHarness({ outputDir: tempDir })
 
-    await harness.coordinator.queueDeferredMerge()
+    harness.coordinator.queueDeferredMerge()
     await harness.coordinator.mergeCurrentSegments()
     harness.captureSession.beginRecording('capture')
-    await harness.coordinator.queueDeferredMerge()
+    harness.coordinator.queueDeferredMerge()
     await harness.coordinator.mergeCurrentSegments()
     harness.captureSession.addRecordedPath(
       path.join(tempDir, 'capture_part1.unknown'),
     )
-    await harness.coordinator.queueDeferredMerge()
+    harness.coordinator.queueDeferredMerge()
     harness.captureSession.addRecordedPath(
       path.join(tempDir, 'capture_part2.webm'),
     )

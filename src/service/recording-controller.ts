@@ -388,7 +388,7 @@ export class RecordingController implements ContextFollowerTarget {
           return
         }
         if (this.media.shouldDefer) {
-          await this.media.queueDeferredMerge()
+          this.media.queueDeferredMerge()
           return
         }
         await this.media.mergeCurrentSegments()
@@ -459,8 +459,9 @@ export class RecordingController implements ContextFollowerTarget {
             return
           }
           if (!streamOk) {
+            const reason = incompleteReason ? ` (${incompleteReason})` : ''
             this.reportCaptureFailure(
-              `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}${incompleteReason ? ` (${incompleteReason})` : ''}`,
+              `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}${reason}`,
             )
           }
           await releaseRecordingSlot()
