@@ -237,7 +237,15 @@ export class ScreencastRecorder extends PassThrough {
   private stopped = false
   private resolveFirstFrame: (() => void) | undefined
 
-  constructor(init: ScreencastRecorderInit) {
+  /** Starts a recorder on an already spawned encoder and attached session. */
+  static create(init: ScreencastRecorderInit): ScreencastRecorder {
+    const recorder = new ScreencastRecorder(init)
+    // An encoder that exits early can take nothing more: stop retaining frames.
+    void recorder.encoder.closed.then(recorder.onEncoderClosed)
+    return recorder
+  }
+
+  private constructor(init: ScreencastRecorderInit) {
     super({ allowHalfOpen: false })
     this.session = init.session
     this.ffmpeg = init.ffmpeg
@@ -263,8 +271,6 @@ export class ScreencastRecorder extends PassThrough {
     )
     init.ffmpeg.stdout?.pipe(this)
     init.session.on('Page.screencastFrame', this.onFrame)
-    // An encoder that exits early can take nothing more: stop retaining frames.
-    void this.encoder.closed.then(this.onEncoderClosed)
   }
 
   /** Frames Chrome has delivered with a timestamp since recording started. */
@@ -385,7 +391,8 @@ export class ScreencastRecorder extends PassThrough {
     const exit = signal
       ? `was terminated by ${signal}`
       : `exited with code ${String(code)}`
-    this.incomplete = `FFmpeg ${exit} before the recording was stopped${diagnostic ? `: ${diagnostic}` : '.'}`
+    const detail = diagnostic ? `: ${diagnostic}` : '.'
+    this.incomplete = `FFmpeg ${exit} before the recording was stopped${detail}`
   }
 
   private readonly onFrame = (event: ScreencastFrameEvent): void => {
@@ -725,6 +732,11 @@ const formatBytes = (bytes: number): string => {
     : `${bytes.toString()} bytes`
 }
 
+/** Detaches a session nobody will use, ignoring a page that already closed. */
+const detachQuietly = (session: CDPSession): void => {
+  void session.detach().catch(() => undefined)
+}
+
 export const recordScreencast = async (
   page: Page,
   options: ScreencastRecorderOptions,
@@ -789,7 +801,7 @@ export const recordScreencast = async (
         // A raced promise still runs. Dispose a late session without starting
         // capture or changing the shared page behind the following test.
         if (abandoned) {
-          void attached.detach().catch(() => undefined)
+          detachQuietly(attached)
         } else {
           session = attached
         }
@@ -798,7 +810,7 @@ export const recordScreencast = async (
       interrupted,
     ])
     checkStartup()
-    recorder = new ScreencastRecorder({
+    recorder = ScreencastRecorder.create({
       canvas,
       clock,
       encoder,

@@ -259,7 +259,7 @@ const startRecorder = async (
 }
 
 const createRecorder = (ffmpeg: FakeFfmpeg, session: CDPSession) => {
-  return new ScreencastRecorder({
+  return ScreencastRecorder.create({
     canvas: { width: 1280, height: 720 },
     ffmpeg: ffmpeg.child,
     fps: 30,
@@ -1510,7 +1510,7 @@ describe('screencast recorder frame timing', () => {
     vi.useFakeTimers()
     const ffmpeg = createFakeFfmpeg(false)
     const terminateProcessTree = vi.fn(async () => {})
-    const recorder = new ScreencastRecorder({
+    const recorder = ScreencastRecorder.create({
       canvas: { width: 1280, height: 720 },
       clock: systemClock,
       ffmpeg: ffmpeg.child,
