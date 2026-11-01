@@ -372,6 +372,16 @@ describe('screencast recorder FFmpeg arguments', () => {
       args.slice(args.indexOf('-deadline'), args.indexOf('-cpu-used') + 2),
     ).toEqual(['-deadline', 'realtime', '-cpu-used', '8'])
   })
+
+  it('emits each frame as it is encoded, with no lookahead', () => {
+    const args = createFfmpegArguments(
+      options,
+      { width: 10, height: 10 },
+      undefined,
+    )
+    // A lookahead holds frames back until stop, which then waits for them.
+    expect(args[args.indexOf('-lag-in-frames') + 1]).toBe('0')
+  })
 })
 
 describe('screencast capture bounds', () => {

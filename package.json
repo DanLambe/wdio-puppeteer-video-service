@@ -104,7 +104,7 @@
     "test:integration:screencast": "vitest run tests/integration/screencast-shutdown.test.ts tests/integration/screencast-startup.test.ts",
     "test:integration:report": "vitest run tests/integration/report-generation.test.ts",
     "test:integration:timeline": "vitest run tests/integration/screencast-timeline.test.ts",
-    "test:integration:pipeline": "vitest run tests/integration/pipeline-host.test.ts",
+    "test:integration:pipeline": "vitest run tests/integration/pipeline-host.test.ts tests/integration/action-markers.test.ts",
     "test:coverage": "vitest run --exclude \"tests/integration/**\" --coverage",
     "test:consumer": "corepack npm run clean && corepack npm run build && tsc -p tests/package-consumer/tsconfig.json && tsx scripts/check-packed-consumer.ts",
     "typecheck": "tsc -p tsconfig.spec.json",

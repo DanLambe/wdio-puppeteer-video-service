@@ -884,6 +884,10 @@ export const createFfmpegArguments = (
     ['-vcodec', 'vp9', '-crf', `${options.quality}`],
     ['-deadline', 'realtime'],
     ['-cpu-used', `${VP9_REALTIME_SPEED}`],
+    // Disable lookahead to reduce buffering and stop latency in the realtime
+    // capture encoder: libvpx otherwise holds frames back and encodes them all
+    // when recording stops, while a tab switch or the test's end waits.
+    ['-lag-in-frames', '0'],
     // WebM keeps frame timestamps by default. MP4 would otherwise repeat each
     // frame onto a constant rate; its `hybrid_fragmented` flag already needs an
     // FFmpeg recent enough to accept `-fps_mode`.
