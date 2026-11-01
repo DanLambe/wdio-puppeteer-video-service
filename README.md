@@ -286,14 +286,14 @@ await page.$('#pay').click() // and back to the checkout tab
 
 Recording moves before the command reaches the browser, so the command's own
 effect is filmed. Each move ends one segment and starts another, and the command
-waits while that happens. With the default WebM output at 1920 × 1080, a move
-took:
+waits while that happens. With the default WebM output at 1920 × 1080, a click
+that moves recording to another tab took this much longer than unrecorded:
 - on a 2-CPU Linux container with 2 workers: about 0.8 s, 1.0 s at the 95th
   percentile;
-- with 4 workers sharing those 2 CPUs: about 2.2 s, and 3.0 s;
+- with 4 workers sharing those 2 CPUs: about 2.1 s, and 3.5 s;
 - on a desktop Chrome or Edge: about 0.3 s.
 
-A command that stays on its tab adds about a millisecond. Tests that alternate
+A command that stays on its tab adds a few milliseconds. Tests that alternate
 between tabs run slower while recorded. With `format: 'mp4'` and the default
 `processing.timing: 'after-test'`, the finished segment is also transcoded
 during the move; `'after-worker'` moves that work out of the test.

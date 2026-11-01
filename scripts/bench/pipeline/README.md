@@ -1,5 +1,8 @@
 # Browser pipeline measurements
 
+The results behind 2.0's performance decisions are in
+[RESULTS-2.0.md](RESULTS-2.0.md).
+
 Run from the repository root with Docker and at least four available CPUs:
 
 ```sh
