@@ -5,6 +5,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import type { ManifestEntryV1 } from '../../../src/manifest.js'
 import { isVideoManifest } from '../../../src/manifest.js'
+import type * as ActionMarkers from '../../../tests/utils/action-markers.js'
 import type { probeMediaFile as ProbeMediaFile } from '../../../tests/utils/media-probe.js'
 
 type Segment = ManifestEntryV1['capture']['segments'][number]
@@ -12,8 +13,36 @@ type Segment = ManifestEntryV1['capture']['segments'][number]
 interface Expectation {
   readonly dwellMs: number
   readonly probeMediaFile: typeof ProbeMediaFile
-  /** The switching workload alternates between a static and an animated tab. */
-  readonly switching: boolean
+  readonly markers: typeof ActionMarkers
+}
+
+/** At most this many segments are decoded at once. */
+const VERIFY_CONCURRENCY = 4
+/** The image's FFmpeg is 5.1 or newer, so its frames keep their timestamps this way. */
+const PASSTHROUGH = ['-fps_mode', 'passthrough'] as const
+
+/** Runs `task` over `items`, `limit` at a time, keeping their order. */
+const mapBounded = <T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+): Promise<R[]> => {
+  const results: R[] = []
+  let next = 0
+  const work = (): Promise<void> => {
+    const index = next
+    next += 1
+    if (index >= items.length) {
+      return Promise.resolve()
+    }
+    return task(items[index] as T).then((result) => {
+      results[index] = result
+      return work()
+    })
+  }
+  return Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, work),
+  ).then(() => results)
 }
 
 /** Counts mostly green and mostly red pixels in a few frames a second. */
@@ -59,6 +88,8 @@ const verifySegment = async (
   entry: ManifestEntryV1,
   artifact: Segment,
   expectation: Expectation,
+  /** What the segment must show, from the switching workload's definition. */
+  expected?: ActionMarkers.SegmentExpectation,
 ) => {
   const file = path.resolve(directory, artifact.path)
   const ffmpeg = process.env.FFMPEG_PATH as string
@@ -77,24 +108,41 @@ const verifySegment = async (
   )
   const colors = await sampleColors(ffmpeg, file)
   assert.ok(colors.green > colors.total * 0.1, 'Missing green fixture content')
-  const animated = expectation.switching
-    ? artifact.tab?.ordinal === 2
+  const animated = expected
+    ? expected.tab === 2
     : entry.test?.name.includes('animated')
   if (animated) {
     assert.ok(
       colors.red > colors.total * 0.1,
       'Animation did not preserve both colors',
     )
-  } else if (expectation.switching) {
+  } else if (expected) {
     // A frame or two of the previous tab may open a segment.
     assert.ok(
       colors.red < colors.total * 0.25,
       `Expected the static tab in ${artifact.path}`,
     )
   }
+  // Colors alone cannot show a late start: each tab's strip must open on its
+  // state before the segment's first action and show every action after it.
+  const actions =
+    expected &&
+    expectation.markers.checkSegment(
+      await expectation.markers.decodeMarkerFrames(ffmpeg, file, PASSTHROUGH),
+      expected,
+    )
+  if (actions && !actions.ok) {
+    assert.fail(`${artifact.path} ${actions.reason}`)
+  }
   const bytes = (await stat(file)).size
   assert.equal(bytes, artifact.size)
-  return { path: artifact.path, bytes, ...probe, colors }
+  return {
+    path: artifact.path,
+    bytes,
+    ...probe,
+    colors,
+    ...(actions ? { actions } : {}),
+  }
 }
 
 /** Checks an entry's outcome and returns its segments in recording order. */
@@ -145,24 +193,33 @@ export const verifyPipelineMedia = async (
   const { orderSegments } = (await import(
     segmentModule
   )) as typeof import('../../../tests/utils/segment-colors.js')
+  const markerModule = '/validation/tests/utils/action-markers.ts'
+  const markers = (await import(markerModule)) as typeof ActionMarkers
   const manifest: unknown = JSON.parse(
     await readFile(path.join(directory, 'manifest.json'), 'utf8'),
   )
   assert.ok(isVideoManifest(manifest), 'Expected finalized Manifest v1')
   const entries = manifest.runs.flatMap((run) => run.entries)
   assert.equal(entries.length, expectedTests)
-  const expectation: Expectation = {
-    dwellMs,
-    probeMediaFile,
-    switching: segmentsPerEntry > 1,
-  }
-  // Validation runs after the measured interval, so segments are probed together.
-  const media = await Promise.all(
-    entries.flatMap((entry) =>
-      readEntrySegments(entry, retain, segmentsPerEntry, orderSegments).map(
-        (artifact) => verifySegment(directory, entry, artifact, expectation),
-      ),
+  const expectation: Expectation = { dwellMs, probeMediaFile, markers }
+  // The switching workload's own definition, not the manifest, says which tab
+  // and which actions each segment holds.
+  const expected =
+    segmentsPerEntry > 1
+      ? markers.switchingSegments(segmentsPerEntry - 2)
+      : undefined
+  const work = entries.flatMap((entry) =>
+    readEntrySegments(entry, retain, segmentsPerEntry, orderSegments).map(
+      (artifact, index) => ({ entry, artifact, index }),
     ),
+  )
+  // Validation runs after the measured interval; a few decoders at a time
+  // keep it from crowding the host.
+  const media = await mapBounded(
+    work,
+    VERIFY_CONCURRENCY,
+    ({ entry, artifact, index }) =>
+      verifySegment(directory, entry, artifact, expectation, expected?.[index]),
   )
   const artifactBytes = media.reduce((total, item) => total + item.bytes, 0)
   return { artifactBytes, media }

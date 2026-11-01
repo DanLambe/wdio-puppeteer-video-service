@@ -48,12 +48,20 @@ soak uses one worker on two CPUs. It is not folded into suite-time comparisons.
 `--workload switching` measures tab following instead. Each spec opens a static
 tab with `browser.url()` and an animated one with `browser.newWindow()`, then
 makes 10 crossings between the two held WebDriver BiDi contexts, with a
-one-second dwell after each. It times the first command after each crossing,
-and the same command again on that tab. A version that cannot follow held tabs
+one-second dwell after each. It times a click on each crossing's tab, its
+first action there, then a read on the same tab. The read stays a read so the
+same-tab figure measures tab following, not the cost of filming a repaint. A version that cannot follow held tabs
 has nothing comparable to measure, so each pair runs recording disabled and the
 candidate only, on 2 CPUs / 2 workers and 2 CPUs / 4 workers, retained, with no
 soak. A recorded test must have 12 segments alternating between the tabs, each
-showing its own tab's fixture. `comparison.json` pools every crossing's added
+showing its own tab's fixture. Each tab also draws a strip of black and white
+cells in its top-right corner with its identity and click count
+(`tests/utils/action-markers.ts`). Every segment is decoded frame by frame and
+must open on its tab's count from before the crossing's click, then show the
+click, with no other tab once its own appears. A recording that starts
+after the first action, or films the wrong tab, fails even when its colors look
+right. The expected sequence comes from the workload's definition, not from the
+manifest. Segments are decoded four at a time after the measured interval. `comparison.json` pools every crossing's added
 latency, its candidate time less the pair's median recording-disabled time, and
 gates its p50 and p95 and the added cost of a same-tab command against
 `SWITCHING_BUDGETS` in `statistics.ts`.

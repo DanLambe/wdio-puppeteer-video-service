@@ -52,6 +52,7 @@ interface Environment {
   imageId: string
   candidateSourceSha256: string
   harnessSha256: string
+  validationSha256?: string
   availableCpus: number
   dockerVersion: string
   smoke: boolean
@@ -155,6 +156,10 @@ if (!previous) {
         harnessSha256: await hashTree(
           path.join(snapshot, 'candidate/scripts/bench/pipeline'),
         ),
+        // The media oracle the harness imports.
+        validationSha256: await hashTree(
+          path.join(snapshot, 'candidate/tests/utils'),
+        ),
         dependencyLockSha256: createHash('sha256')
           .update(await fs.readFile(path.join(root, 'package-lock.json')))
           .digest('hex'),
@@ -188,7 +193,9 @@ if (previous) {
       previous.candidateSourceSha256 ||
     (await hashTree(
       path.join(snapshot, 'candidate/scripts/bench/pipeline'),
-    )) !== previous.harnessSha256
+    )) !== previous.harnessSha256 ||
+    (await hashTree(path.join(snapshot, 'candidate/tests/utils'))) !==
+      previous.validationSha256
   ) {
     throw new Error(
       'The saved environment or source snapshot changed; start a fresh comparison',
