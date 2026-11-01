@@ -229,7 +229,10 @@ const findReason = (
   if (start < 0) {
     return `tab ${expected.tab} never appears`
   }
-  if (frames.filter((frame) => !frame.marker).length * 2 > frames.length) {
+  // Frames before the tab's first readable one are its page still loading,
+  // which a static page can outnumber: it paints only a few frames once loaded.
+  const own = frames.slice(start)
+  if (own.filter((frame) => !frame.marker).length * 2 > own.length) {
     return 'mostly unreadable'
   }
   if (leadingOtherTab > MAX_LEADING_OTHER_TAB) {

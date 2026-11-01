@@ -154,7 +154,18 @@ describe('segment action check', () => {
     )
   })
 
-  it('rejects a segment that is mostly unreadable', () => {
+  it('passes a segment whose page loads for longer than it then shows', () => {
+    // A first segment starts on the blank page before the fixture loads, and
+    // a static page paints only a few frames once loaded.
+    expect(
+      checkSegment(
+        frames(undefined, undefined, undefined, undefined, [1, 0], [1, 0]),
+        { tab: 1, values: [0] },
+      ).ok,
+    ).toBe(true)
+  })
+
+  it('rejects a segment that is mostly unreadable once its tab appears', () => {
     expect(
       checkSegment(
         frames([1, 2], undefined, undefined, undefined, [1, 4]),
