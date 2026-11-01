@@ -175,6 +175,7 @@ export const mergeSegmentPathsToOutput = async (options: {
   deleteSegments: boolean
   ffmpegOperation: string
   mergedPath: string
+  onPublished?: (outputPath: string) => void
   outputDir: string
   runFfmpeg: (args: string[], operation: string) => Promise<boolean>
   segmentPaths: string[]
@@ -185,6 +186,7 @@ export const mergeSegmentPathsToOutput = async (options: {
     deleteSegments,
     ffmpegOperation,
     mergedPath,
+    onPublished,
     outputDir,
     runFfmpeg,
     segmentPaths,
@@ -197,6 +199,7 @@ export const mergeSegmentPathsToOutput = async (options: {
 
   const publishedPath = await publishAtomicArtifact({
     desiredPath: mergedPath,
+    ...(onPublished === undefined ? {} : { onPublished }),
     produce: async (temporaryPath) => {
       if (segmentPaths.length === 1) {
         const singleSegmentPath = segmentPaths[0]

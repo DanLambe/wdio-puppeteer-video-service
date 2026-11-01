@@ -125,7 +125,7 @@ const initializeWorker = async (worker: WdioPuppeteerVideoWorkerRuntime) => {
   await worker.before(capabilities, ['example.spec.ts'], {
     sessionId: 'old-session',
     capabilities,
-    isMultiremote: false,
+    isMultiRemote: false,
   } as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
 }
 
@@ -360,12 +360,12 @@ describe('worker runtime hook sequencing', () => {
     await worker.before({}, [], {
       sessionId: 'no-output',
       capabilities: { browserName: 'chrome' },
-      isMultiremote: false,
+      isMultiRemote: false,
     } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
     await worker.before({}, [], {
       sessionId: 'firefox',
       capabilities: { browserName: 'firefox' },
-      isMultiremote: false,
+      isMultiRemote: false,
     } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
 
     expect(warmUp).not.toHaveBeenCalled()
@@ -390,7 +390,7 @@ describe('worker runtime hook sequencing', () => {
     await worker.before({}, [], {
       sessionId: 'multi',
       capabilities: { browserName: 'chrome' },
-      isMultiremote: true,
+      isMultiRemote: true,
     } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
     await worker.beforeCommand('closeWindow')
     await worker.afterSession()

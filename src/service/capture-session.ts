@@ -14,10 +14,29 @@ export type DetachedCapture =
       segment: undefined
     }>
 
+/** Why a segment started on its tab. */
+export type SegmentTabReason =
+  | 'start'
+  | 'command'
+  | 'switch-to-window'
+  | 'tab-closed'
+  /** The browser refused to close the tab, so its recording continues. */
+  | 'close-failed'
+  /** The browser rejected a switch away, so recording returns to its window. */
+  | 'switch-failed'
+
+/** The tab or window a segment recorded, numbered in order of first use. */
+export interface SegmentTab {
+  readonly contextId: string
+  readonly ordinal: number
+  readonly reason: SegmentTabReason
+}
+
 export interface AttachCaptureOptions {
   readonly recorder: ScreencastRecorder
   readonly segment: ActiveSegment
   readonly windowHandle: string | undefined
+  readonly reason?: SegmentTabReason
 }
 
 export class CaptureSession {
@@ -29,6 +48,8 @@ export class CaptureSession {
   private recordingSlug = ''
   private readonly retainedPaths = new Set<string>()
   private activeWindowHandle: string | undefined
+  private readonly tabOrdinals = new Map<string, number>()
+  private readonly tabsBySegment = new Map<number, SegmentTab>()
   private sessionProtocol: SessionProtocol = 'unsupported'
 
   get browser(): Browser | undefined {
@@ -61,6 +82,16 @@ export class CaptureSession {
 
   get currentWindowHandle(): string | undefined {
     return this.activeWindowHandle
+  }
+
+  /** Whether a capture was attached to the current segment number. */
+  get currentSegmentStarted(): boolean {
+    return this.tabsBySegment.has(this.segmentNumber)
+  }
+
+  /** Tabs of the current recording, keyed by segment number. */
+  get segmentTabs(): ReadonlyMap<number, SegmentTab> {
+    return new Map(this.tabsBySegment)
   }
 
   get protocol(): SessionProtocol {
@@ -102,6 +133,7 @@ export class CaptureSession {
     this.segmentNumber = 1
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.clearTabs()
   }
 
   attachCapture(options: AttachCaptureOptions): void {
@@ -114,6 +146,9 @@ export class CaptureSession {
     this.captureRecorder = options.recorder
     this.captureSegment = options.segment
     this.activeWindowHandle = options.windowHandle
+    if (options.windowHandle) {
+      this.recordSegmentTab(options.windowHandle, options.reason)
+    }
   }
 
   detachCapture(): DetachedCapture {
@@ -157,6 +192,28 @@ export class CaptureSession {
     this.recordingSlug = ''
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.clearTabs()
     return detached
+  }
+
+  private recordSegmentTab(
+    contextId: string,
+    reason: SegmentTabReason | undefined,
+  ): void {
+    let ordinal = this.tabOrdinals.get(contextId)
+    if (ordinal === undefined) {
+      ordinal = this.tabOrdinals.size + 1
+      this.tabOrdinals.set(contextId, ordinal)
+    }
+    this.tabsBySegment.set(this.segmentNumber, {
+      contextId,
+      ordinal,
+      reason: reason ?? (this.tabsBySegment.size === 0 ? 'start' : 'command'),
+    })
+  }
+
+  private clearTabs(): void {
+    this.tabOrdinals.clear()
+    this.tabsBySegment.clear()
   }
 }

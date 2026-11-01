@@ -343,6 +343,58 @@ describe('manifest v1 validator', () => {
     )
   })
 
+  it('accepts tab provenance on segments and the final file', () => {
+    const manifest = clone()
+    const capture = firstEntry(firstRun(manifest)).capture as Record<
+      string,
+      unknown
+    >
+    const tab = { ordinal: 2, reason: 'command', contextHash: 'hash' }
+    firstRecord(capture.segments).tab = tab
+    ;(capture.final as Record<string, unknown>).tabs = [
+      { ordinal: 1, reason: 'start', contextHash: 'first' },
+      tab,
+    ]
+    // A merged file kept beside its parts lists the tabs it holds.
+    ;(capture.segments as unknown[]).push({
+      path: 'merged.webm',
+      mimeType: 'video/webm',
+      size: 1,
+      tabs: [tab],
+    })
+
+    expect(validateVideoManifest(manifest)).toEqual({ valid: true, errors: [] })
+  })
+
+  it('reports invalid tab provenance', () => {
+    const manifest = clone()
+    const capture = firstEntry(firstRun(manifest)).capture as Record<
+      string,
+      unknown
+    >
+    const final = capture.final as Record<string, unknown>
+    firstRecord(capture.segments).tab = {
+      ordinal: 0,
+      reason: 'popup',
+      contextHash: '',
+    }
+    firstRecord(capture.segments).tabs = 'all'
+    final.tabs = [null]
+
+    expect(validateVideoManifest(manifest).errors).toEqual([
+      '$.runs[0].entries[0].capture.segments[0].tab.ordinal must be an integer >= 1',
+      '$.runs[0].entries[0].capture.segments[0].tab.reason must be one of: start, command, switch-to-window, tab-closed, close-failed, switch-failed',
+      '$.runs[0].entries[0].capture.segments[0].tab.contextHash must be a non-empty string',
+      '$.runs[0].entries[0].capture.segments[0].tabs must be an array',
+      '$.runs[0].entries[0].capture.final.tabs[0] must be an object',
+    ])
+
+    final.tabs = { ordinal: 1 }
+    expect(validateVideoManifest(manifest).errors).toContain(
+      '$.runs[0].entries[0].capture.final.tabs must be an array',
+    )
+  })
+
   it.each([
     '/rooted.webm',
     'C:/private.webm',

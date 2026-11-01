@@ -1,10 +1,13 @@
 # Browser pipeline measurements
 
+The results behind 2.0's performance decisions are in
+[RESULTS-2.0.md](RESULTS-2.0.md).
+
 Run from the repository root with Docker and at least four available CPUs:
 
 ```sh
 docker build -f scripts/bench/pipeline/Dockerfile -t wdio-video-pipeline:local .
-corepack npm run bench:pipeline -- --baseline 0b61d4f8a79be92dd4ffce315d4d2cc9e0a8a798
+corepack npm run bench:pipeline -- --baseline d4bae0f72226340866c85179e1e1956036eec181
 ```
 
 `--image` selects an existing image. The runner resolves its immutable image ID
@@ -18,13 +21,16 @@ The default is a new timestamped directory there.
 `--smoke` runs one pair at 2 CPUs / 2 workers without a soak and explicitly marks
 its output as **not qualification**.
 
-This is a local developer tool. Use trusted Git, tar and Docker executables on
-your PATH, a trusted image and source revision, and keep `tests/results`
-writable only by the test user. Resume only your own trusted saved runs. The
-disposable measurement container runs as root to retain the pinned benchmark
-environment and output permissions. It has no privileged mode or Docker socket;
-source mounts are read-only and the selected results directory is the only
-writable host mount.
+This is a local developer tool. Use trusted Git, tar and Docker executables, a
+trusted image and source revision, and keep `tests/results` writable only by the
+test user. The runner resolves each tool once, from the absolute directories on
+`PATH` (never the working directory or a relative entry), records the paths in
+`environment.json`, and uses them for the whole run. Resume only your own
+trusted saved runs. The disposable measurement container runs as the image's
+unprivileged `node` user; on a POSIX host it runs as the host user instead, who
+owns the results directory. It has no privileged mode or Docker socket; source
+mounts are read-only and the selected results directory is the only writable
+host mount.
 Do not use this harness to execute untrusted images, source or saved metadata.
 
 After an interrupted full run, use `--resume <output-directory>`. Resume verifies
@@ -41,6 +47,27 @@ continuous animation at 1920 × 1080 using the default profile and capture quali
 Each test holds its page for two seconds. These dwells are the recording workload;
 element assertions perform synchronization. The separate five-minute animated
 soak uses one worker on two CPUs. It is not folded into suite-time comparisons.
+
+`--workload switching` measures tab following instead. Each spec opens a static
+tab with `browser.url()` and an animated one with `browser.newWindow()`, then
+makes 10 crossings between the two held WebDriver BiDi contexts, with a
+one-second dwell after each. It times a click on each crossing's tab, its
+first action there, then a read on the same tab. The read stays a read so the
+same-tab figure measures tab following, not the cost of filming a repaint. A version that cannot follow held tabs
+has nothing comparable to measure, so each pair runs recording disabled and the
+candidate only, on 2 CPUs / 2 workers and 2 CPUs / 4 workers, retained, with no
+soak. A recorded test must have 12 segments alternating between the tabs, each
+showing its own tab's fixture. Each tab also draws a strip of black and white
+cells in its top-right corner with its identity and click count
+(`tests/utils/action-markers.ts`). Every segment is decoded frame by frame and
+must open on its tab's count from before the crossing's click, then show the
+click, with no other tab once its own appears. A recording that starts
+after the first action, or films the wrong tab, fails even when its colors look
+right. The expected sequence comes from the workload's definition, not from the
+manifest. Segments are decoded four at a time after the measured interval. `comparison.json` pools every crossing's added
+latency, its candidate time less the pair's median recording-disabled time, and
+gates its p50 and p95 and the added cost of a same-tab command against
+`SWITCHING_BUDGETS` in `statistics.ts`.
 
 Each of five pairs runs recording disabled, baseline, and candidate sequentially.
 Alternate pairs reverse the order. Run on an otherwise idle host, and compare

@@ -32,6 +32,8 @@ export interface TranscodeRequest {
   readonly deleteOriginal: boolean
   readonly ffmpegArgs?: readonly string[]
   readonly inputPath: string
+  /** Runs once the output is published, even if a later step throws. */
+  readonly onPublished?: (outputPath: string) => void
   readonly outputPath: string
 }
 
@@ -58,6 +60,9 @@ export class MediaPipeline {
       () =>
         publishAtomicArtifact({
           desiredPath: options.outputPath,
+          ...(options.onPublished === undefined
+            ? {}
+            : { onPublished: options.onPublished }),
           process: this.process,
           produce: (temporaryPath) =>
             this.runtime.run(

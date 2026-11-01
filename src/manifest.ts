@@ -43,6 +43,36 @@ export interface ManifestMediaArtifact {
   height?: number
 }
 
+/** Why a segment started on its tab. */
+export type ManifestTabReason =
+  | 'start'
+  | 'command'
+  | 'switch-to-window'
+  | 'tab-closed'
+  | 'close-failed'
+  | 'switch-failed'
+
+/** The browser tab or window a segment recorded. */
+export interface ManifestTab {
+  /** Tabs are numbered from 1 in the order the recording first used them. */
+  ordinal: number
+  reason: ManifestTabReason
+  /** Salted hash of the browser's tab identifier, which is never stored. */
+  contextHash: string
+}
+
+export interface ManifestSegmentArtifact extends ManifestMediaArtifact {
+  /** The tab a part file filmed. */
+  tab?: ManifestTab
+  /** The tabs of the parts a merged file holds, in recording order. */
+  tabs?: ManifestTab[]
+}
+
+export interface ManifestFinalArtifact extends ManifestMediaArtifact {
+  /** The tabs of the parts in this file, in recording order. */
+  tabs?: ManifestTab[]
+}
+
 export interface ManifestTimings {
   startedAt: string
   captureStartedAt?: string
@@ -62,8 +92,8 @@ export interface ManifestProcessing {
 export interface ManifestCapture {
   decision: ManifestCaptureDecision
   reason?: string
-  segments: ManifestMediaArtifact[]
-  final?: ManifestMediaArtifact
+  segments: ManifestSegmentArtifact[]
+  final?: ManifestFinalArtifact
 }
 
 export interface ManifestEntryV1 {
@@ -109,6 +139,15 @@ export interface ManifestValidationResult {
   valid: boolean
   errors: string[]
 }
+
+const MANIFEST_TAB_REASONS: readonly ManifestTabReason[] = [
+  'start',
+  'command',
+  'switch-to-window',
+  'tab-closed',
+  'close-failed',
+  'switch-failed',
+]
 
 const ISO_TIMESTAMP_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/u
@@ -290,14 +329,31 @@ const validateCapture = (
   }
   const segments = readArray(capture.segments, `${location}.segments`, errors)
   for (const [index, artifact] of (segments ?? []).entries()) {
-    validateArtifact(
-      artifact,
-      `${location}.segments[${index.toString()}]`,
-      errors,
-    )
+    const artifactLocation = `${location}.segments[${index.toString()}]`
+    const segment = validateArtifact(artifact, artifactLocation, errors)
+    if (segment?.tab !== undefined) {
+      validateTab(segment.tab, `${artifactLocation}.tab`, errors)
+    }
+    if (segment?.tabs !== undefined) {
+      validateTabs(segment.tabs, `${artifactLocation}.tabs`, errors)
+    }
   }
   if (capture.final !== undefined) {
-    validateArtifact(capture.final, `${location}.final`, errors)
+    const final = validateArtifact(capture.final, `${location}.final`, errors)
+    if (final?.tabs !== undefined) {
+      validateTabs(final.tabs, `${location}.final.tabs`, errors)
+    }
+  }
+}
+
+const validateTabs = (
+  value: unknown,
+  location: string,
+  errors: string[],
+): void => {
+  const tabs = readArray(value, location, errors)
+  for (const [index, tab] of (tabs ?? []).entries()) {
+    validateTab(tab, `${location}[${index.toString()}]`, errors)
   }
 }
 
@@ -305,10 +361,10 @@ const validateArtifact = (
   value: unknown,
   location: string,
   errors: string[],
-): void => {
+): Record<string, unknown> | undefined => {
   const artifact = readRecord(value, location, errors)
   if (!artifact) {
-    return
+    return undefined
   }
   expectSafeRelativePath(artifact.path, `${location}.path`, errors)
   expectEnum(
@@ -329,6 +385,21 @@ const validateArtifact = (
       `${location}.width and ${location}.height must be provided together`,
     )
   }
+  return artifact
+}
+
+const validateTab = (
+  value: unknown,
+  location: string,
+  errors: string[],
+): void => {
+  const tab = readRecord(value, location, errors)
+  if (!tab) {
+    return
+  }
+  expectInteger(tab.ordinal, `${location}.ordinal`, errors, 1)
+  expectEnum(tab.reason, MANIFEST_TAB_REASONS, `${location}.reason`, errors)
+  expectNonEmptyString(tab.contextHash, `${location}.contextHash`, errors)
 }
 
 const validateProcessing = (

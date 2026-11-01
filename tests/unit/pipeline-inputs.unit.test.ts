@@ -1,6 +1,8 @@
+import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
   resolveBaseline,
+  resolveExecutable,
   resolveImage,
 } from '../../scripts/bench/pipeline/inputs.js'
 
@@ -79,4 +81,54 @@ describe('pipeline input resolution', () => {
       )
     },
   )
+})
+
+describe('pipeline executable resolution', () => {
+  it('takes the first absolute PATH directory that has the command', () => {
+    const isFile = vi.fn((candidate: string) => candidate !== '/usr/bin/git')
+    expect(
+      resolveExecutable('git', {
+        env: { PATH: 'bin:/usr/bin:/opt/git/bin:/usr/local/bin' },
+        isFile,
+        platform: 'linux',
+      }),
+    ).toBe('/opt/git/bin/git')
+    // A relative entry is never searched, even when it comes first.
+    expect(isFile.mock.calls.map(([candidate]) => candidate)).toEqual([
+      '/usr/bin/git',
+      '/opt/git/bin/git',
+    ])
+  })
+
+  it('tries the extensions Windows spawns, in order', () => {
+    const isFile = vi.fn((candidate: string) => candidate.endsWith('.exe'))
+    expect(
+      resolveExecutable('docker', {
+        env: { PATH: String.raw`.;C:\Docker\bin;C:\Tools` },
+        isFile,
+        platform: 'win32',
+      }),
+    ).toBe(String.raw`C:\Docker\bin\docker.exe`)
+    expect(isFile.mock.calls.map(([candidate]) => candidate)).toEqual([
+      String.raw`C:\Docker\bin\docker.com`,
+      String.raw`C:\Docker\bin\docker.exe`,
+    ])
+  })
+
+  it('fails when no absolute PATH directory has the command', () => {
+    expect(() =>
+      resolveExecutable('tar', {
+        env: { PATH: 'bin:./tools' },
+        isFile: () => true,
+        platform: 'linux',
+      }),
+    ).toThrow('tar was not found in an absolute PATH directory')
+    expect(() =>
+      resolveExecutable('tar', { env: {}, isFile: () => true }),
+    ).toThrow('not found')
+  })
+
+  it('finds a real executable on this host', () => {
+    expect(path.isAbsolute(resolveExecutable('node'))).toBe(true)
+  })
 })

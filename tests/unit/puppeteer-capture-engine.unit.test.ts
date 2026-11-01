@@ -494,7 +494,9 @@ describe('Puppeteer capture engine', () => {
       streamOk: true,
     })
 
-    expect(timers).toHaveLength(2)
+    // The page lookup's deadlines (listing pages, reading one marker) and the
+    // two stream timeouts.
+    expect(timers).toHaveLength(4)
     expect(timers.every((timer) => timer.unref.mock.calls.length === 1)).toBe(
       true,
     )

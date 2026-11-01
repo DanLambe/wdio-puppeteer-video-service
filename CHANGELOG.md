@@ -1,8 +1,5 @@
 # Changelog
 
-This project uses [Changesets](https://github.com/changesets/changesets) for
-versioning and release notes.
-
 ## 1.0.0
 
 The first stable release. 1.0 is a rewrite of the 0.8 service. It records

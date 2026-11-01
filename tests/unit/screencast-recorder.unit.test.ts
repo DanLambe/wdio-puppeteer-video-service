@@ -259,7 +259,7 @@ const startRecorder = async (
 }
 
 const createRecorder = (ffmpeg: FakeFfmpeg, session: CDPSession) => {
-  return new ScreencastRecorder({
+  return ScreencastRecorder.create({
     canvas: { width: 1280, height: 720 },
     ffmpeg: ffmpeg.child,
     fps: 30,
@@ -371,6 +371,16 @@ describe('screencast recorder FFmpeg arguments', () => {
     expect(
       args.slice(args.indexOf('-deadline'), args.indexOf('-cpu-used') + 2),
     ).toEqual(['-deadline', 'realtime', '-cpu-used', '8'])
+  })
+
+  it('emits each frame as it is encoded, with no lookahead', () => {
+    const args = createFfmpegArguments(
+      options,
+      { width: 10, height: 10 },
+      undefined,
+    )
+    // A lookahead holds frames back until stop, which then waits for them.
+    expect(args[args.indexOf('-lag-in-frames') + 1]).toBe('0')
   })
 })
 
@@ -1500,7 +1510,7 @@ describe('screencast recorder frame timing', () => {
     vi.useFakeTimers()
     const ffmpeg = createFakeFfmpeg(false)
     const terminateProcessTree = vi.fn(async () => {})
-    const recorder = new ScreencastRecorder({
+    const recorder = ScreencastRecorder.create({
       canvas: { width: 1280, height: 720 },
       clock: systemClock,
       ffmpeg: ffmpeg.child,

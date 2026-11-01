@@ -1,11 +1,98 @@
+# Migrating from 1.x to 2.0
+
+2.0 supports WebdriverIO 10 only. Projects that stay on WebdriverIO 9 keep
+using 1.x:
+
+```bash
+npm install --save-dev wdio-puppeteer-video-service@^1
+```
+
+1.x keeps receiving fixes, published under npm's `wdio9` tag; the `^1` range
+picks them up.
+
+## Upgrade the packages together
+
+2.0 requires WebdriverIO `>=10.1.0 <11` and Puppeteer Core `>=25.0.2 <26`.
+Move every WebdriverIO package to 10 in the same install, including the
+framework, reporters and `expect-webdriverio` 8:
+
+```bash
+npm install --save-dev wdio-puppeteer-video-service@2 puppeteer-core@^25.0.2 webdriverio@10 @wdio/cli@10 @wdio/local-runner@10 @wdio/mocha-framework@10
+```
+
+Until `2.0.0` is stable, install a release candidate with
+`wdio-puppeteer-video-service@^2.0.0-rc.0` instead of `@2`; see
+[Installation](./README.md#installation).
+
+The service's options are unchanged, so a 1.x configuration works as it is.
+
+## What changes in WebDriver BiDi sessions
+
+WebdriverIO 10 uses WebDriver BiDi by default. There, `browser.url()` and
+`browser.newWindow()` return a browsing context the test can hold and drive
+directly, `newWindow()` no longer switches to the new tab, and
+`switchWindow()` throws. 1.x followed only window commands, so it could keep
+filming a tab the test had left.
+
+2.0 records the tab the test is driving:
+
+- A command on a held browsing context, such as `tab.$('#save').click()`,
+  moves recording to that tab before the command runs.
+- `browser.switchToWindow(handle)` moves recording to that window.
+- Element-free Classic actions, such as `browser.keys()`, act on WebdriverIO's
+  current window, and recording follows them there.
+- A frame is recorded as part of its tab.
+- When the recorded tab closes, recording continues on WebdriverIO's current
+  window.
+
+Each change of tab starts a new segment, so tests that use several tabs
+produce more segments than under 1.x. The recorded tab is brought to the
+front, because Chrome does not paint tabs in the background. Each segment's
+`tab` field in the manifest says which tab it filmed and why
+([Manifest v1](./README.md#manifest-v1)).
+
+Sessions that set `'wdio:enforceWebDriverClassic': true` keep the 1.x
+behavior: recording follows `switchWindow`, `switchToWindow`, `newWindow`
+and `closeWindow`.
+
+A tab the test drives but the service cannot record is now a gap: the entry
+is recorded as `failed` with reason `capture-incomplete`, like an encoder
+failure, and `failurePolicy: 'error'` raises it.
+
+## Workers the service cannot record write no manifest entries
+
+The service declares WebdriverIO's static `shouldRun`, so WebdriverIO does not
+start it for non-Chromium browsers or multiremote sessions. Those workers log
+one warning and write nothing to the manifest. 1.x started the service in them
+and wrote a `skipped` entry for each test. Tooling that counted those entries
+should count the worker's tests from the test framework instead.
+
+## `parallelMode` is not recorded
+
+With `mochaOpts.parallelMode` or `cucumberOpts.parallelMode`, a spec file's
+tests run at the same time. The service records one tab per worker, so it does
+not record such workers: it logs one warning, and the manifest lists each test
+as `skipped` with the reason. Turn `parallelMode` off for runs you want
+recorded.
+
+## Manifest v1 gains optional fields
+
+The manifest stays at version 1, and its new fields are optional:
+
+- each segment's `tab`: `ordinal`, `reason` and a salted `contextHash`;
+- `tabs` on a merged file and on `final`, the tabs of its parts in order.
+
+The 1.x validator accepts a 2.0 manifest. Code that reads the manifest needs no
+changes unless it wants the tab history.
+
 # Migrating from 0.8 to 1.0
 
 Version 1.0 intentionally rejects deprecated flat keys. Configuration errors
 are raised when the service is constructed, before a browser session starts.
 
 1.0 requires WebdriverIO `>=9.29.1 <10` and Puppeteer Core `>=24.11.2 <25`.
-Upgrade the service and WebdriverIO separately: WebdriverIO 10 is not supported
-yet ([details](./SUPPORT.md#webdriverio-10)).
+Move from 0.8 to 1.x on WebdriverIO 9 first, then to 2.0 and WebdriverIO 10
+([Migrating from 1.x to 2.0](#migrating-from-1x-to-20)).
 
 ## Option mapping
 

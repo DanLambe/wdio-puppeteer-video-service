@@ -1,47 +1,54 @@
 # Troubleshooting
 
-## npm cannot install the service beside WebdriverIO 10
+## npm cannot install the service beside WebdriverIO 9
 
 ```text
 npm error ERESOLVE unable to resolve dependency tree
-npm error Found: webdriverio@10.1.0
+npm error Found: webdriverio@9.31.1
 npm error Could not resolve dependency:
-npm error peer webdriverio@">=9.29.1 <10" from wdio-puppeteer-video-service
+npm error peer webdriverio@">=10.1.0 <11" from wdio-puppeteer-video-service
 ```
 
-The project uses WebdriverIO 10, which 1.x does not support yet. Support is
-coming soon; see [WebdriverIO 10](./SUPPORT.md#webdriverio-10) for why and what
-is planned.
-WebdriverIO's npm `latest` tag is 10, so an unpinned install or a newly
-generated project picks it up. Pin every WebdriverIO package to 9, keeping the
-framework and reporter packages the project already uses:
+2.x supports WebdriverIO 10 only. A project that stays on WebdriverIO 9 uses
+1.x:
 
 ```bash
-npm install --save-dev webdriverio@9 @wdio/cli@9 @wdio/local-runner@9 @wdio/mocha-framework@9
+npm install --save-dev wdio-puppeteer-video-service@^1 puppeteer-core@^24.11.2
 ```
 
-The same conflict appears for `@wdio/allure-reporter`, `@wdio/reporter`, or
-`@wdio/types` at 10. Do not bypass it with `--force`, `--legacy-peer-deps`, or
-an override: the service could record a page the test has left.
+To move to 2.x instead, upgrade every WebdriverIO package to 10 together; see
+[Migrating from 1.x to 2.0](./MIGRATION.md#migrating-from-1x-to-20).
+
+## npm cannot install 1.x beside WebdriverIO 10
+
+```text
+npm error peer webdriverio@">=9.29.1 <10" from wdio-puppeteer-video-service@1.0.0
+```
+
+1.x supports WebdriverIO 9 only. Install 2.x, which supports WebdriverIO 10:
+
+```bash
+npm install --save-dev wdio-puppeteer-video-service@2 puppeteer-core@^25.0.2
+```
+
+Do not bypass either conflict with `--force`, `--legacy-peer-deps`, or an
+override. 1.x does not follow the tabs a WebdriverIO 10 test drives, so it could
+record a tab the test has left while reporting success.
 
 ## npm reports a Puppeteer peer-dependency conflict
 
 Install a Puppeteer Core version supported by both this service and
-WebdriverIO v9:
+WebdriverIO 10:
 
 ```bash
-npm install --save-dev puppeteer-core@^24.11.2
+npm install --save-dev puppeteer-core@^25.0.2
 ```
 
-WebdriverIO `9.31.1` corrected its Puppeteer peer range to exclude version 25.
-Earlier WebdriverIO releases used an overly broad range that could allow an
-unsupported Puppeteer 25 installation. Do not bypass the conflict with
-`--force`, `--legacy-peer-deps`, or an override. Keep WebdriverIO on a supported
-9.x release and use Puppeteer Core `>=24.11.2 <25`.
+2.x needs Puppeteer Core `>=25.0.2 <26`; 1.x needs `>=24.11.2 <25`. Do not
+bypass the conflict with `--force`, `--legacy-peer-deps`, or an override.
 
 The lower bound is the oldest Puppeteer Core release the service is validated
-with: release validation installs `24.11.2` and records through it. Earlier 24.x
-releases are untested, so do not widen the range to them.
+with: release validation installs `25.0.2` and records through it.
 
 ## WDIO launcher context is missing or malformed
 
@@ -142,12 +149,55 @@ corrected implementation treats runtime skips as non-failures for retention and
 default Allure attachments, while preserving the skipped manifest result.
 `retain: 'all'` still keeps a skipped test's recording when capture has started.
 
-With BiDi, WDIO may automatically switch to a surviving tab concurrently with
-the test's next navigation. Earlier versions could lose the remaining recording
-when the page-marker script hit the replaced document context. Startup now retries
-that marker once for known context-destruction errors; unrelated or persistent
-failures retain their diagnostics. Keep awaiting window/navigation commands in
-tests, and inspect service warnings if expected window segments are missing.
+After a tab closes, WDIO may switch to a surviving tab while the test's next
+command is already on its way. In WebDriver BiDi sessions the service follows
+that switch, and the new segment's `tab.reason` is `switch-to-window` or
+`tab-closed`. Keep awaiting window and navigation commands in tests, and
+inspect service warnings if expected segments are missing.
+
+## A recording shows the wrong tab, or a tab is missing
+
+In WebDriver BiDi sessions the service records the tab each command drives.
+Each segment's `tab` in the manifest says which tab it filmed and why
+([Manifest v1](./README.md#manifest-v1)); the HTML report labels each video
+the same way, such as "Tab 2 · test command" or "Tabs 1 → 2 → 1" for a merge.
+
+- **Commands on two tabs at once.** With
+  `Promise.all([a.$('#x').click(), b.$('#y').click()])`, recording follows the
+  most recent command, so one tab's action may not be filmed. Await commands
+  on different tabs one after another.
+- **A command reaches a tab in the background.** Recording cannot tell who sent
+  a command. One that another service, or a promise the test did not await,
+  sends to a tab the test holds moves recording there, even while the test
+  works in a different tab. The segment's reason is `command`.
+- **The entry is `failed` with `capture-incomplete`.** The test drove a tab
+  whose recording could not start. Each tab gets two consecutive attempts; the
+  service warns with the tab's id. Segments recorded before and after the gap
+  are kept.
+- **A segment starts on the wrong tab just after `switchToWindow`.** A switch
+  the browser rejects returns recording to WebdriverIO's current window, with
+  reason `switch-failed`.
+- **Classic sessions** (`'wdio:enforceWebDriverClassic': true`) follow window
+  commands only, as 1.x did. Commands on a held browsing context do not move
+  recording there.
+
+## Edge says its WebDriver supports an older Edge version
+
+```text
+session not created: This version of Microsoft Edge WebDriver only supports Microsoft Edge version 152
+```
+
+This is a WebdriverIO driver-setup problem, not a recording one. After Edge
+updates itself, WebdriverIO's `edgedriver` package keeps using the
+`msedgedriver` it downloaded earlier: it reuses a driver found in its cache
+directory without checking the driver's version. The cache directory is
+`wdio:edgedriverOptions.cacheDir`, WDIO's `cacheDir`, or
+`EDGEDRIVER_CACHE_DIR`, and otherwise the system temporary directory.
+
+Delete or rename the cached `msedgedriver` (`msedgedriver.exe` on Windows);
+the next run downloads the matching driver. Alternatively, point
+`wdio:edgedriverOptions.binary` at a driver that matches the installed Edge.
+Fresh CI runners are not affected.
 
 ## FFmpeg is unavailable
 
