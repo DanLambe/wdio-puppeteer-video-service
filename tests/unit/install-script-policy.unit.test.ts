@@ -172,7 +172,7 @@ describe('install script policy in CI', () => {
     expect(readMinimumPeers(drift)).not.toBe('')
     expect(readMinimumPeers(drift)).toBe(readMinimumPeers(validation))
     const latest = readFoldedRun(drift, 'Install Latest Supported Peers')
-    expect(latest).toContain('webdriverio@9')
+    expect(latest).toContain('webdriverio@10')
     expect(latest).toBe(
       readFoldedRun(validation, 'Install Latest Supported Peers'),
     )

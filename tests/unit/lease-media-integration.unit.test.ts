@@ -93,6 +93,7 @@ describe('lease acquisition failure through deferred media processing', () => {
           reason: 'deferred-transcode-failed-original-preserved',
           processingOutcome: 'failed',
           processingOperation: 'transcode',
+          replaces: [inputPath],
         })
         expect(coordinator.pendingTaskCount).toBe(0)
         expect(runFfmpeg).not.toHaveBeenCalled()

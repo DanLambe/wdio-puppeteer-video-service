@@ -1,6 +1,7 @@
 import type { Frameworks } from '@wdio/types'
 import { describe, expect, it, vi } from 'vitest'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
+import { PARALLEL_MODE_UNSUPPORTED_REASON } from '../../src/service/parallel-mode.js'
 import {
   normalizeScenarioEntity,
   normalizeTestEntity,
@@ -73,6 +74,17 @@ class FakeManifest implements RecordingManifestPort {
     if (this.failRecordResult) {
       throw this.failRecordResult
     }
+  }
+
+  async recordSkippedEntity(
+    input: { scope: 'spec' | 'test'; test?: { title?: string } },
+    options: { reason: string; result: string },
+  ): Promise<string> {
+    this.events.push(
+      `manifest:skipped:${input.scope}:${input.test?.title ?? ''}:${options.result}`,
+    )
+    this.completed.push(options)
+    return 'skipped-entry'
   }
 
   setCurrentAttempt(attempt: number): void {
@@ -316,6 +328,62 @@ describe('worker recording coordinator', () => {
       })
     },
   )
+
+  it('writes a whole skipped entry for each overlapping parallelMode test', async () => {
+    const harness = createHarness(
+      {},
+      {
+        availability: {
+          available: false,
+          reason: PARALLEL_MODE_UNSUPPORTED_REASON,
+        },
+      },
+    )
+
+    // parallelMode runs both tests' hooks at once.
+    await Promise.all([
+      harness.coordinator.beginEntity(createEntity('first parallel test')),
+      harness.coordinator.beginEntity(createEntity('second parallel test')),
+    ])
+    await Promise.all([
+      harness.coordinator.endEntity({ manifestResult: 'passed', passed: true }),
+      harness.coordinator.endEntity({
+        manifestResult: 'failed',
+        passed: false,
+      }),
+    ])
+
+    expect(harness.events).toEqual([
+      'manifest:skipped:test:first parallel test:unknown',
+      'manifest:skipped:test:second parallel test:unknown',
+    ])
+    expect(harness.manifest.completed).toEqual([
+      { reason: PARALLEL_MODE_UNSUPPORTED_REASON, result: 'unknown' },
+      { reason: PARALLEL_MODE_UNSUPPORTED_REASON, result: 'unknown' },
+    ])
+  })
+
+  it('writes one skipped spec entry for a parallelMode spec', async () => {
+    const harness = createHarness(
+      { recording: { scope: 'spec' } },
+      {
+        availability: {
+          available: false,
+          reason: PARALLEL_MODE_UNSUPPORTED_REASON,
+        },
+      },
+    )
+
+    await harness.coordinator.beginEntity(createEntity('first parallel test'))
+    await harness.coordinator.beginEntity(createEntity('second parallel test'))
+    harness.coordinator.resetWorkerState()
+    await harness.coordinator.beginEntity(createEntity('next spec test'))
+
+    expect(harness.events).toEqual([
+      'manifest:skipped:spec:first parallel test:unknown',
+      'manifest:skipped:spec:next spec test:unknown',
+    ])
+  })
 
   it('keeps an earlier spec failure when a later entity is skipped', async () => {
     const harness = createHarness({

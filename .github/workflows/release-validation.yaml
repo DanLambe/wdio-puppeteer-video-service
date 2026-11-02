@@ -22,14 +22,14 @@ permissions:
 # resolved tree against allowScripts before rebuilding anything.
 env:
   MINIMUM_SUPPORTED_PEERS: >-
-    webdriverio@9.29.1 puppeteer-core@24.11.2
-    @wdio/allure-reporter@9.29.1 @wdio/cli@9.29.1
-    @wdio/cucumber-framework@9.29.1 @wdio/globals@9.29.1
-    @wdio/jasmine-framework@9.29.1 @wdio/local-runner@9.29.1
-    @wdio/mocha-framework@9.29.1 @wdio/reporter@9.29.1
-    @wdio/runner@9.29.1 @wdio/spec-reporter@9.29.1
-    @wdio/types@9.29.1
-    expect-webdriverio@5.7.0
+    webdriverio@10.1.0 puppeteer-core@25.0.2
+    @wdio/allure-reporter@10.1.0 @wdio/cli@10.1.0
+    @wdio/cucumber-framework@10.1.0 @wdio/globals@10.1.0
+    @wdio/jasmine-framework@10.1.0 @wdio/local-runner@10.1.0
+    @wdio/mocha-framework@10.1.0 @wdio/reporter@10.1.0
+    @wdio/runner@10.1.0 @wdio/spec-reporter@10.1.0
+    @wdio/types@10.1.0
+    expect-webdriverio@8.0.0
 
 jobs:
   core:
@@ -70,12 +70,12 @@ jobs:
         if: matrix.dependencies == 'latest'
         run: >-
           corepack npm install --no-save --ignore-scripts
-          webdriverio@9 puppeteer-core@24
-          @wdio/allure-reporter@9 @wdio/cli@9
-          @wdio/cucumber-framework@9 @wdio/globals@9
-          @wdio/jasmine-framework@9 @wdio/local-runner@9
-          @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+          webdriverio@10 puppeteer-core@25
+          @wdio/allure-reporter@10 @wdio/cli@10
+          @wdio/cucumber-framework@10 @wdio/globals@10
+          @wdio/jasmine-framework@10 @wdio/local-runner@10
+          @wdio/mocha-framework@10 @wdio/reporter@10
+          @wdio/spec-reporter@10 @wdio/types@10 expect-webdriverio@8
 
       # A minimum run deliberately installs below the development ranges, so
       # `npm ls` reports those packages as invalid and exits non-zero. Assert
@@ -92,11 +92,11 @@ jobs:
           puppeteer="$(installed puppeteer-core)"
           echo "webdriverio=${wdio} puppeteer-core=${puppeteer}"
           if [ "${{ matrix.dependencies }}" = 'minimum' ]; then
-            [ "${wdio}" = '9.29.1' ] || { echo 'expected webdriverio 9.29.1'; exit 1; }
-            [ "${puppeteer}" = '24.11.2' ] || { echo 'expected puppeteer-core 24.11.2'; exit 1; }
+            [ "${wdio}" = '10.1.0' ] || { echo 'expected webdriverio 10.1.0'; exit 1; }
+            [ "${puppeteer}" = '25.0.2' ] || { echo 'expected puppeteer-core 25.0.2'; exit 1; }
           else
-            case "${wdio}" in 9.*) ;; *) echo 'expected webdriverio 9.x'; exit 1;; esac
-            case "${puppeteer}" in 24.*) ;; *) echo 'expected puppeteer-core 24.x'; exit 1;; esac
+            case "${wdio}" in 10.*) ;; *) echo 'expected webdriverio 10.x'; exit 1;; esac
+            case "${puppeteer}" in 25.*) ;; *) echo 'expected puppeteer-core 25.x'; exit 1;; esac
           fi
 
       - name: Check Install Script Approvals
@@ -185,9 +185,9 @@ jobs:
       - name: Install Latest Supported Browser Stack
         run: >-
           corepack npm install --no-save --ignore-scripts
-          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
-          @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+          webdriverio@10 puppeteer-core@25 @wdio/cli@10 @wdio/globals@10
+          @wdio/local-runner@10 @wdio/mocha-framework@10 @wdio/reporter@10
+          @wdio/spec-reporter@10 @wdio/types@10 expect-webdriverio@8
 
       - name: Check Install Script Approvals
         run: corepack npm run check:install-scripts
@@ -363,11 +363,11 @@ jobs:
       - name: Install Latest Supported Framework Stack
         run: >-
           corepack npm install --no-save --ignore-scripts
-          webdriverio@9 puppeteer-core@24 @wdio/cli@9
-          @wdio/cucumber-framework@9 @wdio/globals@9
-          @wdio/jasmine-framework@9 @wdio/local-runner@9
-          @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+          webdriverio@10 puppeteer-core@25 @wdio/cli@10
+          @wdio/cucumber-framework@10 @wdio/globals@10
+          @wdio/jasmine-framework@10 @wdio/local-runner@10
+          @wdio/mocha-framework@10 @wdio/reporter@10
+          @wdio/spec-reporter@10 @wdio/types@10 expect-webdriverio@8
 
       - name: Check Install Script Approvals
         run: corepack npm run check:install-scripts
@@ -428,7 +428,7 @@ jobs:
   edge:
     name: Edge smoke (Windows)
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -445,9 +445,9 @@ jobs:
       - name: Install Latest Supported Edge Stack
         run: >-
           corepack npm install --no-save --ignore-scripts
-          webdriverio@9 puppeteer-core@24 @wdio/cli@9 @wdio/globals@9
-          @wdio/local-runner@9 @wdio/mocha-framework@9 @wdio/reporter@9
-          @wdio/spec-reporter@9 @wdio/types@9 expect-webdriverio@6
+          webdriverio@10 puppeteer-core@25 @wdio/cli@10 @wdio/globals@10
+          @wdio/local-runner@10 @wdio/mocha-framework@10 @wdio/reporter@10
+          @wdio/spec-reporter@10 @wdio/types@10 expect-webdriverio@8
 
       - name: Check Install Script Approvals
         run: corepack npm run check:install-scripts
@@ -457,6 +457,11 @@ jobs:
 
       - name: Run Edge Capture Smoke Test
         run: corepack npm run test:e2e:capture:edge
+
+      # Edge Classic cannot show that Edge's BiDi contexts map to the pages the
+      # service records; the tab-following suite decodes each segment's tab.
+      - name: Run Edge WebDriver BiDi Tab Following
+        run: corepack npm run test:e2e:edge
 
       - name: Collect Failure Diagnostics
         if: failure()

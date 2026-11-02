@@ -97,10 +97,49 @@ const createCrossOriginServer = (): Server => {
   })
 }
 
+// Solid-color tabs let a test decode which tab each recorded segment shows.
+// With `then`, clicking #act repaints the tab immediately, so a test can tell
+// whether recording had started before that action. #keys lists the keys the
+// tab received.
+const colorPage = (color: string, then: string | undefined): string => {
+  const repaint = then
+    ? ` onclick="document.documentElement.style.background = document.body.style.background = '${then}'"`
+    : ''
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>${color} tab</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: ${color}; }
+      button, a { margin: 1rem; }
+    </style>
+  </head>
+  <body>
+    <button id="act" type="button"${repaint}>act</button>
+    <a id="open-blank" href="/color/green" target="_blank">open green tab</a>
+    <output id="keys"></output>
+    <script>
+      document.addEventListener('keydown', (event) => {
+        document.getElementById('keys').textContent += event.key
+      })
+    </script>
+  </body>
+</html>`
+}
+
 const createPrimaryServer = (crossOriginUrl: string): Server => {
   return createServer((request, response) => {
-    const pathname = new URL(request.url ?? '/', 'https://fixture.invalid')
-      .pathname
+    const requestUrl = new URL(request.url ?? '/', 'https://fixture.invalid')
+    const pathname = requestUrl.pathname
+    const color = /^\/color\/(red|blue|green)$/u.exec(pathname)?.[1]
+    if (color) {
+      const then = /^(red|blue|green)$/u.exec(
+        requestUrl.searchParams.get('then') ?? '',
+      )?.[1]
+      sendHtml(response, colorPage(color, then))
+      return
+    }
 
     switch (pathname) {
       case '/':

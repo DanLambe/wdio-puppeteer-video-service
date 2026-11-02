@@ -8,9 +8,23 @@ import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
 const mergeSegmentsEnabled = ['1', 'true', 'yes'].includes(
   (process.env.WDIO_MERGE_SEGMENTS ?? '').toLowerCase(),
 )
+// Merging keeps the original segments beside the merged file.
+const keepMergedSegments = process.env.WDIO_MERGE_KEEP_SEGMENTS === '1'
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
+// WebDriver BiDi is WDIO 10's default; the Classic suite keeps WDIO's window
+// and frame switch commands covered.
+const protocol = process.env.WDIO_PROTOCOL === 'classic' ? 'classic' : 'bidi'
+// Edge runs the same suites, so its BiDi contexts are checked against the
+// pages the service records, not only Chrome's.
+const edge = process.env.WDIO_BROWSER === 'edge'
+const browserArgs = [
+  '--headless=new',
+  '--disable-gpu',
+  '--disable-dev-shm-usage',
+  '--window-size=1280,720',
+]
 const runMode =
   process.env.WDIO_VIDEO_MODE || (mergeSegmentsEnabled ? 'merge' : 'multipart')
 const resultsDir = path.resolve(
@@ -34,6 +48,13 @@ const expectedTestTitles = [
   'should handle viewport resizing',
   'should capture a deterministic animation',
   'should record a longer multi-step journey',
+  ...(protocol === 'bidi'
+    ? [
+        'should follow a held new window',
+        'should follow a tab the page opens',
+        'should return to its window when a switch to a closed one is rejected',
+      ]
+    : []),
 ]
 
 export const config: WebdriverIO.Config = {
@@ -48,7 +69,12 @@ export const config: WebdriverIO.Config = {
   // ==================
   // Specify Test Files
   // ==================
-  specs: ['./specs/**/*.test.ts'],
+  specs: [
+    './specs/**/*.test.ts',
+    protocol === 'classic'
+      ? './specs-classic/**/*.test.ts'
+      : './specs-bidi/**/*.test.ts',
+  ],
   // Patterns to exclude.
   exclude: [],
   //
@@ -58,15 +84,18 @@ export const config: WebdriverIO.Config = {
   maxInstances,
   capabilities: [
     {
-      browserName: 'chrome',
-      'goog:chromeOptions': {
-        args: [
-          '--headless=new',
-          '--disable-gpu',
-          '--disable-dev-shm-usage',
-          '--window-size=1280,720',
-        ],
-      },
+      ...(protocol === 'classic'
+        ? { 'wdio:enforceWebDriverClassic': true }
+        : {}),
+      ...(edge
+        ? {
+            browserName: 'MicrosoftEdge',
+            'ms:edgeOptions': { args: browserArgs },
+          }
+        : {
+            browserName: 'chrome',
+            'goog:chromeOptions': { args: browserArgs },
+          }),
     },
   ],
   //
@@ -99,7 +128,7 @@ export const config: WebdriverIO.Config = {
           },
           merge: {
             enabled: mergeSegmentsEnabled,
-            deleteSegments: true,
+            deleteSegments: !keepMergedSegments,
           },
         },
         integrations: { allure: { attach: 'retained' } },
@@ -132,6 +161,7 @@ export const config: WebdriverIO.Config = {
       expectedTitles: expectedTestTitles,
       expectVideos,
       mergeSegmentsEnabled,
+      segmentPartsKept: keepMergedSegments,
       fileNameStyle: 'test',
       expectedCodec: 'h264',
       runLabel: runMode,

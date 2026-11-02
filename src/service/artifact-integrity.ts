@@ -49,6 +49,8 @@ interface ArtifactReservation {
 export interface AtomicArtifactOptions {
   clock?: ClockBoundary
   desiredPath: string
+  /** Runs once the artifact is published, with its collision-safe path. */
+  onPublished?: (outputPath: string) => void
   produce: (temporaryPath: string) => Promise<boolean>
   process?: ProcessBoundary
   validate: (temporaryPath: string) => Promise<boolean>
@@ -152,6 +154,7 @@ export const publishAtomicArtifact = async (
 
     await linkArtifact(reservation.temporaryPath, reservation.outputPath)
     published = true
+    options.onPublished?.(reservation.outputPath)
     await fs.unlink(reservation.temporaryPath).catch((error: unknown) => {
       options.warn(
         `[WdioPuppeteerVideoService] Published artifact but could not remove its temporary link ${reservation.temporaryPath}: ${String(error)}`,

@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import { describe, expect, it } from 'vitest'
 import {
   compareRuns,
+  compareSwitching,
   completedPairs,
   median,
+  percentile,
   qualificationPassed,
   type RunResult,
+  SWITCHING_VARIANTS,
   summarizeSoak,
 } from '../../scripts/bench/pipeline/statistics.js'
 
@@ -240,5 +243,92 @@ describe('interrupted pipeline measurements', () => {
   it('does not mistake duplicate variants for a complete pair', () => {
     const runs = fixtureRuns().slice(0, 2)
     expect(completedPairs([...runs, runs[0] as RunResult])).toEqual([])
+  })
+})
+
+/** Recording off and candidate pairs whose every crossing takes `crossingMs`. */
+const switchingRuns = (
+  workers: number,
+  crossingMs: (pair: number) => number,
+  sameTabMs = 30,
+): RunResult[] =>
+  fixtureRuns()
+    .filter((run) => run.variant !== 'baseline')
+    .map((run) => {
+      const candidate = run.variant === 'candidate'
+      return {
+        ...run,
+        workers,
+        switching: {
+          crossingMs: Array.from({ length: 40 }, () =>
+            candidate ? crossingMs(run.pair) : 100,
+          ),
+          sameTabMs: Array.from({ length: 40 }, () =>
+            candidate ? sameTabMs : 25,
+          ),
+        },
+      }
+    })
+
+describe('tab switching budgets', () => {
+  it('pools added crossing latency against recording off', () => {
+    const [comparison] = compareSwitching(switchingRuns(2, () => 500))
+    expect(comparison).toMatchObject({
+      workload: '2cpu-2worker-all',
+      status: 'pass',
+      crossings: 200,
+      crossingP50Ms: 400,
+      crossingP95Ms: 400,
+      sameTabMs: 5,
+      candidateOverhead: 0.25,
+    })
+  })
+  it('lets one slow pair fail the 95th percentile', () => {
+    const runs = switchingRuns(2, (pair) => (pair === 5 ? 1_500 : 300))
+    const [comparison] = compareSwitching(runs)
+    expect(comparison).toMatchObject({
+      status: 'investigate',
+      crossingP50Ms: 200,
+      crossingP95Ms: 1_400,
+    })
+  })
+  it('applies each shape its own budget', () => {
+    const runs = switchingRuns(4, () => 1_600)
+    expect(compareSwitching(runs)[0]?.status).toBe('pass')
+    expect(compareSwitching(switchingRuns(2, () => 1_600))[0]?.status).toBe(
+      'investigate',
+    )
+  })
+  it('gates the cost of a command that stays on its tab', () => {
+    const runs = switchingRuns(2, () => 200, 50)
+    expect(compareSwitching(runs)[0]).toMatchObject({
+      status: 'investigate',
+      sameTabMs: 25,
+    })
+  })
+  it('never passes a shape without a budget', () => {
+    const runs = switchingRuns(3, () => 100)
+    expect(compareSwitching(runs)[0]?.status).toBe('investigate')
+  })
+  it('reports invalid and missing observations instead of timings', () => {
+    const invalid = switchingRuns(2, () => 200)
+    const candidate = invalid.find((run) => run.variant === 'candidate')
+    assert.ok(candidate)
+    candidate.valid = false
+    expect(compareSwitching(invalid)[0]?.status).toBe('candidate-invalid')
+    expect(compareSwitching(switchingRuns(2, () => 200).slice(2))[0]).toEqual({
+      workload: '2cpu-2worker-all',
+      status: 'incomplete',
+    })
+  })
+  it('keeps complete two-variant pairs when resuming', () => {
+    const runs = switchingRuns(2, () => 200).slice(0, 3)
+    expect(completedPairs(runs, SWITCHING_VARIANTS)).toEqual(runs.slice(0, 2))
+  })
+  it('takes nearest-rank percentiles', () => {
+    expect(percentile([5, 1, 4, 2, 3], 0.5)).toBe(3)
+    expect(percentile([5, 1, 4, 2, 3], 0.95)).toBe(5)
+    expect(percentile([7], 0.95)).toBe(7)
+    expect(() => percentile([], 0.5)).toThrow('finite')
   })
 })

@@ -10,6 +10,8 @@ interface VideoArtifactAssertionOptions {
   expectVideos: boolean
   expectZeroVideos?: boolean
   mergeSegmentsEnabled?: boolean
+  /** Merging keeps the original segments beside the merged file. */
+  segmentPartsKept?: boolean
   fileNameStyle?: VideoFileNameStyle
   expectedCodec?: string
   expectedWidth?: number
@@ -177,6 +179,7 @@ export const assertVideoArtifacts = async ({
   expectVideos,
   expectZeroVideos = false,
   mergeSegmentsEnabled = false,
+  segmentPartsKept = false,
   fileNameStyle = 'test',
   expectedCodec,
   expectedWidth,
@@ -235,7 +238,7 @@ export const assertVideoArtifacts = async ({
     )
   }
 
-  if (mergeSegmentsEnabled) {
+  if (mergeSegmentsEnabled && !segmentPartsKept) {
     const partArtifacts = mediaFiles.filter((file) => /_part\d+\./.test(file))
     if (partArtifacts.length > 0) {
       throw new Error(

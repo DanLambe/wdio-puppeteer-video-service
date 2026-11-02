@@ -95,6 +95,8 @@ const createHarness = (
     createCaptureEngine?.(session, log) ?? {
       afterWindowCommand: vi.fn(async () => {}),
       beforeWindowCommand: vi.fn(async () => {}),
+      currentWindowHandle: vi.fn(async () => undefined),
+      isRecordedPageClosed: false,
       resetRecording: vi.fn(async () => {
         session.resetRecording()
       }),
@@ -304,6 +306,7 @@ const createEntityCoordinator = (
       beginEntity: async () => 'entry',
       completeCurrent: manifest.completeCurrent,
       recordResult: async () => {},
+      recordSkippedEntity: async () => 'entry',
       setCurrentAttempt: () => {},
     },
   })
@@ -539,7 +542,7 @@ describe('RecordingController', () => {
       .mockResolvedValue(undefined)
     const queueDeferredMerge = vi
       .spyOn(harness.media, 'queueDeferredMerge')
-      .mockImplementation(async () => {
+      .mockImplementation(() => {
         harness.media.enqueue({
           kind: 'transcode',
           inputPath: 'input.webm',

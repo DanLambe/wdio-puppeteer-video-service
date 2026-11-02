@@ -6,7 +6,7 @@ on:
       baseline:
         description: Baseline commit to compare with the selected candidate ref
         required: true
-        default: 0b61d4f8a79be92dd4ffce315d4d2cc9e0a8a798
+        default: d4bae0f72226340866c85179e1e1956036eec181
         type: string
 
 permissions:

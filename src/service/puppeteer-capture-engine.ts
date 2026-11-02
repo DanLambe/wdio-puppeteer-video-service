@@ -9,9 +9,10 @@ import {
   type StartScreencastOptions,
   waitForBrowserToRender,
 } from './capture.js'
-import type { CaptureSession } from './capture-session.js'
+import type { CaptureSession, SegmentTabReason } from './capture-session.js'
 import {
   ACTIVE_PAGE_POLL_MS,
+  ACTIVE_PAGE_TIMEOUT_MS,
   type ActiveSegment,
   RECORDER_STOP_TIMEOUT_MS,
   type ResolvedTranscodeOptions,
@@ -21,7 +22,12 @@ import {
 } from './constants.js'
 import type { ServiceLogger } from './logging.js'
 import { describeError, isBenignStreamWriteError } from './normalization.js'
-import { findActivePage, PAGE_MARKER_PROPERTY } from './page-lookup.js'
+import {
+  beforeDeadline,
+  findActivePage,
+  findPageByTargetId,
+  PAGE_MARKER_PROPERTY,
+} from './page-lookup.js'
 import {
   classifySessionProtocol,
   describePuppeteerConnectionFailure,
@@ -38,9 +44,17 @@ export interface CaptureSegmentOutput {
   readonly transcodeEnabled: boolean
 }
 
+/** Which tab a segment records, and why it starts there. */
+export interface CaptureTarget {
+  /** A WebDriver BiDi browsing context; omitted, WDIO's current window. */
+  readonly contextId?: string
+  readonly reason?: SegmentTabReason
+}
+
 export interface CaptureStartOptions {
   readonly createOutput: () => Promise<CaptureSegmentOutput>
   readonly ffmpegPath: string
+  readonly target?: CaptureTarget
   readonly transcodeOptions: ResolvedTranscodeOptions
 }
 
@@ -60,7 +74,7 @@ export interface CaptureStopResult {
 
 export interface CaptureWindowOperations {
   runSerialized(task: () => Promise<void>): Promise<void>
-  startRecording(): Promise<boolean>
+  startRecording(reason?: SegmentTabReason): Promise<boolean>
   stopRecording(): Promise<void>
 }
 
@@ -93,6 +107,7 @@ export class PuppeteerCaptureEngine {
   private readonly log: ServiceLogger
   private readonly onConnectionFailure: (reason: string) => void
   private readonly onProtocolChanged: (protocol: SessionProtocol) => void
+  private activePage: Page | undefined
   private markerCounter = 0
   private readonly session: CaptureSession
   private readonly startScreencast: PuppeteerCaptureEngineOptions['startScreencast']
@@ -112,7 +127,9 @@ export class PuppeteerCaptureEngine {
     this.uuid = options.uuid
   }
 
-  async preparePage(): Promise<
+  async preparePage(
+    target: CaptureTarget = {},
+  ): Promise<
     | { readonly page: Page; readonly windowHandle: string | undefined }
     | undefined
   > {
@@ -124,8 +141,15 @@ export class PuppeteerCaptureEngine {
     if (!puppeteerBrowser) {
       return undefined
     }
-    const windowHandle = await browser.getWindowHandle().catch(() => undefined)
-    const page = await this.findSessionPage(browser, puppeteerBrowser)
+    const windowHandle =
+      target.contextId ??
+      (await browser.getWindowHandle().catch(() => undefined))
+    const page = await this.findPage(
+      browser,
+      puppeteerBrowser,
+      windowHandle,
+      target,
+    )
     if (!page) {
       this.log(
         'warn',
@@ -134,8 +158,115 @@ export class PuppeteerCaptureEngine {
       return undefined
     }
 
+    // Chrome does not paint a tab that is not in front, headless or not, so
+    // the recorded tab is brought forward as WebDriver's switchToWindow does.
     await page.bringToFront().catch(() => undefined)
     return { page, windowHandle }
+  }
+
+  /** Whether the page of the attached capture has closed underneath it. */
+  get isRecordedPageClosed(): boolean {
+    return this.activePage?.isClosed() ?? false
+  }
+
+  private async findPage(
+    browser: Browser,
+    puppeteerBrowser: PuppeteerBrowser,
+    windowHandle: string | undefined,
+    target: CaptureTarget,
+  ): Promise<Page | undefined> {
+    // A BiDi window handle is its top-level browsing context, whose id
+    // Chromium shares with the CDP target.
+    if (browser.isBidi && windowHandle) {
+      const page = await findPageByTargetId(puppeteerBrowser, windowHandle, {
+        clock: this.clock,
+      })
+      if (page) {
+        return page
+      }
+      this.log(
+        'debug',
+        `[WdioPuppeteerVideoService] No page has the target id of browsing context ${windowHandle}; finding it by a marker instead.`,
+      )
+      // WDIO's current window is never a stand-in for a requested context,
+      // so its marker goes into that context.
+      if (target.contextId) {
+        return this.findContextPage(browser, puppeteerBrowser, target.contextId)
+      }
+    }
+    return this.findSessionPage(browser, puppeteerBrowser)
+  }
+
+  private async findContextPage(
+    browser: Browser,
+    puppeteerBrowser: PuppeteerBrowser,
+    contextId: string,
+  ): Promise<Page | undefined> {
+    const markerId = this.nextPageMarkerId()
+    const setMarker = async (value: string | null): Promise<void> => {
+      await browser.scriptCallFunction({
+        functionDeclaration: `(property, id, value) => {
+          if (value === null) {
+            if (Reflect.get(globalThis, property) === id) {
+              Reflect.deleteProperty(globalThis, property)
+            }
+            return
+          }
+          Object.defineProperty(globalThis, property, {
+            configurable: true,
+            enumerable: false,
+            value,
+            writable: false,
+          })
+        }`,
+        target: { context: contextId },
+        awaitPromise: false,
+        arguments: [
+          { type: 'string', value: PAGE_MARKER_PROPERTY },
+          { type: 'string', value: markerId },
+          value === null ? { type: 'null' } : { type: 'string', value },
+        ],
+      })
+    }
+    // Marking and the search share one deadline. The marker is removed once
+    // it is set and the search is over, however late the browser sets it, and
+    // the removal never holds up the command waiting for this page.
+    const deadline = this.clock.now() + ACTIVE_PAGE_TIMEOUT_MS
+    const marking = setMarker(markerId)
+    const searched = Promise.withResolvers<void>()
+    void Promise.allSettled([marking, searched.promise])
+      .then(async ([marked]) => {
+        if (marked.status === 'fulfilled') {
+          await setMarker(null)
+        }
+      })
+      .catch(() => undefined)
+    try {
+      const marked = await beforeDeadline(
+        marking.then(() => true),
+        this.clock,
+        deadline,
+      )
+      if (!marked) {
+        this.log(
+          'debug',
+          '[WdioPuppeteerVideoService] Marking the browsing context to record timed out.',
+        )
+        return undefined
+      }
+      return await findActivePage(puppeteerBrowser, markerId, {
+        clock: this.clock,
+        timeoutMs: deadline - this.clock.now(),
+      })
+    } catch (error) {
+      this.log(
+        'debug',
+        `[WdioPuppeteerVideoService] Could not mark the browsing context to record: ${describeError(error)}`,
+      )
+      return undefined
+    } finally {
+      searched.resolve()
+    }
   }
 
   /**
@@ -230,7 +361,7 @@ export class PuppeteerCaptureEngine {
     let pendingSegment: ActiveSegment | undefined
     let pendingRecordingPath: string | undefined
     try {
-      const activePage = await this.preparePage()
+      const activePage = await this.preparePage(options.target)
       if (!activePage) {
         return { started: false }
       }
@@ -272,7 +403,9 @@ export class PuppeteerCaptureEngine {
         recorder,
         segment,
         windowHandle,
+        ...(options.target?.reason ? { reason: options.target.reason } : {}),
       })
+      this.activePage = page
       pendingRecorder = undefined
       pendingSegment = undefined
       pendingRecordingPath = undefined
@@ -292,6 +425,7 @@ export class PuppeteerCaptureEngine {
     options: Readonly<{ discard?: boolean }> = {},
   ): Promise<CaptureStopResult> {
     const { recorder, segment } = this.session.detachCapture()
+    this.activePage = undefined
     if (!recorder) {
       return { segment: undefined, streamOk: false }
     }
@@ -342,6 +476,7 @@ export class PuppeteerCaptureEngine {
 
   async resetRecording(): Promise<void> {
     const { recorder, segment } = this.session.detachCapture()
+    this.activePage = undefined
     await this.cleanupPartialCapture(recorder, segment)
     this.session.resetRecording()
   }
@@ -394,7 +529,11 @@ export class PuppeteerCaptureEngine {
         browser,
         this.capture.connectionTimeoutMs,
       )
-      const protocol = classifySessionProtocol(browser.capabilities, true)
+      const protocol = classifySessionProtocol(
+        browser.capabilities,
+        true,
+        browser.isBidi,
+      )
       this.session.setConnection(puppeteerBrowser, protocol)
       this.onProtocolChanged(protocol)
       this.log(
@@ -656,7 +795,7 @@ export class PuppeteerCaptureEngine {
     }
     this.session.advanceSegment()
     await this.clock.delay(SEGMENT_SWITCH_DELAY_MS)
-    await operations.startRecording()
+    await operations.startRecording('tab-closed')
   }
 
   private async switchWindowSegment(
@@ -672,6 +811,11 @@ export class PuppeteerCaptureEngine {
     }
     await operations.stopRecording()
     this.session.advanceSegment()
-    await operations.startRecording()
+    await operations.startRecording('switch-to-window')
+  }
+
+  /** WDIO's current window, which in a BiDi session is its context id. */
+  async currentWindowHandle(): Promise<string | undefined> {
+    return this.session.browser?.getWindowHandle().catch(() => undefined)
   }
 }

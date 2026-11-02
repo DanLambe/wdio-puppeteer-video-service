@@ -230,6 +230,43 @@ describe('artifact integrity', () => {
     )
   })
 
+  it('reports only the path it actually published', async () => {
+    const tempDir = await createTempDir(tempDirs)
+    const desiredPath = path.join(tempDir, 'final_part1.mp4')
+    await fs.writeFile(desiredPath, 'earlier-media', 'utf8')
+    const onPublished = vi.fn()
+    const produce = async (temporaryPath: string) => {
+      await fs.writeFile(temporaryPath, 'new-media', 'utf8')
+      return true
+    }
+
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        onPublished,
+        produce,
+        validate: async () => false,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBeUndefined()
+    expect(onPublished).not.toHaveBeenCalled()
+
+    const publishedPath = path.join(tempDir, 'final_run2_part1.mp4')
+    await expect(
+      publishAtomicArtifact({
+        desiredPath,
+        onPublished,
+        produce,
+        validate: async () => true,
+        warn: vi.fn(),
+      }),
+    ).resolves.toBe(publishedPath)
+    expect(onPublished).toHaveBeenCalledExactlyOnceWith(publishedPath)
+    await expect(fs.readFile(desiredPath, 'utf8')).resolves.toBe(
+      'earlier-media',
+    )
+  })
+
   it('cleans reservations when production fails before writing output', async () => {
     const tempDir = await createTempDir(tempDirs)
     const desiredPath = path.join(tempDir, 'failed.mp4')

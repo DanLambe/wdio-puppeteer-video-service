@@ -1,6 +1,8 @@
 import type { Frameworks, Services } from '@wdio/types'
 import type { Browser } from 'webdriverio'
 import type { WorkerCompositionOverrides } from './service/composition.js'
+import * as logging from './service/logging.js'
+import { describeUnsupportedWorker } from './service/protocol.js'
 import { WdioPuppeteerVideoWorkerRuntime } from './service/worker-runtime.js'
 import type { WdioPuppeteerVideoServiceOptions } from './types.js'
 
@@ -8,6 +10,30 @@ import type { WdioPuppeteerVideoServiceOptions } from './types.js'
 export default class WdioPuppeteerVideoService
   implements Services.ServiceInstance
 {
+  /**
+   * Called by WDIO before it constructs the worker service. Capabilities this
+   * service can never record skip it, so those workers write no manifest
+   * entries.
+   */
+  static shouldRun(options: unknown, capabilities: unknown): boolean {
+    const reason = describeUnsupportedWorker(capabilities)
+    if (!reason) {
+      return true
+    }
+    const logLevel =
+      options && typeof options === 'object'
+        ? Reflect.get(options, 'logLevel')
+        : undefined
+    logging.writeLog(
+      logging.normalizeLogLevel(
+        typeof logLevel === 'string' ? logLevel : undefined,
+      ),
+      'warn',
+      `[WdioPuppeteerVideoService] Recording skipped for this worker: ${reason}.`,
+    )
+    return false
+  }
+
   private readonly worker: WdioPuppeteerVideoWorkerRuntime
 
   constructor(
@@ -79,11 +105,16 @@ export default class WdioPuppeteerVideoService
     await this.worker.onReload(oldSessionId, newSessionId)
   }
 
-  async beforeCommand(commandName: string): Promise<void> {
-    await this.worker.beforeCommand(commandName)
+  async beforeCommand(commandName: string, args?: unknown[]): Promise<void> {
+    await this.worker.beforeCommand(commandName, args)
   }
 
-  async afterCommand(commandName: string): Promise<void> {
-    await this.worker.afterCommand(commandName)
+  async afterCommand(
+    commandName: string,
+    args?: unknown[],
+    result?: unknown,
+    error?: Error,
+  ): Promise<void> {
+    await this.worker.afterCommand(commandName, args, result, error)
   }
 }

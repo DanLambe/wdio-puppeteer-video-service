@@ -53,6 +53,7 @@ export interface MergeExecutionOptions {
   deleteSegments: boolean
   writeFailureContext: string
   ffmpegOperation: string
+  onPublished?: (outputPath: string) => void
 }
 
 export interface ResolvedRetryContext {

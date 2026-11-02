@@ -7,6 +7,42 @@ import type { ScreencastRecorder } from '../../src/service/screencast-recorder.j
 const createSegment = (recordingPath = 'capture.webm') =>
   ({ recordingPath }) as ActiveSegment
 
+describe('capture session tab provenance', () => {
+  it('numbers tabs by first use and records why each segment started', () => {
+    const session = new CaptureSession()
+    const attach = (windowHandle: string | undefined, reason?: 'command') => {
+      session.attachCapture({
+        recorder: {} as ScreencastRecorder,
+        segment: {} as ActiveSegment,
+        windowHandle,
+        ...(reason ? { reason } : {}),
+      })
+      session.detachCapture()
+    }
+    session.beginRecording('tabs')
+    expect(session.currentSegmentStarted).toBe(false)
+
+    attach('tab-a')
+    expect(session.currentSegmentStarted).toBe(true)
+    session.advanceSegment()
+    attach('tab-b')
+    session.advanceSegment()
+    attach('tab-a', 'command')
+    session.advanceSegment()
+    attach(undefined)
+
+    expect([...session.segmentTabs]).toEqual([
+      [1, { contextId: 'tab-a', ordinal: 1, reason: 'start' }],
+      [2, { contextId: 'tab-b', ordinal: 2, reason: 'command' }],
+      [3, { contextId: 'tab-a', ordinal: 1, reason: 'command' }],
+    ])
+    expect(session.currentSegmentStarted).toBe(false)
+
+    session.resetRecording()
+    expect(session.segmentTabs.size).toBe(0)
+  })
+})
+
 describe('capture session', () => {
   it('owns browser and protocol connection state', () => {
     const session = new CaptureSession()

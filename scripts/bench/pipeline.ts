@@ -6,28 +6,39 @@ import { parseArgs, promisify } from 'node:util'
 import {
   prepareOutputDirectory,
   resolveBaseline,
+  resolveExecutable,
   resolveImage,
 } from './pipeline/inputs.js'
 import { hashTree } from './pipeline/snapshot.js'
 import {
   compareRuns,
+  compareSwitching,
   completedPairs,
   qualificationPassed,
   type RunResult,
+  SWITCHING_VARIANTS,
+  VARIANTS,
 } from './pipeline/statistics.js'
 
 const { values } = parseArgs({
   options: {
     baseline: {
       type: 'string',
-      default: '0b61d4f8a79be92dd4ffce315d4d2cc9e0a8a798',
+      default: 'd4bae0f72226340866c85179e1e1956036eec181',
     },
     image: { type: 'string', default: 'wdio-video-pipeline:local' },
     output: { type: 'string' },
     resume: { type: 'string' },
     smoke: { type: 'boolean', default: false },
+    workload: { type: 'string', default: 'standard' },
   },
 })
+if (values.workload !== 'standard' && values.workload !== 'switching') {
+  throw new Error('--workload must be standard or switching')
+}
+// Tab switching is measured against recording off: 1.0.0 cannot follow tabs.
+const switching = values.workload === 'switching'
+const variants = switching ? SWITCHING_VARIANTS : VARIANTS
 const root = path.resolve(import.meta.dirname, '../..')
 const outputRoot = path.join(root, 'tests', 'results', 'pipeline')
 const directory = await prepareOutputDirectory(
@@ -41,9 +52,11 @@ interface Environment {
   imageId: string
   candidateSourceSha256: string
   harnessSha256: string
+  validationSha256?: string
   availableCpus: number
   dockerVersion: string
   smoke: boolean
+  workload?: 'standard' | 'switching'
 }
 const previous: Environment | undefined = values.resume
   ? (JSON.parse(
@@ -55,13 +68,24 @@ if (previous?.smoke || (values.resume && (values.smoke || values.output))) {
     'Resume requires an interrupted full run and cannot be combined with smoke or output',
   )
 }
+if (previous && (previous.workload ?? 'standard') !== values.workload) {
+  throw new Error(
+    `Resume requires --workload ${previous.workload ?? 'standard'}`,
+  )
+}
+// Resolved once: every call in a run uses the same binaries, recorded below.
+const executables = {
+  docker: resolveExecutable('docker'),
+  git: resolveExecutable('git'),
+  tar: resolveExecutable('tar'),
+}
 const execute = (
-  command: string,
+  command: keyof typeof executables,
   args: string[],
   timeout = 60_000,
   cwd = root,
 ) => {
-  const run = spawnSync(command, args, {
+  const run = spawnSync(executables[command], args, {
     cwd,
     encoding: 'utf8',
     timeout,
@@ -103,19 +127,21 @@ if (!previous) {
   // Relative paths: GNU tar, first on PATH in Git Bash and MSYS shells, reads
   // an absolute Windows path's drive letter as a remote host.
   execute('tar', ['-xf', 'baseline.tar', '-C', 'baseline'], undefined, snapshot)
-  for (const relative of [
-    'src',
-    'scripts/bench/pipeline',
-    'tests/utils',
-    'tsconfig.json',
-    'tsconfig.spec.json',
-  ]) {
-    await fs.cp(
-      path.join(root, relative),
-      path.join(snapshot, 'candidate', relative),
-      { recursive: true },
-    )
-  }
+  await Promise.all(
+    [
+      'src',
+      'scripts/bench/pipeline',
+      'tests/utils',
+      'tsconfig.json',
+      'tsconfig.spec.json',
+    ].map((relative) =>
+      fs.cp(
+        path.join(root, relative),
+        path.join(snapshot, 'candidate', relative),
+        { recursive: true },
+      ),
+    ),
+  )
 }
 if (!previous) {
   await fs.writeFile(
@@ -130,11 +156,16 @@ if (!previous) {
         harnessSha256: await hashTree(
           path.join(snapshot, 'candidate/scripts/bench/pipeline'),
         ),
+        // The media oracle the harness imports.
+        validationSha256: await hashTree(
+          path.join(snapshot, 'candidate/tests/utils'),
+        ),
         dependencyLockSha256: createHash('sha256')
           .update(await fs.readFile(path.join(root, 'package-lock.json')))
           .digest('hex'),
         imageId,
         availableCpus,
+        executables,
         dockerVersion: execute('docker', [
           'version',
           '--format',
@@ -142,6 +173,7 @@ if (!previous) {
         ]),
         startedAt: new Date().toISOString(),
         smoke: values.smoke,
+        workload: values.workload,
       },
       null,
       2,
@@ -161,14 +193,16 @@ if (previous) {
       previous.candidateSourceSha256 ||
     (await hashTree(
       path.join(snapshot, 'candidate/scripts/bench/pipeline'),
-    )) !== previous.harnessSha256
+    )) !== previous.harnessSha256 ||
+    (await hashTree(path.join(snapshot, 'candidate/tests/utils'))) !==
+      previous.validationSha256
   ) {
     throw new Error(
       'The saved environment or source snapshot changed; start a fresh comparison',
     )
   }
   const prior = await fs.readFile(path.join(directory, 'results.json'), 'utf8')
-  results = completedPairs(JSON.parse(prior) as RunResult[])
+  results = completedPairs(JSON.parse(prior) as RunResult[], variants)
   await fs.writeFile(
     path.join(directory, `before-resume-${resumeStamp}.json`),
     prior,
@@ -183,6 +217,16 @@ const cancel = () =>
   interruption.abort(new Error('Pipeline measurement interrupted'))
 process.once('SIGINT', cancel)
 process.once('SIGTERM', cancel)
+const hostUser =
+  process.getuid && process.getgid
+    ? ['--user', `${process.getuid()}:${process.getgid()}`, '-e', 'HOME=/tmp']
+    : []
+const dwellMs = (soak: boolean): number => {
+  if (soak) {
+    return 300_000
+  }
+  return switching ? 1_000 : 2_000
+}
 const run = async (
   cpus: number,
   workers: number,
@@ -191,7 +235,8 @@ const run = async (
   variant: RunResult['variant'],
   soak = false,
 ) => {
-  const label = `${cpus}cpu-${workers}worker-${retain}-${pair}-${variant}${soak ? '-soak' : ''}${previous ? `-resumed-${resumeStamp}` : ''}`
+  const resumed = previous ? `-resumed-${resumeStamp}` : ''
+  const label = `${cpus}cpu-${workers}worker-${retain}-${pair}-${variant}${soak ? '-soak' : ''}${resumed}`
   const name = `wdio-pipeline-${process.pid}-${label}`
   const source = path.join(
     snapshot,
@@ -212,6 +257,9 @@ const run = async (
     '--memory=7g',
     '--memory-swap=7g',
     '--shm-size=2g',
+    // The image runs as its unprivileged user. A POSIX host runs it as the
+    // host user instead, who owns the results directory it writes to.
+    ...hostUser,
     ...mount(source, '/work/src'),
     ...mount(
       path.join(snapshot, 'candidate/scripts/bench/pipeline'),
@@ -236,8 +284,9 @@ const run = async (
       PIPELINE_CPUS: cpus,
       PIPELINE_WORKERS: workers,
       PIPELINE_RETAIN: retain,
-      PIPELINE_DWELL_MS: soak ? 300_000 : 2_000,
+      PIPELINE_DWELL_MS: dwellMs(soak),
       PIPELINE_SOAK: soak ? '1' : '0',
+      PIPELINE_WORKLOAD: values.workload,
     }).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
     imageId,
     'node',
@@ -246,7 +295,7 @@ const run = async (
     '/work/scripts/bench/pipeline/run.ts',
   ]
   try {
-    const { stdout } = await promisify(execFile)('docker', args, {
+    const { stdout } = await promisify(execFile)(executables.docker, args, {
       cwd: root,
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
@@ -260,7 +309,7 @@ const run = async (
     console.error(error instanceof Error ? error.message : error)
   } finally {
     // Removing this owned container also terminates any remaining browser/encoder descendants.
-    spawnSync('docker', ['rm', '-f', name], {
+    spawnSync(executables.docker, ['rm', '-f', name], {
       windowsHide: true,
       stdio: 'ignore',
       timeout: 30_000,
@@ -311,24 +360,28 @@ const run = async (
   )
 }
 
-const shapes = values.smoke
-  ? [[2, 2]]
-  : [
-      [2, 2],
-      [4, 4],
-      [2, 4],
-    ]
-const retentions = values.smoke
-  ? (['all'] as const)
-  : (['all', 'failures'] as const)
+let shapes = [
+  [2, 2],
+  [4, 4],
+  [2, 4],
+]
+if (values.smoke) {
+  shapes = [[2, 2]]
+} else if (switching) {
+  shapes = [
+    [2, 2],
+    [2, 4],
+  ]
+}
+const retentions =
+  values.smoke || switching
+    ? (['all'] as const)
+    : (['all', 'failures'] as const)
 for (const [cpus, workers] of shapes) {
   for (const retain of retentions) {
     for (let pair = 1; pair <= (values.smoke ? 1 : 5); pair += 1) {
       // Alternate ordering to expose rather than systematically favor warm-cache effects.
-      const order: RunResult['variant'][] =
-        pair % 2
-          ? ['off', 'baseline', 'candidate']
-          : ['candidate', 'baseline', 'off']
+      const order = pair % 2 ? [...variants] : [...variants].reverse()
       for (const variant of order) {
         if (
           results.some(
@@ -348,22 +401,31 @@ for (const [cpus, workers] of shapes) {
     }
   }
 }
-if (!values.smoke && !results.some((result) => result.soak)) {
+const soakRequired = !values.smoke && !switching
+if (soakRequired && !results.some((result) => result.soak)) {
   await run(2, 1, 'all', 1, 'candidate', true)
 }
-const comparisons = compareRuns(results, values.smoke ? 1 : 5)
+const comparisons = (switching ? compareSwitching : compareRuns)(
+  results,
+  values.smoke ? 1 : 5,
+)
 // An invalid baseline stays in results.json and is reported, but it cannot
 // make a valid candidate fail or an invalid one pass.
 const passed = qualificationPassed(results, comparisons, {
   workloads: shapes.length * retentions.length,
-  soak: !values.smoke,
+  soak: soakRequired,
 })
 process.off('SIGINT', cancel)
 process.off('SIGTERM', cancel)
 await fs.writeFile(
   path.join(directory, 'comparison.json'),
   JSON.stringify(
-    { qualification: !values.smoke, passed, comparisons },
+    {
+      qualification: !values.smoke,
+      workload: values.workload,
+      passed,
+      comparisons,
+    },
     null,
     2,
   ),

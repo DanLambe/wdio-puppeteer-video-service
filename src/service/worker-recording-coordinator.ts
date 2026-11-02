@@ -5,6 +5,7 @@ import type {
 } from '../types.js'
 import type { SlugMetadata } from '../video-name-utils.js'
 import type { AllureAttachmentResult } from './allure-integration.js'
+import type { SegmentTab } from './capture-session.js'
 import type { ResolvedRetryContext } from './constants.js'
 import { type ServiceLogger, shouldLog } from './logging.js'
 import type {
@@ -12,6 +13,7 @@ import type {
   ManifestEntityInput,
 } from './manifest-runtime.js'
 import { describeError } from './normalization.js'
+import { PARALLEL_MODE_UNSUPPORTED_REASON } from './parallel-mode.js'
 import type {
   RecordingEntity,
   RecordingEntityOutcome,
@@ -33,6 +35,10 @@ export interface RecordingManifestPort {
     options: CompleteManifestEntryOptions,
   ): Promise<string | undefined>
   recordResult(result: ManifestResult): Promise<void>
+  recordSkippedEntity(
+    input: ManifestEntityInput,
+    options: { readonly reason: string; readonly result: ManifestResult },
+  ): Promise<string>
   setCurrentAttempt(attempt: number): void
 }
 
@@ -48,6 +54,8 @@ export interface RecordingMediaFinalization {
   readonly captureFailure?: string
   readonly deferred: boolean
   readonly paths: readonly string[]
+  /** Tabs of the retained segments, keyed by part number. */
+  readonly tabs?: ReadonlyMap<number, SegmentTab>
 }
 
 export interface WorkerRecordingActions {
@@ -107,6 +115,7 @@ export class WorkerRecordingCoordinator
   private specFileRetryAttempt = 0
   private specHadFailure = false
   private specPaths: readonly string[] = Object.freeze([])
+  private parallelSpecRecorded = false
 
   constructor(options: WorkerRecordingCoordinatorOptions) {
     this.actions = options.actions
@@ -136,6 +145,10 @@ export class WorkerRecordingCoordinator
   }
 
   async beginEntity(entity: RecordingEntity): Promise<void> {
+    if (this.testsOverlap) {
+      await this.recordParallelEntity(entity)
+      return
+    }
     const manifestEntryAlreadyActive =
       this.isSpecScope && !!this.manifest?.currentEntryId
     await this.manifest?.beginEntity({
@@ -165,6 +178,10 @@ export class WorkerRecordingCoordinator
   }
 
   async endEntity(outcome: RecordingEntityOutcome): Promise<void> {
+    if (this.testsOverlap) {
+      // Overlapping tests cannot be told apart here, so no result is recorded.
+      return
+    }
     // WDIO reports passed=false for runtime skips; they are not test failures.
     const nonFailing = outcome.passed || outcome.manifestResult === 'skipped'
     let manifestFailure: { readonly error: unknown } | undefined
@@ -197,7 +214,35 @@ export class WorkerRecordingCoordinator
     this.resetEntityState()
   }
 
+  /** In WebdriverIO's parallelMode, a worker's tests run at the same time. */
+  private get testsOverlap(): boolean {
+    return (
+      this.actions.getAvailability().reason === PARALLEL_MODE_UNSUPPORTED_REASON
+    )
+  }
+
+  private async recordParallelEntity(entity: RecordingEntity): Promise<void> {
+    if (this.isSpecScope) {
+      if (this.parallelSpecRecorded) {
+        return
+      }
+      this.parallelSpecRecorded = true
+    }
+    await this.manifest?.recordSkippedEntity(
+      {
+        test: entity.manifestTest,
+        scope: this.options.recording.scope,
+        specPaths: [...this.specPaths],
+      },
+      {
+        reason: PARALLEL_MODE_UNSUPPORTED_REASON,
+        result: entity.manifestResultWhenSkipped,
+      },
+    )
+  }
+
   private resetEntityState(): void {
+    this.parallelSpecRecorded = false
     this.activeRecordingRetryCount = 0
     this.entityAttemptCount.clear()
     this.patternRegexCache.clear()
@@ -353,6 +398,7 @@ export class WorkerRecordingCoordinator
           result,
           paths: finalized.paths,
           processing: this.options.processing,
+          ...(finalized.tabs ? { tabs: finalized.tabs } : {}),
         }),
       )
       const allureResult = await this.allure?.attachRetainedVideos(

@@ -790,6 +790,117 @@ describe('report model and HTML renderer', () => {
     )
   })
 
+  it('labels videos with their tabs when a recording used more than one', async () => {
+    const runId = 'tab-run'
+    const tab = (ordinal: number, reason: string) =>
+      ({ ordinal, reason, contextHash: `hash-${ordinal.toString()}` }) as never
+    const media = (name: string) => ({
+      path: name,
+      mimeType: 'video/webm' as const,
+      size: 10,
+    })
+    const entry = (
+      id: string,
+      capture: ManifestEntryV1['capture'],
+    ): ManifestEntryV1 => ({
+      ...createEntryWithoutTest(runId),
+      id,
+      spec: `tests/specs/${id}.ts`,
+      capture,
+    })
+    const outputDir = await createTempDir()
+    for (const name of [
+      'a_part1.webm',
+      'a_part2.webm',
+      'a_part3.webm',
+      'b.webm',
+      'c_part1.webm',
+      'd_part1.webm',
+      'd_part2.webm',
+      'd.webm',
+    ]) {
+      await fs.writeFile(path.join(outputDir, name), 'media')
+    }
+    const model = await createReportModel({
+      outputDir,
+      runId,
+      fragments: [],
+      run: createRun(runId, [
+        entry('a-segments', {
+          decision: 'recorded',
+          segments: [
+            { ...media('a_part1.webm'), tab: tab(1, 'start') },
+            { ...media('a_part2.webm'), tab: tab(2, 'command') },
+            { ...media('a_part3.webm'), tab: tab(1, 'a-later-reason') },
+          ],
+        }),
+        entry('b-merged', {
+          decision: 'recorded',
+          segments: [media('b.webm')],
+          final: {
+            ...media('b.webm'),
+            tabs: [tab(1, 'start'), tab(2, 'command'), tab(1, 'tab-closed')],
+          },
+        }),
+        entry('c-single', {
+          decision: 'recorded',
+          segments: [{ ...media('c_part1.webm'), tab: tab(1, 'start') }],
+          final: { ...media('c_part1.webm'), tabs: [tab(1, 'start')] },
+        }),
+        // A merge that kept its parts lists all three files.
+        entry('d-kept', {
+          decision: 'recorded',
+          segments: [
+            { ...media('d_part1.webm'), tab: tab(1, 'start') },
+            { ...media('d_part2.webm'), tab: tab(2, 'command') },
+            {
+              ...media('d.webm'),
+              tabs: [tab(1, 'start'), tab(2, 'command')],
+            },
+          ],
+        }),
+      ]),
+      initialDiagnostics: [],
+    })
+
+    expect(model.items.map((item) => item.media.map((m) => m.tabs))).toEqual([
+      [
+        [{ ordinal: 1, reason: 'start' }],
+        [{ ordinal: 2, reason: 'command' }],
+        [{ ordinal: 1, reason: 'a-later-reason' }],
+      ],
+      [
+        [
+          { ordinal: 1, reason: 'start' },
+          { ordinal: 2, reason: 'command' },
+          { ordinal: 1, reason: 'tab-closed' },
+        ],
+      ],
+      [undefined],
+      [
+        [{ ordinal: 1, reason: 'start' }],
+        [{ ordinal: 2, reason: 'command' }],
+        [
+          { ordinal: 1, reason: 'start' },
+          { ordinal: 2, reason: 'command' },
+        ],
+      ],
+    ])
+    const html = renderStaticVideoReport(model)
+    expect(html).toContain(
+      '<span class="tab-label">Tab 1 · recording started</span>',
+    )
+    expect(html).toContain(
+      '<span class="tab-label">Tab 2 · test command</span>',
+    )
+    expect(html).toContain(
+      '<span class="tab-label">Tab 1 · a-later-reason</span>',
+    )
+    expect(html).toContain('<span class="tab-label">Tabs 1 → 2 → 1</span>')
+    expect(html).toContain('<span class="tab-label">Tabs 1 → 2</span>')
+    expect(html.match(/class="tab-label"/gu)).toHaveLength(7)
+  })
+
   it('renders deterministic CSP, error, and large-media markup', () => {
     const model: ReportModel = {
       runId: 'stable-render',

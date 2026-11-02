@@ -8,9 +8,15 @@ import { finished } from 'node:stream/promises'
 import { parseArgs } from 'node:util'
 import { startPipelineFixture } from '../../scripts/bench/pipeline/fixture.js'
 import { parsePackResult } from '../../scripts/check-packed-consumer.js'
-import { isVideoManifest } from '../../src/manifest.js'
+import { isVideoManifest, type ManifestEntryV1 } from '../../src/manifest.js'
+import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
+import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
+import { startFixtureServer } from '../fixtures/fixture-server.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { countFrameColors, probeMediaFile } from '../utils/media-probe.js'
+import { decodeColorTimeline } from '../utils/media-timeline.js'
+import { dominantColor, orderSegments } from '../utils/segment-colors.js'
+import { toTabSteps } from '../utils/tab-provenance.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { requireE2eFfmpeg } from './ffmpeg-detection.js'
@@ -40,6 +46,8 @@ assert.ok(
   process.env.npm_execpath,
   'Run through the test:consumer:e2e npm script',
 )
+const SMOKE_TITLE = 'retains playable video with reporter and Allure'
+const TABS_TITLE = 'follows a held tab and returns for an implicit action'
 const root = path.resolve(import.meta.dirname, '../..')
 await fs.mkdir(path.join(root, 'tests/results'), { recursive: true })
 const resultsDir = await fs.mkdtemp(
@@ -110,10 +118,10 @@ try {
   for (const name of packages) {
     const special =
       name === 'puppeteer-core'
-        ? ['24.11.2', '24']
+        ? ['25.0.2', '25']
         : name === 'expect-webdriverio'
-          ? ['5.7.0', '6']
-          : ['9.29.1', '9']
+          ? ['8.0.0', '8']
+          : ['10.1.0', '10']
     dependencies[name] =
       values.peers === 'installed'
         ? (
@@ -152,13 +160,18 @@ try {
     path.join(consumer, 'package-lock.json'),
     path.join(resultsDir, 'consumer-lock.json'),
   )
-  await fs.writeFile(
-    path.join(resultsDir, 'peer-tree.json'),
-    npm(['ls', '--all', '--json']),
+  const peerTree = npm(['ls', '--all', '--json'])
+  await fs.writeFile(path.join(resultsDir, 'peer-tree.json'), peerTree)
+  const resolvedPeers = readResolvedPeers(peerTree)
+  console.log(
+    `[consumer] Resolved peers: ${Object.entries(resolvedPeers)
+      .map(([name, version]) => `${name}@${version}`)
+      .join(', ')}`,
   )
   const ffmpeg = (await requireE2eFfmpeg()).resolvedPath
   assert.ok(ffmpeg, 'Consumer test requires decoded-media assertions')
   const fixture = await startPipelineFixture()
+  const tabsFixture = await startFixtureServer()
   const log = createWriteStream(path.join(resultsDir, 'wdio.log'))
   try {
     const child = spawn(
@@ -176,6 +189,7 @@ try {
           ...process.env,
           FFMPEG_PATH: ffmpeg,
           WDIO_FIXTURE_BASE_URL: fixture.url,
+          CONSUMER_TABS_BASE_URL: tabsFixture.baseUrl,
           WDIO_RESULTS_DIR: resultsDir,
           CONSUMER_PROTOCOL: values.protocol,
           CONSUMER_FRAME_PRIMING: values.priming,
@@ -192,6 +206,7 @@ try {
     log.end()
     await finished(log)
     await fixture.close()
+    await tabsFixture.close()
   }
   const installedValidation = spawnSync(
     process.execPath,
@@ -204,8 +219,11 @@ try {
   )
   assert.ok(isVideoManifest(manifest))
   const entries = manifest.runs.flatMap((run) => run.entries)
-  assert.equal(entries.length, 1)
-  const entry = entries[0]
+  const bidi = values.protocol === 'bidi'
+  assert.equal(entries.length, bidi ? 2 : 1)
+  const entry = entries.find(
+    (candidate) => candidate.test?.name === SMOKE_TITLE,
+  )
   assert.ok(entry)
   assert.equal(entry.browser.protocol, `${values.protocol}+cdp`)
   assert.equal(entry.capture.decision, 'recorded')
@@ -220,7 +238,10 @@ try {
   assert.ok(media.durationSeconds >= 1.3)
   const colors = await countFrameColors(ffmpeg, mediaPath, 1)
   assert.ok(colors.green > colors.total * 0.7)
-  const expectedTitles = ['retains playable video with reporter and Allure']
+  if (bidi) {
+    await assertConsumerTabs(entries, resultsDir, ffmpeg)
+  }
+  const expectedTitles = [SMOKE_TITLE, ...(bidi ? [TABS_TITLE] : [])]
   await assertStaticVideoReport({
     resultsDir,
     expectedTitles,
@@ -240,6 +261,7 @@ try {
         protocol: values.protocol,
         priming: values.priming,
         node: process.version,
+        resolvedPeers,
         tools: manifest.runs[0]?.tools,
         browser: entry.browser,
         media,
@@ -254,4 +276,46 @@ try {
   )
 } finally {
   await fs.rm(consumer, { recursive: true, force: true, maxRetries: 3 })
+}
+
+/** Versions npm resolved for the peers this run qualifies. */
+function readResolvedPeers(peerTree: string): Record<string, string> {
+  const tree = JSON.parse(peerTree) as {
+    dependencies?: Record<string, { version?: string }>
+  }
+  return Object.fromEntries(
+    packages.map((name) => [
+      name,
+      tree.dependencies?.[name]?.version ?? 'missing',
+    ]),
+  )
+}
+
+/** Each part shows the tab it was recorded on: red, the held blue tab, red. */
+async function assertConsumerTabs(
+  entries: readonly ManifestEntryV1[],
+  directory: string,
+  ffmpegPath: string,
+): Promise<void> {
+  const entry = entries.find((candidate) => candidate.test?.name === TABS_TITLE)
+  assert.equal(entry?.capture.decision, 'recorded')
+  const passthrough = resolveTimestampPassthroughArgs(
+    await readFfmpegVersion(ffmpegPath),
+  )
+  const parts = orderSegments(entry?.capture.segments ?? []).map((segment) => ({
+    color: dominantColor(
+      decodeColorTimeline(
+        ffmpegPath,
+        path.join(directory, segment.path),
+        30,
+        passthrough,
+      ).spans,
+    ),
+    tab: toTabSteps([segment.tab])[0],
+  }))
+  assert.deepEqual(parts, [
+    { color: 'red', tab: [1, 'start'] },
+    { color: 'blue', tab: [2, 'command'] },
+    { color: 'red', tab: [1, 'command'] },
+  ])
 }

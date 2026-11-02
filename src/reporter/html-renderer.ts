@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto'
-import type { ReportItem, ReportMedia, ReportModel } from './report-model.js'
+import type {
+  ReportItem,
+  ReportMedia,
+  ReportModel,
+  ReportTab,
+} from './report-model.js'
 import type {
   ReporterDiagnostic,
   ReporterErrorDetails,
@@ -100,7 +105,28 @@ const renderMedia = (media: ReportMedia): string => {
   if (!media.available) {
     return `<div class="missing-media"><strong>Missing media</strong><br>${escapeHtml(media.path)}</div>`
   }
-  return `<figure><video controls preload="metadata"><source src="${escapeHtml(media.href)}" type="${escapeHtml(media.mimeType)}"></video><figcaption><a href="${escapeHtml(media.href)}">${escapeHtml(media.path)}</a> · ${formatBytes(media.size)}${dimensions}</figcaption></figure>`
+  const tabs = media.tabs?.length
+    ? `<span class="tab-label">${escapeHtml(formatTabs(media.tabs))}</span> · `
+    : ''
+  return `<figure><video controls preload="metadata"><source src="${escapeHtml(media.href)}" type="${escapeHtml(media.mimeType)}"></video><figcaption>${tabs}<a href="${escapeHtml(media.href)}">${escapeHtml(media.path)}</a> · ${formatBytes(media.size)}${dimensions}</figcaption></figure>`
+}
+
+const TAB_REASON_LABELS: Readonly<Record<string, string>> = {
+  start: 'recording started',
+  command: 'test command',
+  'switch-to-window': 'window switch',
+  'tab-closed': 'previous tab closed',
+  'close-failed': 'close refused',
+  'switch-failed': 'switch refused',
+}
+
+/** "Tab 2 · test command" for one segment, "Tabs 1 → 2 → 1" for a merge. */
+const formatTabs = (tabs: readonly ReportTab[]): string => {
+  const [only] = tabs
+  if (only && tabs.length === 1) {
+    return `Tab ${only.ordinal.toString()} · ${TAB_REASON_LABELS[only.reason] ?? only.reason}`
+  }
+  return `Tabs ${tabs.map((tab) => tab.ordinal.toString()).join(' → ')}`
 }
 
 const renderDiagnostics = (diagnostics: ReporterDiagnostic[]): string => {
@@ -160,7 +186,7 @@ const escapeHtml = (value: string): string => {
 }
 
 const REPORT_STYLES = `
-:root{color-scheme:dark;--bg:#09111f;--panel:#111c2f;--line:#263650;--text:#eef4ff;--muted:#9fb0c9;--pass:#36d399;--fail:#fb7185;--skip:#fbbf24;--pending:#a78bfa;--unknown:#94a3b8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#182743,var(--bg) 42rem);color:var(--text);font:14px/1.5 system-ui,sans-serif}header,.summaries,.filters,.diagnostics,main,#empty-filter{width:min(1180px,calc(100% - 2rem));margin-inline:auto}header{display:flex;justify-content:space-between;gap:2rem;padding:3rem 0 1.5rem}.eyebrow{color:#78a9ff;letter-spacing:.12em;text-transform:uppercase;margin:0}h1{font-size:2.6rem;margin:.2rem 0}h2{margin:0;font-size:1.05rem}.run-meta{text-align:right;color:var(--muted);overflow-wrap:anywhere}.summaries{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem}.summary,.status{border:1px solid var(--line);border-radius:999px;padding:.25rem .65rem;text-transform:capitalize}.summary-passed,.status-passed{color:var(--pass)}.summary-failed,.status-failed{color:var(--fail)}.summary-skipped,.status-skipped{color:var(--skip)}.summary-pending,.status-pending{color:var(--pending)}.summary-unknown,.status-unknown{color:var(--unknown)}.filters{position:sticky;top:0;z-index:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;padding:1rem;background:rgba(9,17,31,.94);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(12px)}label{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.05em}select{display:block;width:100%;margin-top:.35rem;padding:.55rem;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}main{display:grid;gap:1rem;padding:1rem 0 3rem}.result-card,.diagnostics{background:rgba(17,28,47,.93);border:1px solid var(--line);border-radius:14px;padding:1rem}.result-heading{display:flex;align-items:flex-start;gap:.8rem}.result-heading p,.diagnostic-line{color:var(--muted);margin:.2rem 0}dl{display:grid;grid-template-columns:2fr 1fr .5fr .5fr;gap:.75rem;margin:1rem 0}dl div{min-width:0}dt{color:var(--muted);font-size:.75rem;text-transform:uppercase}dd{margin:0;overflow-wrap:anywhere}.media-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:1rem;margin-top:1rem}figure{margin:0}video{display:block;width:100%;max-height:480px;background:#000;border-radius:9px}figcaption{margin-top:.35rem;color:var(--muted);overflow-wrap:anywhere}a{color:#8eb9ff}.no-video,.missing-media,.empty{color:var(--muted);padding:1rem;border:1px dashed var(--line);border-radius:9px}.diagnostics{margin-bottom:1rem;border-color:#8a6423}.diagnostics h2{color:var(--skip)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#080d17;padding:1rem;border-radius:8px;color:#ffd5dc}@media(max-width:720px){header{display:block}.run-meta{text-align:left}.filters,dl{grid-template-columns:1fr 1fr}}@media(max-width:480px){.filters,dl{grid-template-columns:1fr}}
+:root{color-scheme:dark;--bg:#09111f;--panel:#111c2f;--line:#263650;--text:#eef4ff;--muted:#9fb0c9;--pass:#36d399;--fail:#fb7185;--skip:#fbbf24;--pending:#a78bfa;--unknown:#94a3b8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#182743,var(--bg) 42rem);color:var(--text);font:14px/1.5 system-ui,sans-serif}header,.summaries,.filters,.diagnostics,main,#empty-filter{width:min(1180px,calc(100% - 2rem));margin-inline:auto}header{display:flex;justify-content:space-between;gap:2rem;padding:3rem 0 1.5rem}.eyebrow{color:#78a9ff;letter-spacing:.12em;text-transform:uppercase;margin:0}h1{font-size:2.6rem;margin:.2rem 0}h2{margin:0;font-size:1.05rem}.run-meta{text-align:right;color:var(--muted);overflow-wrap:anywhere}.summaries{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem}.summary,.status{border:1px solid var(--line);border-radius:999px;padding:.25rem .65rem;text-transform:capitalize}.summary-passed,.status-passed{color:var(--pass)}.summary-failed,.status-failed{color:var(--fail)}.summary-skipped,.status-skipped{color:var(--skip)}.summary-pending,.status-pending{color:var(--pending)}.summary-unknown,.status-unknown{color:var(--unknown)}.filters{position:sticky;top:0;z-index:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.75rem;padding:1rem;background:rgba(9,17,31,.94);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(12px)}label{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.05em}select{display:block;width:100%;margin-top:.35rem;padding:.55rem;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}main{display:grid;gap:1rem;padding:1rem 0 3rem}.result-card,.diagnostics{background:rgba(17,28,47,.93);border:1px solid var(--line);border-radius:14px;padding:1rem}.result-heading{display:flex;align-items:flex-start;gap:.8rem}.result-heading p,.diagnostic-line{color:var(--muted);margin:.2rem 0}dl{display:grid;grid-template-columns:2fr 1fr .5fr .5fr;gap:.75rem;margin:1rem 0}dl div{min-width:0}dt{color:var(--muted);font-size:.75rem;text-transform:uppercase}dd{margin:0;overflow-wrap:anywhere}.media-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:1rem;margin-top:1rem}figure{margin:0}video{display:block;width:100%;max-height:480px;background:#000;border-radius:9px}figcaption{margin-top:.35rem;color:var(--muted);overflow-wrap:anywhere}.tab-label{color:var(--text);font-weight:600}a{color:#8eb9ff}.no-video,.missing-media,.empty{color:var(--muted);padding:1rem;border:1px dashed var(--line);border-radius:9px}.diagnostics{margin-bottom:1rem;border-color:#8a6423}.diagnostics h2{color:var(--skip)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#080d17;padding:1rem;border-radius:8px;color:#ffd5dc}@media(max-width:720px){header{display:block}.run-meta{text-align:left}.filters,dl{grid-template-columns:1fr 1fr}}@media(max-width:480px){.filters,dl{grid-template-columns:1fr}}
 `
 
 const REPORT_SCRIPT = `

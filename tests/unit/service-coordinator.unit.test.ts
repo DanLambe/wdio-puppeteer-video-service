@@ -93,7 +93,7 @@ describe('worker service recording coordinator adapter', () => {
     const specs = ['tests/specs/firefox.spec.ts']
     const browser = {
       capabilities: { browserName: 'firefox' },
-      isMultiremote: false,
+      isMultiRemote: false,
       sessionId: 'firefox-session',
     } as unknown as Parameters<WdioPuppeteerVideoService['before']>[2]
 

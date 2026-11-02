@@ -43,7 +43,7 @@ const createBrowser = (browserName: string, sessionId = 'private-session-id') =>
     sessionId,
     capabilities: { browserName, browserVersion: '140.0.0' },
     options: { logLevel: 'silent' },
-    isMultiremote: false,
+    isMultiRemote: false,
   }) as never
 
 const readManifest = async (outputDir: string): Promise<VideoManifestV1> => {

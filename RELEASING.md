@@ -30,27 +30,77 @@ separate personal access token.
    package-version release pull request.
 3. Review the version, changelog, migration notes, support policy, and packed
    file list before merging the release pull request.
-4. Before preparing another release candidate, enter Changesets prerelease mode
-   once with `npm exec changeset pre enter rc` and commit `.changeset/pre.json`.
-   Confirm `npm run changeset:status` resolves the next `1.0.0-rc.N` version
-   before merging the release pull request. Prerelease packages are published
-   under npm's `next` distribution tag.
-5. Before preparing stable `1.0.0`, run `npm exec changeset pre exit`, version
-   packages, review the removal of the prerelease suffix, and commit the
+4. A new major is released as candidates first. Enter Changesets prerelease
+   mode once with `npm exec changeset pre enter rc` and commit
+   `.changeset/pre.json`. Confirm `npm run changeset:status` resolves the next
+   `N.0.0-rc.M` version before merging the release pull request. Prerelease
+   packages are published under npm's `next` distribution tag. 2.0 is in this
+   mode: its major changeset is `.changeset/wdio-10-support.md`.
+5. Before preparing the stable release, run `npm exec changeset pre exit`,
+   version packages, review the removal of the prerelease suffix, and commit the
    resulting release changes separately.
 6. A stable release also has to correct the README, which npm renders on the
    package page. Two passages describe the opt-in candidate and stop being true
-   the moment `latest` moves off `0.8.0`: the **1.0 release candidate** callout
-   below the badges, and the install section that documents the `next` channel
-   and says an unqualified install still resolves to `0.8.0`. Update both in the
-   release pull request, not afterwards. `SUPPORT.md`'s description of the `next`
-   tag stays correct, because it describes the process rather than the current
-   state.
+   the moment `latest` moves to the new major: the **not stable yet** callout
+   below the badges, and the install section, which installs a candidate with
+   an explicit `^N.0.0-rc.0` range and says an unqualified install still
+   resolves to the previous major. Update both in the release pull request, not
+   afterwards. `SUPPORT.md`'s description of the `next` tag stays correct,
+   because it describes the process rather than the current state. The docs
+   never install a new major from `@next`: until its first candidate is
+   published, `next` still points to the previous major's last candidate.
 
-`1.0.0-rc.1` is a one-time bootstrap exception: its version and changelog were
-prepared before Changesets was enabled, so its empty bootstrap changeset does
-not create another version bump. Every later RC and stable release requires a
-non-empty consumer-facing changeset and follows the release-PR flow above.
+`1.0.0-rc.1` was a one-time bootstrap exception: its version and changelog were
+prepared before Changesets was enabled. Every other RC and stable release
+requires a non-empty consumer-facing changeset and follows the release-PR flow
+above.
+
+## Maintenance releases for an older major
+
+Once 2.0 is stable, 1.x keeps receiving fixes for WebdriverIO 9 from the
+`release/1.x` branch, published under npm's `wdio9` tag so a 1.x patch never
+moves `latest`. `scripts/resolve-release-channel.ts` enforces this. It refuses
+a 1.x version from any branch but `release/1.x`, a 1.x prerelease, and a later
+major from any branch but `master`. The publish workflow passes it the
+dispatched branch.
+
+Setting up the branch, once:
+
+1. Create `release/1.x` from the `1.0.0` release commit and push it.
+2. On it, apply the release plumbing from the 2.0 work:
+   - `scripts/resolve-release-channel.ts` and its tests;
+   - the `Publish To npm` workflow's branch and validation-run checks, and its
+     `make_latest` setting;
+   - `.changeset/config.json` `baseBranch` set to `release/1.x`;
+   - `release/1.x` added to the branch filters of `release-pr.yaml` and
+     `pull-request-checks.yaml`.
+3. Protect `release/1.x` like `master`.
+4. Allow `release/1.x` in the `npm` environment's deployment branches. Pull
+   request checks never use that environment, so passing checks do not show
+   that a maintenance publish is authorized.
+5. Optionally, have an npm owner point `wdio9` at the newest 1.x release, so
+   `@wdio9` resolves before the first maintenance patch:
+
+   ```bash
+   npm dist-tag add wdio-puppeteer-video-service@1.0.0 wdio9
+   npm view wdio-puppeteer-video-service dist-tags
+   ```
+
+   The publish workflow tags only what it publishes and will not republish
+   `1.0.0`, so without this step the first 1.x patch creates the tag. The docs
+   install 1.x with `@^1`, which works either way.
+
+Then, for each 1.x fix:
+
+1. Open the pull request against `release/1.x` with a patch changeset.
+2. Merge the Changesets release pull request on `release/1.x`.
+3. Dispatch `Release Candidate Validation` twice on `release/1.x` for the
+   release commit. Then dispatch `Publish To npm` from `release/1.x` with the
+   `stable` channel and both run IDs. The package is published under `wdio9`.
+   Its GitHub release is not marked latest.
+
+A fix that applies to both majors lands on `master` first and is then ported to
+`release/1.x`, leaving out anything that needs WebdriverIO 10.
 
 ## Validate and publish
 
@@ -68,15 +118,17 @@ non-empty consumer-facing changeset and follows the release-PR flow above.
    not another dependency/browser matrix.
 3. Dispatch `Publish To npm` from `master`, select `prerelease` or `stable`, and
    provide both successful run IDs. The workflow rejects a stable version on
-   the prerelease channel, a prerelease version on the stable channel, duplicate
-   runs, failed runs, other workflows, and runs for a different commit.
+   the prerelease channel, a prerelease version on the stable channel, a version
+   whose major belongs to another branch, duplicate runs, failed runs, other
+   workflows, and runs for a different commit or branch.
 4. Approve the protected `npm` environment when prompted. The workflow reruns
    the release gates, creates a fresh tarball from that same validated commit,
    publishes it with npm provenance, then creates the matching GitHub release
    with the tarball and CycloneDX SBOM attached.
 
 The workflow requires the selected release channel to match the package version,
-then uses `next` for prereleases and `latest` for stable versions. Do not select
+then uses `next` for prereleases and `latest` for stable versions on `master`,
+and `wdio9` for 1.x on `release/1.x`. Do not select
 `stable` or exit Changesets prerelease mode until the release-candidate
 validation has completed cleanly twice and the generated artifacts have been
 reviewed.

@@ -9,7 +9,10 @@ const classic = process.env.CONSUMER_PROTOCOL === 'classic'
 
 export const config = {
   runner: 'local',
-  specs: ['./smoke.spec.mjs'],
+  // Tab following is a WebDriver BiDi feature.
+  specs: classic
+    ? ['./smoke.spec.mjs']
+    : ['./smoke.spec.mjs', './tabs.spec.mjs'],
   maxInstances: 1,
   baseUrl: process.env.WDIO_FIXTURE_BASE_URL,
   capabilities: [

@@ -7,14 +7,21 @@ import os from 'node:os'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
 import { startPipelineFixture } from './fixture.js'
-import type { RunResult, WorkerMetrics } from './statistics.js'
-import { summarizeSoak } from './statistics.js'
+import {
+  type RunResult,
+  SWITCH_CROSSINGS,
+  type SwitchTimings,
+  summarizeSoak,
+  type WorkerMetrics,
+} from './statistics.js'
 import { verifyPipelineMedia } from './verify-media.js'
 
 const directory = process.env.PIPELINE_RUN_DIR as string
 const soak = process.env.PIPELINE_SOAK === '1'
+const switching = process.env.PIPELINE_WORKLOAD === 'switching'
 const specCount = soak ? 1 : 4
-const expectedTests = soak ? 1 : specCount * 2
+// The switching workload has one test per spec; the standard one has two.
+const expectedTests = soak || switching ? specCount : specCount * 2
 const result: RunResult = {
   schemaVersion: 1,
   label: path.basename(directory),
@@ -31,12 +38,15 @@ const result: RunResult = {
   media: [],
 }
 await fs.mkdir(path.join(directory, 'specs'), { recursive: true })
-for (let i = 0; i < specCount; i += 1) {
-  await fs.writeFile(
-    path.join(directory, `specs/${i}.spec.ts`),
-    `import { workload } from '/work/scripts/bench/pipeline/workload.ts'\nworkload(${i})\n`,
-  )
-}
+const workloadName = switching ? 'switchingWorkload' : 'workload'
+await Promise.all(
+  Array.from({ length: specCount }, (_, i) =>
+    fs.writeFile(
+      path.join(directory, `specs/${i}.spec.ts`),
+      `import { ${workloadName} } from '/work/scripts/bench/pipeline/workload.ts'\n${workloadName}(${i})\n`,
+    ),
+  ),
+)
 const fixture = await startPipelineFixture()
 try {
   const metadata = {
@@ -135,6 +145,27 @@ try {
       )
       assert.equal(worker.stopMs.length, worker.startupMs.length)
     }
+    if (switching) {
+      const timings = await Promise.all(
+        files
+          .filter((file) => /^switch-.*\.json$/u.test(file))
+          .map(
+            async (file) =>
+              JSON.parse(
+                await fs.readFile(path.join(directory, file), 'utf8'),
+              ) as SwitchTimings,
+          ),
+      )
+      assert.equal(timings.length, specCount, 'Missing switch timings')
+      for (const timing of timings) {
+        assert.equal(timing.crossingMs.length, SWITCH_CROSSINGS)
+        assert.equal(timing.sameTabMs.length, SWITCH_CROSSINGS)
+      }
+      result.switching = {
+        crossingMs: timings.flatMap((timing) => timing.crossingMs),
+        sameTabMs: timings.flatMap((timing) => timing.sameTabMs),
+      }
+    }
     if (result.variant !== 'off') {
       Object.assign(
         result,
@@ -143,6 +174,8 @@ try {
           result.retain,
           expectedTests,
           Number(process.env.PIPELINE_DWELL_MS),
+          // Opening the second tab moves recording too.
+          switching ? SWITCH_CROSSINGS + 2 : 1,
         ),
       )
     }

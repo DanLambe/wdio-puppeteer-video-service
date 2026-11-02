@@ -2,8 +2,11 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
   ManifestEntryV1,
+  ManifestFinalArtifact,
   ManifestMediaArtifact,
   ManifestRunV1,
+  ManifestSegmentArtifact,
+  ManifestTab,
 } from '../manifest.js'
 import { type ManifestMatch, ManifestMatcher } from './manifest-matcher.js'
 import type {
@@ -21,7 +24,14 @@ export interface ReportMedia {
   readonly size: number
   readonly width?: number
   readonly height?: number
+  /** The tabs this video recorded, when the recording used more than one. */
+  readonly tabs?: readonly ReportTab[]
   available: boolean
+}
+
+export interface ReportTab {
+  readonly ordinal: number
+  readonly reason: string
 }
 
 export interface ReportItem {
@@ -159,19 +169,43 @@ const createManifestOnlyReportItem = (entry: ManifestEntryV1): ReportItem => ({
 })
 
 const createReportMedia = (entry: ManifestEntryV1): ReportMedia[] => {
-  const artifacts = entry.capture.final
-    ? [entry.capture.final]
-    : entry.capture.segments
-  return artifacts.map(createMedia)
+  const { final, segments } = entry.capture
+  const media = final ? [final] : segments
+  const partTabs = segments.filter((segment) => segment.tab).length
+  // A recording that stayed in one segment needs no tab labels.
+  const labelled =
+    partTabs > 1 || media.some((artifact) => readMediaTabs(artifact).length > 1)
+  return media.map((artifact) => {
+    const tabs = readMediaTabs(artifact)
+    return createMedia(artifact, labelled && tabs.length > 0 ? tabs : undefined)
+  })
 }
 
-const createMedia = (artifact: ManifestMediaArtifact): ReportMedia => ({
+/** A part file's tab, or the tabs a merged or final file holds. */
+const readMediaTabs = (
+  artifact: ManifestSegmentArtifact | ManifestFinalArtifact,
+): readonly ManifestTab[] => {
+  if (artifact.tabs) {
+    return artifact.tabs
+  }
+  return 'tab' in artifact && artifact.tab ? [artifact.tab] : []
+}
+
+const createMedia = (
+  artifact: ManifestMediaArtifact,
+  tabs: readonly ManifestTab[] | undefined,
+): ReportMedia => ({
   path: artifact.path,
   href: createRelativeMediaHref(artifact.path),
   mimeType: artifact.mimeType,
   size: artifact.size,
   ...(artifact.width ? { width: artifact.width } : {}),
   ...(artifact.height ? { height: artifact.height } : {}),
+  ...(tabs
+    ? {
+        tabs: tabs.map(({ ordinal, reason }) => ({ ordinal, reason })),
+      }
+    : {}),
   available: true,
 })
 

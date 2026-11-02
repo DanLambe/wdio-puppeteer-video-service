@@ -6,7 +6,8 @@ export type SessionProtocol = 'bidi+cdp' | 'classic+cdp' | 'unsupported'
 export interface ProtocolBrowser {
   capabilities: WebdriverIO.Capabilities
   getPuppeteer: () => Promise<unknown>
-  isMultiremote?: boolean
+  isBidi?: boolean
+  isMultiRemote?: boolean
   options?: {
     hostname?: string
   }
@@ -25,16 +26,56 @@ export const isChromiumSession = (
   )
 }
 
+/**
+ * WDIO reports the session type as `browser.isBidi`. A string `webSocketUrl`
+ * capability stands in only when that flag is unavailable.
+ */
+// Multiremote capabilities name each browser and nest its capabilities.
+const isMultiRemoteCapabilities = (capabilities: unknown): boolean => {
+  if (!capabilities || typeof capabilities !== 'object') {
+    return false
+  }
+  const entries = Object.entries(capabilities)
+  return (
+    entries.length > 0 &&
+    !('browserName' in capabilities) &&
+    entries.every(
+      ([, value]) =>
+        !!value && typeof value === 'object' && 'capabilities' in value,
+    )
+  )
+}
+
+/**
+ * Why a worker's requested capabilities can never be recorded, decided before
+ * WDIO constructs the worker service.
+ */
+export const describeUnsupportedWorker = (
+  capabilities: unknown,
+): string | undefined => {
+  if (isMultiRemoteCapabilities(capabilities)) {
+    return 'multiremote sessions are not supported; configure recording for a single-browser WDIO worker'
+  }
+  if (
+    !capabilities ||
+    typeof capabilities !== 'object' ||
+    !isChromiumSession(capabilities as WebdriverIO.Capabilities)
+  ) {
+    return 'video recording is only supported on Chromium-based browsers'
+  }
+  return undefined
+}
+
 export const classifySessionProtocol = (
   capabilities: WebdriverIO.Capabilities,
   hasCdpConnection: boolean,
+  isBidi?: boolean,
 ): SessionProtocol => {
   if (!hasCdpConnection || !isChromiumSession(capabilities)) {
     return 'unsupported'
   }
-  return typeof capabilities.webSocketUrl === 'string'
-    ? 'bidi+cdp'
-    : 'classic+cdp'
+  const bidi = isBidi ?? typeof capabilities.webSocketUrl === 'string'
+  return bidi ? 'bidi+cdp' : 'classic+cdp'
 }
 
 export const connectPuppeteerWithTimeout = async (
@@ -67,11 +108,11 @@ export const connectPuppeteerWithTimeout = async (
 }
 
 export const describePuppeteerConnectionFailure = (
-  browser: Pick<ProtocolBrowser, 'capabilities' | 'isMultiremote' | 'options'>,
+  browser: Pick<ProtocolBrowser, 'capabilities' | 'isMultiRemote' | 'options'>,
   error: unknown,
 ): string => {
   const details = describeError(error)
-  if (browser.isMultiremote) {
+  if (browser.isMultiRemote) {
     return 'multiremote sessions are not supported; configure recording for a single-browser WDIO worker'
   }
 
