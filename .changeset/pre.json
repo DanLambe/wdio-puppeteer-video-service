@@ -4,5 +4,7 @@
   "initialVersions": {
     "wdio-puppeteer-video-service": "1.0.0"
   },
-  "changesets": []
+  "changesets": [
+    "wdio-10-support"
+  ]
 }
