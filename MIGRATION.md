@@ -83,7 +83,10 @@ The manifest stays at version 1, and its new fields are optional:
 - `tabs` on a merged file and on `final`, the tabs of its parts in order.
 
 The 1.x validator accepts a 2.0 manifest. Code that reads the manifest needs no
-changes unless it wants the tab history.
+changes unless it wants the tab history, or compares records exactly. A
+recording with one segment used to have a `final` identical to that segment;
+in 2.0 the segment has `tab` and `final` has `tabs`, so compare them without
+those fields.
 
 # Migrating from 0.8 to 1.0
 
