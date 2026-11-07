@@ -31,7 +31,27 @@ describe('media probe', () => {
       durationSeconds: 1.25,
       frameCount: 38,
       pixelFormat: 'yuv420p',
+      frameRate: 30,
     })
+  })
+
+  it.each([
+    [
+      'vp9 (Profile 0), yuv420p(tv, progressive), 1256x508, SAR 1:1 DAR 314:127, 1 fps, 1k tbr, 1k tbn',
+      1,
+    ],
+    ['h264 (High), yuv420p, 1280x720, 29.97 fps, 29.97 tbr, 90k tbn', 29.97],
+  ])('reads the nominal frame rate after %s', (stream, frameRate) => {
+    const output = validProbeOutput.replace(
+      'vp9 (Profile 0), yuv420p, 1280x720, 30 fps',
+      stream,
+    )
+    expect(parseFfmpegProbeOutput(output).frameRate).toBe(frameRate)
+  })
+
+  it('reports no frame rate when FFmpeg prints none', () => {
+    const output = validProbeOutput.replace(', 30 fps', '')
+    expect(parseFfmpegProbeOutput(output)).not.toHaveProperty('frameRate')
   })
 
   it.each([
