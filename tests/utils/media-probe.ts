@@ -14,6 +14,8 @@ export interface MediaProbeResult {
   frameCount: number
   /** Decoded pixel format, such as `yuv420p`, when FFmpeg reports one. */
   pixelFormat?: string
+  /** The stream's nominal frames per second, when FFmpeg reports them. */
+  frameRate?: number
 }
 
 export interface MediaProbeOptions {
@@ -68,7 +70,10 @@ const parseDurationSeconds = (output: string): number => {
 
 const parseVideoStream = (
   output: string,
-): Pick<MediaProbeResult, 'codec' | 'width' | 'height' | 'pixelFormat'> => {
+): Pick<
+  MediaProbeResult,
+  'codec' | 'width' | 'height' | 'pixelFormat' | 'frameRate'
+> => {
   const videoLine = output
     .split(/\r?\n/u)
     .find((line) => line.includes('Video:'))
@@ -85,11 +90,15 @@ const parseVideoStream = (
   const pixelFormat = /Video:\s*[^,]+,\s*([a-z0-9_]+)/u.exec(
     videoLine ?? '',
   )?.[1]
+  const frameRate = Number(
+    /,\s*(\d+(?:\.\d+)?)\s*fps\b/u.exec(videoLine ?? '')?.[1],
+  )
   return {
     codec: codecMatch[1]?.toLowerCase() ?? '',
     width: Number(dimensionsMatch[1]),
     height: Number(dimensionsMatch[2]),
     ...(pixelFormat ? { pixelFormat } : {}),
+    ...(frameRate > 0 ? { frameRate } : {}),
   }
 }
 

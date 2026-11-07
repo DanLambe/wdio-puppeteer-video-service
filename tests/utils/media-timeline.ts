@@ -2,8 +2,14 @@ import { spawnSync } from 'node:child_process'
 
 export type SolidColor = 'blue' | 'green' | 'red'
 
+/**
+ * A decoded frame's color. `neutral` is a black, white or grey frame, such as
+ * a page before it has painted, which is no tab's color.
+ */
+export type FrameColor = SolidColor | 'neutral'
+
 export interface ColorSpan {
-  readonly color: SolidColor
+  readonly color: FrameColor
   /** Seconds, from the first decoded frame's timestamp. */
   readonly start: number
   readonly end: number
@@ -26,7 +32,16 @@ const run = (ffmpegPath: string, args: string[]) => {
   return result
 }
 
-const classify = (red: number, green: number, blue: number): SolidColor => {
+// A frame whose channels are this close together has no hue to classify.
+const NEUTRAL_SPREAD = 48
+
+const classify = (red: number, green: number, blue: number): FrameColor => {
+  if (
+    Math.max(red, green, blue) - Math.min(red, green, blue) <
+    NEUTRAL_SPREAD
+  ) {
+    return 'neutral'
+  }
   if (red > green && red > blue) {
     return 'red'
   }
@@ -70,7 +85,7 @@ export const decodeColorTimeline = (
     'rawvideo',
     '-',
   ]).stdout
-  const colors: SolidColor[] = []
+  const colors: FrameColor[] = []
   for (let offset = 0; offset + 2 < pixels.length; offset += 3) {
     colors.push(
       classify(
@@ -86,7 +101,7 @@ export const decodeColorTimeline = (
     )
   }
   const origin = timestamps[0] ?? 0
-  const spans: Array<{ color: SolidColor; start: number; end: number }> = []
+  const spans: Array<{ color: FrameColor; start: number; end: number }> = []
   colors.forEach((color, index) => {
     const start = (timestamps[index] ?? 0) - origin
     const end = (timestamps[index + 1] ?? start + origin + 1 / fps) - origin

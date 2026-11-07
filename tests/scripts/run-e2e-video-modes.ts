@@ -193,16 +193,19 @@ const assertKeptMerge = async (
     const merged = entry?.capture.segments.find((segment) => segment.tabs)
     assert.ok(merged, `Expected "${title}" to keep a merged file`)
     assert.equal(entry?.capture.final, undefined)
-    // Brief spans are switch transitions, and consecutive parts on one tab
-    // play as one span.
+    // Brief spans are switch transitions, neutral ones a page not yet
+    // painted, and consecutive parts on one tab play as one span.
     const colors = decodeColorTimeline(
       ffmpegPath,
       path.join(resultsDir, merged.path),
       30,
       passthrough,
     )
-      .spans.filter((span) => span.end - span.start > 0.6)
+      .spans.filter(
+        (span) => span.color !== 'neutral' && span.end - span.start > 0.6,
+      )
       .map((span) => span.color)
+      .filter((color, index, all) => color !== all[index - 1])
     const expectedColors = expected
       .map((segment) => segment.dominant)
       .filter((color, index, all) => color !== all[index - 1])

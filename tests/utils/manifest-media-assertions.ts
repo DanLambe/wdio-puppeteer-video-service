@@ -84,8 +84,12 @@ export const assertManifestPlaybackMatchesCapture = async (
     )
     // First-frame and stop latency shorten a video a little; half the capture
     // means the container is truncated, as a mis-sized MP4 track once was.
+    // Before FFmpeg 7, a stream without a container duration is reported as
+    // ending where its last frame starts, a whole second at 1 fps, so that
+    // frame's own duration is allowed for.
+    const lastFrameSeconds = media.frameRate ? 1 / media.frameRate : 0
     assert.ok(
-      playedSeconds >= captureSeconds / 2,
+      (media.durationSeconds + lastFrameSeconds) * speed >= captureSeconds / 2,
       `Expected ${segment.path} to cover most of its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
     )
     verified += 1

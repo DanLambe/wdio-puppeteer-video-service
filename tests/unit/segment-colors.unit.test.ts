@@ -39,4 +39,31 @@ describe('segment color verification helpers', () => {
     expect(() => dominantColor([])).toThrow('no frames')
     expect(() => firstColor([])).toThrow('no frames')
   })
+
+  it('ignores a page that has not painted yet, however long it lasts', () => {
+    // A slow Edge start: the tab is dark for longer than it then shows red.
+    const spans = [
+      { color: 'neutral' as const, start: 0, end: 1.6 },
+      { color: 'red' as const, start: 1.6, end: 2.8 },
+    ]
+
+    expect(dominantColor(spans)).toBe('red')
+    expect(firstColor(spans)).toBe('red')
+  })
+
+  it('fails for a segment that never paints', () => {
+    const spans = [{ color: 'neutral' as const, start: 0, end: 1 }]
+
+    expect(() => dominantColor(spans)).toThrow('no painted frames')
+    expect(() => firstColor(spans)).toThrow('no painted frames')
+  })
+
+  it('keeps the earlier color when two last equally long', () => {
+    const spans = [
+      { color: 'blue' as const, start: 0, end: 1 },
+      { color: 'red' as const, start: 1, end: 2 },
+    ]
+
+    expect(dominantColor(spans)).toBe('blue')
+  })
 })
