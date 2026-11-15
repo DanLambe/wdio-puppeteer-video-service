@@ -94,6 +94,41 @@ describe('Puppeteer screencast capture controls', () => {
     )
   })
 
+  it('spools to the given file instead of encoding when asked', async () => {
+    const recorder = createRecorder()
+    const record = vi.fn(
+      async (_page: Page, _options: ScreencastRecorderOptions) => recorder,
+    )
+    const capture = resolveServiceConfiguration({
+      capture: { fps: 24, maxWidth: 1280, maxHeight: 720 },
+    }).options.capture
+    const page = { viewport: () => null } as unknown as Page
+
+    await startScreencast(
+      page,
+      {
+        capture,
+        format: 'mp4',
+        ffmpegPath: 'ffmpeg.exe',
+        spoolPath: 'segment.spool.mkv',
+      },
+      record,
+    )
+
+    // Nothing names a segment file: it is written when the spool is encoded.
+    expect(record).toHaveBeenCalledWith(page, {
+      ffmpegPath: 'ffmpeg.exe',
+      format: 'mp4',
+      fps: 24,
+      maxHeight: 720,
+      maxWidth: 1280,
+      quality: capture.quality,
+      scale: capture.scale,
+      speed: capture.speed,
+      spoolPath: 'segment.spool.mkv',
+    })
+  })
+
   it('restores native viewport mode when screencast initialization fails', async () => {
     const setViewport = vi.fn(async (_viewport: Viewport | null) => {})
     const capture = resolveServiceConfiguration({
