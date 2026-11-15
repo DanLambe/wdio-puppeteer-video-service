@@ -401,7 +401,7 @@ export class ScreencastRecorder {
 
   private onSinkClosed(): void {
     this.noteSinkFailure()
-    if (this.stopping || this.aborting) {
+    if (this.stopping !== undefined || this.aborting !== undefined) {
       return
     }
     this.stopCapturing()
@@ -413,7 +413,7 @@ export class ScreencastRecorder {
   // The sink reports a failure only for what it did on its own before stop
   // ended its input; an abort is never one.
   private noteSinkFailure(): void {
-    if (this.aborting || this.incomplete) {
+    if (this.aborting !== undefined || this.incomplete) {
       return
     }
     this.incomplete = this.sink.failure

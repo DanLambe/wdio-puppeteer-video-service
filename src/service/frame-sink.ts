@@ -266,7 +266,7 @@ export class SpoolSink implements FrameSink {
 
   private readonly onError = (error: Error): void => {
     // Writes refused after an abort are not a failure of the spool.
-    if (this.aborting || this.error) {
+    if (this.aborting !== undefined || this.error) {
       return
     }
     this.error = new Error(
