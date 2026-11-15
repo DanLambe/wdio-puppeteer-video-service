@@ -556,8 +556,9 @@ byte-identical HTML for reproducible artifacts.
 
 ## FFmpeg Error Handling
 
-If FFmpeg is missing or not executable, the service warns once and disables
-recording for that worker. Failed or timed-out merge/transcode operations retain
+Each Chromium worker session looks for FFmpeg once, before its first test and
+alongside the browser warm-up. If FFmpeg is missing or not executable, the
+service warns once and disables recording for that worker. Failed or timed-out merge/transcode operations retain
 source media and remove partial output. Expected teardown stream failures such
 as `EPIPE` are contained without repeated log spam.
 

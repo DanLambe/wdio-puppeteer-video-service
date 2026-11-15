@@ -6,8 +6,7 @@ import type { ProcessBoundary } from './boundaries.js'
 import {
   getFfmpegCandidates,
   probeDirectMp4Support,
-  readFfmpegVersion,
-  resolveAvailableFfmpegPath,
+  resolveFfmpeg,
 } from './ffmpeg.js'
 import type {
   FfmpegProcessRegistry,
@@ -41,8 +40,7 @@ export interface FfmpegRuntimeDependencies {
   readonly log: ServiceLogger
   readonly onVersion?: (version: string) => Promise<void> | void
   readonly getCandidates?: typeof getFfmpegCandidates
-  readonly resolveAvailablePath?: typeof resolveAvailableFfmpegPath
-  readonly readVersion?: typeof readFfmpegVersion
+  readonly resolveFfmpeg?: typeof resolveFfmpeg
   readonly probeDirectMp4?: typeof probeDirectMp4Support
 }
 
@@ -59,8 +57,7 @@ export class FfmpegRuntime {
     | ((version: string) => Promise<void> | void)
     | undefined
   private readonly getCandidates: typeof getFfmpegCandidates
-  private readonly resolveAvailablePath: typeof resolveAvailableFfmpegPath
-  private readonly readVersion: typeof readFfmpegVersion
+  private readonly resolveFfmpeg: typeof resolveFfmpeg
   private readonly probeDirectMp4: typeof probeDirectMp4Support
   private available = false
   private resolvedPath: string | undefined
@@ -84,9 +81,7 @@ export class FfmpegRuntime {
     this.log = dependencies.log
     this.onVersion = dependencies.onVersion
     this.getCandidates = dependencies.getCandidates ?? getFfmpegCandidates
-    this.resolveAvailablePath =
-      dependencies.resolveAvailablePath ?? resolveAvailableFfmpegPath
-    this.readVersion = dependencies.readVersion ?? readFfmpegVersion
+    this.resolveFfmpeg = dependencies.resolveFfmpeg ?? resolveFfmpeg
     this.probeDirectMp4 = dependencies.probeDirectMp4 ?? probeDirectMp4Support
   }
 
@@ -310,24 +305,25 @@ export class FfmpegRuntime {
       this.options.processing.ffmpeg.path?.trim(),
       this.process.environment('FFMPEG_PATH')?.trim(),
     )
-    this.resolvedPath = await this.resolveAvailablePath(this.candidates)
-    this.available = !!this.resolvedPath
-    const executablePath = this.resolvedPath
-    if (!this.available || !executablePath) {
+    // One `-version` spawn per candidate tried gives both the path and the
+    // version.
+    const resolved = await this.resolveFfmpeg(this.candidates)
+    this.resolvedPath = resolved?.path
+    this.available = resolved !== undefined
+    if (!resolved) {
       this.warnMissingFfmpeg('Video recording is disabled for this worker.')
       return false
     }
 
     this.log(
       'info',
-      `[WdioPuppeteerVideoService] Using ffmpeg binary: ${executablePath}`,
+      `[WdioPuppeteerVideoService] Using ffmpeg binary: ${resolved.path}`,
     )
-    const version = await this.readVersion(executablePath)
-    this.version = version
-    if (version) {
-      await this.onVersion?.(version)
+    this.version = resolved.version
+    if (resolved.version) {
+      await this.onVersion?.(resolved.version)
     }
-    await this.configureMp4RecordingMode(executablePath)
+    await this.configureMp4RecordingMode(resolved.path)
     return true
   }
 
