@@ -5,6 +5,11 @@ import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
+import {
+  findTabProvenanceProblems,
+  readEntryTabs,
+  toTabSteps,
+} from '../utils/tab-provenance.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -26,9 +31,15 @@ type AdvancedMode =
   | 'global-concurrency'
   | 'ffmpeg-failure'
 
-const assertDiscardedRetentionEntry = async (
-  resultsDir: string,
-): Promise<void> => {
+// Each test moves tab twice: part 1 on the first tab, part 2 on the second,
+// part 3 back on the first.
+const RETAINED_TAB_STEPS = JSON.stringify([
+  [1, 'start'],
+  [2, 'switch-to-window'],
+  [1, 'switch-to-window'],
+])
+
+const assertRetentionEntries = async (resultsDir: string): Promise<void> => {
   const manifestValue: unknown = JSON.parse(
     await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
   )
@@ -37,9 +48,10 @@ const assertDiscardedRetentionEntry = async (
       '[e2e:advanced] retention mode produced an invalid manifest',
     )
   }
-  const discardedEntry = manifestValue.runs
-    .flatMap((run) => run.entries)
-    .find((entry) => entry.test?.name === 'should discard a passing recording')
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  const discardedEntry = entries.find(
+    (entry) => entry.test?.name === 'should discard a passing recording',
+  )
   if (
     discardedEntry?.capture.decision !== 'discarded' ||
     discardedEntry.capture.segments.length !== 0 ||
@@ -48,6 +60,31 @@ const assertDiscardedRetentionEntry = async (
   ) {
     throw new Error(
       '[e2e:advanced] passing retention entry should be discarded without published media or post-processing',
+    )
+  }
+
+  // A kept multi-tab recording lists each transcoded part with its tab, as
+  // when every segment was transcoded at its tab move.
+  const retainedEntry = entries.find(
+    (entry) =>
+      entry.test?.name === 'should retain an intentionally failed recording',
+  )
+  const segments = retainedEntry?.capture.segments ?? []
+  const parts = segments.map((segment) =>
+    /_part(\d+)\.mp4$/u.exec(segment.path),
+  )
+  if (
+    retainedEntry?.capture.decision !== 'recorded' ||
+    retainedEntry.processing.outcome !== 'completed' ||
+    retainedEntry.processing.operation !== 'transcode' ||
+    parts.map((part) => part?.[1]).join() !== '1,2,3' ||
+    segments.some((segment) => segment.mimeType !== 'video/mp4') ||
+    JSON.stringify(toTabSteps(readEntryTabs(retainedEntry))) !==
+      RETAINED_TAB_STEPS ||
+    findTabProvenanceProblems(retainedEntry).length > 0
+  ) {
+    throw new Error(
+      `[e2e:advanced] failing retention entry should keep three transcoded parts with their tabs, got ${JSON.stringify(retainedEntry?.capture)}`,
     )
   }
 }
@@ -148,9 +185,9 @@ const runMode = async (
   )
 
   if (mode === 'retention') {
-    await assertDiscardedRetentionEntry(resultsDir)
+    await assertRetentionEntries(resultsDir)
   }
-  if (mode === 'retry' || mode === 'deferred-merge') {
+  if (mode === 'retry' || mode === 'deferred-merge' || mode === 'retention') {
     await assertManifestMediaDimensions(
       resultsDir,
       environment.ffmpegDetection.resolvedPath,

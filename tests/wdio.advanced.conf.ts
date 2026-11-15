@@ -433,10 +433,19 @@ const assertExcludeSpecMode = (artifactNames: string[]): void => {
   }
 }
 
+// Only the failed test's three tab segments remain, each transcoded.
 const assertRetentionMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const parts = artifactNames
+    .map(
+      (fileName) =>
+        /^should_retain_an_intentionally_failed_recording_.*_part(\d)\.mp4$/u.exec(
+          fileName,
+        )?.[1] ?? '?',
+    )
+    .sort((left, right) => left.localeCompare(right))
+  if (parts.join() !== '1,2,3') {
     throw new Error(
-      `[wdio:e2e:advanced] retention mode expected only the failed-test artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+      `[wdio:e2e:advanced] retention mode expected only the failed test's three MP4 parts but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
 }
