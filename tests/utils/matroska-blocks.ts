@@ -150,6 +150,65 @@ export const parseMatroskaStream = (bytes: Buffer): MatroskaStream => {
   }
 }
 
+/** What a player reads to size and seek a finished Matroska file. */
+export interface MatroskaIndex {
+  /** The segment's Duration element, in milliseconds at the default scale. */
+  readonly durationMs?: number
+  /** Whether the segment has a Cues element: the seek index. */
+  readonly hasCues: boolean
+  /** Each CuePoint's CueTime, in milliseconds at the default scale. */
+  readonly cueTimesMs: number[]
+}
+
+const SEGMENT_ID = 0x18_53_80_67
+const INFO_ID = 0x15_49_a9_66
+const CUES_ID = 0x1c_53_bb_6b
+const CUE_POINT_ID = 0xbb
+const CUE_TIME_ID = 0xb3
+const DURATION_ID = 0x44_89
+
+/**
+ * Reads a finished file's Duration and Cues, skipping clusters by their size.
+ * A WebM written to a pipe has neither: FFmpeg writes both by seeking back.
+ */
+export const readMatroskaIndex = (bytes: Buffer): MatroskaIndex => {
+  const descend = new Set([SEGMENT_ID, INFO_ID, CUES_ID, CUE_POINT_ID])
+  const cueTimesMs: number[] = []
+  let durationMs: number | undefined
+  let hasCues = false
+  let offset = 0
+  while (offset < bytes.length) {
+    const id = readVint(bytes, offset, true)
+    const size = id && readVint(bytes, offset + id.length, false)
+    if (!id || !size) {
+      break
+    }
+    const dataStart = offset + id.length + size.length
+    hasCues ||= id.value === CUES_ID
+    if (descend.has(id.value)) {
+      offset = dataStart
+      continue
+    }
+    const dataEnd = dataStart + size.value
+    if (size.unknown || dataEnd > bytes.length) {
+      break
+    }
+    const data = bytes.subarray(dataStart, dataEnd)
+    if (id.value === CUE_TIME_ID) {
+      cueTimesMs.push(readUnsigned(data))
+    } else if (id.value === DURATION_ID) {
+      durationMs =
+        data.length === 4 ? data.readFloatBE(0) : data.readDoubleBE(0)
+    }
+    offset = dataEnd
+  }
+  return {
+    ...(durationMs === undefined ? {} : { durationMs }),
+    hasCues,
+    cueTimesMs,
+  }
+}
+
 export interface GridFrame {
   readonly label: string
   readonly position: number

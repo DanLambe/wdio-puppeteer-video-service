@@ -1,4 +1,3 @@
-import type { WriteStream } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
 import { CaptureSession } from '../../src/service/capture-session.js'
@@ -24,17 +23,12 @@ const METADATA: SlugMetadata = {
 const START_ERROR = new Error('capture start rejected')
 
 const segmentFor = (recordingPath: string): ActiveSegment => ({
-  onRecorderError: vi.fn(),
-  onWriteStreamError: vi.fn(),
   outputFormat: 'webm',
   outputPath: recordingPath,
   recordingFormat: 'webm',
   recordingPath,
   transcode: false,
   transcodeOptions: { deleteOriginal: true },
-  writeStream: {} as WriteStream,
-  writeStreamDone: Promise.resolve(),
-  writeStreamErrored: false,
 })
 
 /** A capture engine that attaches a capture to whichever tab it is asked for. */

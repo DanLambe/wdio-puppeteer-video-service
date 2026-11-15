@@ -39,7 +39,7 @@ describe('launcher and worker composition roots', () => {
     const uuid = vi.fn(() => 'fixed-uuid')
     const puppeteerBrowser = { connected: true } as PuppeteerBrowser
     const connectPuppeteer = vi.fn(async () => puppeteerBrowser)
-    const recorder = { destroyed: false } as ScreencastRecorder
+    const recorder = { frameCount: 0 } as unknown as ScreencastRecorder
     const startScreencast = vi.fn(async () => recorder)
     const runFfmpeg = vi.fn(async () => true)
     const writeLog = vi.fn()

@@ -35,9 +35,15 @@ export const assertManifestMediaDimensions = async (
       media.height,
       `Manifest height for ${artifact.path}`,
     )
+    // The encoder writes the file itself, so a kept WebM carries its length
+    // and seek index; written to a pipe it had neither.
+    assert.ok(
+      media.container !== 'webm' || (media.containerDurationSeconds ?? 0) > 0,
+      `Expected ${artifact.path} to declare its duration; FFmpeg reports Duration: N/A`,
+    )
   }
   console.log(
-    `[e2e:manifest] Verified encoded dimensions for ${artifacts.length.toString()} retained artifacts.`,
+    `[e2e:manifest] Verified encoded dimensions and container durations for ${artifacts.length.toString()} retained artifacts.`,
   )
 }
 
@@ -77,19 +83,23 @@ export const assertManifestPlaybackMatchesCapture = async (
       ffmpegPath,
       path.resolve(resultsDir, segment.path),
     )
-    const playedSeconds = media.durationSeconds * speed
+    assert.ok(
+      media.containerDurationSeconds,
+      `Expected ${segment.path} to declare its duration; FFmpeg reports Duration: N/A`,
+    )
+    const playedSeconds = media.containerDurationSeconds * speed
     assert.ok(
       playedSeconds <= captureSeconds + PLAYBACK_STARTUP_ALLOWANCE_SECONDS,
       `Expected ${segment.path} to play back no longer than its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
     )
     // First-frame and stop latency shorten a video a little; half the capture
     // means the container is truncated, as a mis-sized MP4 track once was.
-    // Before FFmpeg 7, a stream without a container duration is reported as
-    // ending where its last frame starts, a whole second at 1 fps, so that
-    // frame's own duration is allowed for.
-    const lastFrameSeconds = media.frameRate ? 1 / media.frameRate : 0
+    // The container's duration includes the last frame's own, on FFmpeg 4.4,
+    // 6.1 and 7 alike, so a sparse low-fps recording needs no allowance: the
+    // allowance for FFmpeg 6 timing a duration-less stream from its last
+    // frame's start is gone with duration-less streams.
     assert.ok(
-      (media.durationSeconds + lastFrameSeconds) * speed >= captureSeconds / 2,
+      playedSeconds >= captureSeconds / 2,
       `Expected ${segment.path} to cover most of its ${captureSeconds.toFixed(2)}s capture; it plays ${playedSeconds.toFixed(2)}s at speed ${speed.toString()}`,
     )
     verified += 1

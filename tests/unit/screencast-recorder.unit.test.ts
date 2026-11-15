@@ -25,6 +25,7 @@ const options: ScreencastRecorderOptions = {
   ffmpegPath: 'ffmpeg',
   format: 'webm',
   fps: 30,
+  outputPath: 'segment.webm',
   quality: 30,
   scale: 1,
   speed: 1,
@@ -71,7 +72,6 @@ const createFakeFfmpeg = (
     exitCode: number | null
     signalCode: NodeJS.Signals | null
   }
-  const stdout = new PassThrough()
   const stderr = new PassThrough()
   const stdin = new Writable({
     ...(highWaterMark === undefined ? {} : { highWaterMark }),
@@ -81,13 +81,12 @@ const createFakeFfmpeg = (
     },
   })
   let closing = false
-  // Like a real process, output ends before the exit is reported.
+  // Like a real process, the exit is reported a turn after input ends.
   const close = (): void => {
     if (closing) {
       return
     }
     closing = true
-    stdout.end()
     setImmediate(() => {
       child.exitCode ??= 0
       child.emit('close', child.exitCode)
@@ -106,7 +105,8 @@ const createFakeFfmpeg = (
     signalCode: null,
     stderr,
     stdin,
-    stdout,
+    // FFmpeg writes the segment file itself; its output is not piped.
+    stdout: null,
     unref: vi.fn(),
   })
   // Like child_process.spawn, report the start after the process is created.
@@ -242,7 +242,7 @@ const startRecorder = async (
       ...(queueLimits ? { queueLimits } : {}),
     },
   )
-  recorder.resume()
+
   return {
     ...ffmpeg,
     advance: (milliseconds: number) => {
@@ -301,7 +301,40 @@ describe('screencast recorder FFmpeg arguments', () => {
     expect(args.slice(args.indexOf('-f', args.indexOf('-i')))).toEqual(
       expect.arrayContaining(['-f', 'webm']),
     )
-    expect(args.at(-1)).toBe('pipe:1')
+  })
+
+  it('writes the segment file itself, replacing its reserved placeholder', () => {
+    const args = createFfmpegArguments(
+      options,
+      { width: 1280, height: 720 },
+      undefined,
+    )
+    // A pipe cannot be seeked, so a WebM written to one has no duration and
+    // no seek index. The reserved empty file is overwritten.
+    expect(args.slice(-2)).toEqual(['-y', 'segment.webm'])
+    expect(args).not.toContain('pipe:1')
+    // Short clusters, flushed as they are written, keep what a killed
+    // encoder leaves behind decodable up to its last second.
+    const output = args.slice(args.indexOf('-f', args.indexOf('-i')))
+    expect(output.slice(0, 6)).toEqual([
+      '-f',
+      'webm',
+      '-cluster_time_limit',
+      '1000',
+      '-flush_packets',
+      '1',
+    ])
+  })
+
+  it('keeps the Matroska cluster flags out of direct MP4 output', () => {
+    const args = createFfmpegArguments(
+      { ...options, format: 'mp4', outputPath: 'segment.mp4' },
+      { width: 1280, height: 720 },
+      undefined,
+    )
+    expect(args.slice(-2)).toEqual(['-y', 'segment.mp4'])
+    expect(args).not.toContain('-cluster_time_limit')
+    expect(args).not.toContain('-flush_packets')
   })
 
   it('applies crop and scale in the same filter order as Puppeteer', () => {
@@ -324,7 +357,7 @@ describe('screencast recorder FFmpeg arguments', () => {
 
   it('omits the scale filter when it is not set', () => {
     const args = createFfmpegArguments(
-      { format: 'webm', quality: 30 },
+      { format: 'webm', outputPath: 'segment.webm', quality: 30 },
       { width: 1280, height: 720 },
       undefined,
     )
@@ -339,7 +372,7 @@ describe('screencast recorder FFmpeg arguments', () => {
     // cost every default recording a Lanczos resample that produced the frame
     // it already had.
     const args = createFfmpegArguments(
-      { format: 'webm', quality: 30, scale: 1 },
+      { format: 'webm', outputPath: 'segment.webm', quality: 30, scale: 1 },
       { width: 1280, height: 720 },
       undefined,
     )
@@ -512,7 +545,6 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
     exitCode: number | null
     signalCode: NodeJS.Signals | null
   }
-  const stdout = new PassThrough()
   const stderr = new PassThrough()
   const stdin = new Writable({
     highWaterMark: 1,
@@ -535,7 +567,6 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
       return
     }
     closing = true
-    stdout.end()
     setImmediate(() => {
       child.exitCode = 0
       child.emit('close', 0)
@@ -552,7 +583,8 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
     signalCode: null,
     stderr,
     stdin,
-    stdout,
+    // FFmpeg writes the segment file itself; its output is not piped.
+    stdout: null,
     unref: vi.fn(),
   })
   return {
@@ -972,7 +1004,6 @@ const exitEncoder = (
     exitCode: outcome.code,
     signalCode: outcome.signal ?? null,
   })
-  ;(child.stdout as PassThrough).end()
   child.emit('exit', outcome.code, outcome.signal ?? null)
   if (close) {
     child.emit('close', outcome.code, outcome.signal ?? null)
@@ -1359,7 +1390,6 @@ describe('screencast recorder frame timing', () => {
     })
     clock.expire()
     const recorder = await starting
-    recorder.resume()
 
     await recorder.stop()
 
@@ -1382,7 +1412,9 @@ describe('screencast recorder frame timing', () => {
       expect(harness.child.exitCode).toBe(0)
     })
 
-    // FFmpeg's output ended, so the recorder stream closed and stopped listening.
+    // FFmpeg exited, so the recorder stopped listening and let go of the
+    // session.
+    expect(harness.session.detach).toHaveBeenCalledOnce()
     harness.session.emitFrame('late', 101)
     await expect(harness.recorder.stop()).resolves.toBeUndefined()
 
@@ -1429,10 +1461,9 @@ describe('screencast recorder frame timing', () => {
     )
   })
 
-  it('stops FFmpeg and the CDP session when destroyed', async () => {
+  it('stops FFmpeg and the CDP session when aborted', async () => {
     const harness = await startRecorder()
 
-    harness.recorder.destroy()
     await harness.recorder.abort()
 
     expect(harness.kill).toHaveBeenCalledTimes(1)
@@ -1441,14 +1472,14 @@ describe('screencast recorder frame timing', () => {
     expect(harness.frames(10)).toEqual([])
   })
 
-  it('terminates the encoder when destroyed during a stalled CDP stop', async () => {
+  it('terminates the encoder when aborted during a stalled CDP stop', async () => {
     const harness = await startRecorder()
     const { promise: stalledStop, resolve: finishLate } =
       Promise.withResolvers<never>()
     vi.mocked(harness.session.send).mockImplementation(() => stalledStop)
     const stopping = harness.recorder.stop()
 
-    harness.recorder.destroy()
+    void harness.recorder.abort()
     await new Promise((resolve) => setImmediate(resolve))
 
     expect(harness.kill).toHaveBeenCalledOnce()
@@ -1472,7 +1503,6 @@ describe('screencast recorder frame timing', () => {
     expect(harness.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL')
     expect(harness.session.detach).toHaveBeenCalledOnce()
     expect(harness.child.unref).toHaveBeenCalledOnce()
-    expect(harness.child.stdout?.destroyed).toBe(true)
     expect(harness.child.stderr?.destroyed).toBe(true)
   })
 
@@ -1528,7 +1558,7 @@ describe('screencast recorder frame timing', () => {
         true,
       )
       expect(ffmpeg.child.unref).toHaveBeenCalledOnce()
-      expect(ffmpeg.child.stdout?.destroyed).toBe(true)
+      expect(ffmpeg.child.stderr?.destroyed).toBe(true)
       expect(vi.getTimerCount()).toBe(0)
       expect(ffmpeg.child.listenerCount('spawn')).toBe(0)
       expect(ffmpeg.child.listenerCount('exit')).toBe(0)
@@ -1540,7 +1570,6 @@ describe('screencast recorder frame timing', () => {
       expect(ffmpeg.child.listenerCount('error')).toBe(0)
     } finally {
       vi.useRealTimers()
-      recorder.destroy()
     }
   })
 })
@@ -1616,7 +1645,6 @@ describe('screencast recorder startup', () => {
       expect(session.send).not.toHaveBeenCalled()
       expect(session.listenerCount('Page.screencastFrame')).toBe(0)
       expect(ffmpeg.child.stdin?.destroyed).toBe(true)
-      expect(ffmpeg.child.stdout?.destroyed).toBe(true)
       expect(ffmpeg.child.stderr?.destroyed).toBe(true)
     },
   )

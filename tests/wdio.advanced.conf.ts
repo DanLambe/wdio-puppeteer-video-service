@@ -229,6 +229,9 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
     integrations: { allure: { attach: 'retained' } },
+    // The offline report check plays this run's video in a browser: keep the
+    // WebM the encoder wrote, the default output, rather than a transcode.
+    processing: { format: 'webm', transcode: { enabled: false } },
   }),
   'spec-file-retry': createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },

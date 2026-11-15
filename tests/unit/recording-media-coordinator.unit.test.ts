@@ -1462,8 +1462,6 @@ const createSegment = (
   transcode: boolean,
   ffmpegArgs?: string[],
 ): ActiveSegment => ({
-  onRecorderError: () => undefined,
-  onWriteStreamError: () => undefined,
   outputFormat: transcode ? 'mp4' : 'webm',
   outputPath,
   recordingFormat: 'webm',
@@ -1473,9 +1471,6 @@ const createSegment = (
     deleteOriginal: true,
     ...(ffmpegArgs === undefined ? {} : { ffmpegArgs }),
   },
-  writeStream: undefined as never,
-  writeStreamDone: Promise.resolve(),
-  writeStreamErrored: false,
 })
 
 const createTranscodeTask = (

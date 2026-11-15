@@ -1,9 +1,6 @@
-import { createWriteStream, type WriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { PassThrough } from 'node:stream'
-import { finished } from 'node:stream/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
 import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
@@ -174,17 +171,12 @@ const createHarness = (
 }
 
 const createActiveSegment = (recordingPath: string): ActiveSegment => ({
-  onRecorderError: vi.fn(),
-  onWriteStreamError: vi.fn(),
   outputFormat: 'webm',
   outputPath: recordingPath,
   recordingFormat: 'webm',
   recordingPath,
   transcode: false,
   transcodeOptions: { deleteOriginal: true },
-  writeStream: {} as WriteStream,
-  writeStreamDone: Promise.resolve(),
-  writeStreamErrored: false,
 })
 
 const attachTranscodedSegment = async (
@@ -228,23 +220,20 @@ const createRealCaptureEngine =
       uuid: () => 'uuid',
     })
 
-type ControlledRecorder = PassThrough & {
+interface ControlledRecorder {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
 
-// A recorder streaming into a real file, as the engine attaches one, whose
-// capture has already failed for `incompleteReason` when that is set.
+// A recorder whose encoder wrote a real file, as the engine attaches one, and
+// whose capture has already failed for `incompleteReason` when that is set.
 const attachControlledCapture = (
   session: CaptureSession,
   recordingPath: string,
   incompleteReason: string | undefined,
 ): ControlledRecorder => {
-  const recorder = new PassThrough() as ControlledRecorder
-  Object.assign(recorder, {
-    abort: vi.fn(async () => {
-      recorder.destroy()
-    }),
+  const recorder = {
+    abort: vi.fn(async () => {}),
     ffmpegResult: { code: 0, diagnostic: '', signal: null },
     frameCount: 5,
     incompleteReason,
@@ -255,19 +244,11 @@ const attachControlledCapture = (
       pendingBlocks: 0,
       pendingBytes: 0,
     },
-    stop: vi.fn(async () => {
-      recorder.end()
-    }),
-  })
-  const writeStream = createWriteStream(recordingPath, { flags: 'r+' })
-  recorder.pipe(writeStream)
+    stop: vi.fn(async () => {}),
+  }
   session.attachCapture({
     recorder: recorder as unknown as ScreencastRecorder,
-    segment: {
-      ...createActiveSegment(recordingPath),
-      writeStream,
-      writeStreamDone: finished(writeStream),
-    },
+    segment: createActiveSegment(recordingPath),
     windowHandle: undefined,
   })
   return recorder

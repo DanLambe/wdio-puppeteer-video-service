@@ -75,6 +75,44 @@ export const assertOfflineReportInBrowser = async (
     assert.ok(Number(await video.getProperty('videoWidth')) > 0)
     assert.ok(Number(await video.getProperty('videoHeight')) > 0)
     assert.match(String(await video.getProperty('currentSrc')), /^file:/u)
+    // The player sizes its scrub bar from the container: a WebM written to a
+    // pipe reported Infinity here.
+    const duration = Number(await video.getProperty('duration'))
+    assert.ok(
+      Number.isFinite(duration) && duration > 0,
+      `Expected the report video to have a finite duration, received ${String(duration)}`,
+    )
+    const target = duration * 0.9
+    const seekedTo = Number(
+      await browser.execute(
+        (element: unknown, seconds: number) => {
+          const player = element as unknown as {
+            currentTime: number
+            addEventListener(
+              type: string,
+              listener: () => void,
+              options: { once: boolean },
+            ): void
+          }
+          return new Promise<number>((resolve) => {
+            player.addEventListener(
+              'seeked',
+              () => resolve(player.currentTime),
+              {
+                once: true,
+              },
+            )
+            player.currentTime = seconds
+          })
+        },
+        await video.getElement(),
+        target,
+      ),
+    )
+    assert.ok(
+      Math.abs(seekedTo - target) < 0.5,
+      `Expected the report video to seek near its end; it reached ${seekedTo.toFixed(2)}s of ${duration.toFixed(2)}s`,
+    )
     await browser.execute(
       (element) => {
         const player = element as unknown as {
@@ -110,6 +148,6 @@ export const assertOfflineReportInBrowser = async (
     await browser.deleteSession()
   }
   console.log(
-    '[e2e:report] Verified file-origin filters, CSP, and video playback offline.',
+    '[e2e:report] Verified file-origin filters, CSP, video duration, seeking and playback offline.',
   )
 }

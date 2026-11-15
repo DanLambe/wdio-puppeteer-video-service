@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { createWriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { Writable } from 'node:stream'
@@ -10,22 +11,34 @@ import type { CDPSession, Page } from 'puppeteer-core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
-import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
+import {
+  probeDirectMp4Support,
+  readFfmpegVersion,
+} from '../../src/service/ffmpeg.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import {
   buildH264TranscodeArgs,
   resolveTimestampPassthroughArgs,
 } from '../../src/service/post-process.js'
-import { PuppeteerCaptureEngine } from '../../src/service/puppeteer-capture-engine.js'
+import {
+  type CaptureStopResult,
+  PuppeteerCaptureEngine,
+} from '../../src/service/puppeteer-capture-engine.js'
 import {
   recordScreencast,
   type ScreencastQueueLimits,
   type ScreencastQueueStats,
   type ScreencastRecorder,
 } from '../../src/service/screencast-recorder.js'
+import type { OutputFormat } from '../../src/types.js'
 import { requireE2eFfmpeg } from '../scripts/ffmpeg-detection.js'
+import { readMatroskaIndex } from '../utils/matroska-blocks.js'
 import {
+  type ColorSpan,
+  type DecodedTimeline,
+  decodeColorAt,
   decodeColorTimeline,
+  readContainerDuration,
   type SolidColor,
   solidPng,
 } from '../utils/media-timeline.js'
@@ -33,19 +46,19 @@ import {
 // Real FFmpeg, real recorder, simulated screencast: frames and time are
 // scripted, so the decoded video must show each color for exactly its span.
 
-let ffmpegPath = ''
-let passthrough: readonly string[] = []
+const detection = await requireE2eFfmpeg()
+if (!detection.resolvedPath) {
+  throw new Error('FFmpeg is required for the recorder timeline tests')
+}
+const ffmpegPath = detection.resolvedPath
+const passthrough = resolveTimestampPassthroughArgs(
+  await readFfmpegVersion(ffmpegPath),
+)
+// Direct MP4 recording needs `-movflags hybrid_fragmented` (FFmpeg 7.1+).
+const directMp4 = await probeDirectMp4Support(ffmpegPath)
 let directory = ''
 
 beforeAll(async () => {
-  const detection = await requireE2eFfmpeg()
-  if (!detection.resolvedPath) {
-    throw new Error('FFmpeg is required for the recorder timeline tests')
-  }
-  ffmpegPath = detection.resolvedPath
-  passthrough = resolveTimestampPassthroughArgs(
-    await readFfmpegVersion(ffmpegPath),
-  )
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'screencast-timeline-'))
 })
 
@@ -63,6 +76,9 @@ interface ScriptedFrame {
 }
 
 interface RecordOptions {
+  readonly format?: OutputFormat
+  /** Record as before FFmpeg wrote its own file: its stdout, piped here. */
+  readonly pipeTo?: string
   readonly queueLimits?: Partial<ScreencastQueueLimits>
   readonly speed?: number
   /** Hold FFmpeg's input until stop, like an encoder starved of CPU. */
@@ -110,41 +126,31 @@ const stallInput = (child: ChildProcess): (() => void) => {
   }
 }
 
-/** Records scripted frames, firing the one-second hold timer as time passes. */
-const recordScripted = async (
-  name: string,
-  frames: readonly ScriptedFrame[],
-  stopAt: number,
-  recorderOptions: RecordOptions = {},
-): Promise<{
-  output: string
-  recorder: ScreencastRecorder
-  /** Queue measurements just before a stalled encoder is released. */
-  stalledStats: ScreencastQueueStats | undefined
-}> => {
-  const images = new Map<string, string>()
-  const image = (frame: ScriptedFrame): string => {
-    const key = `${frame.color}-${String(frame.width)}x${String(frame.height)}`
-    let data = images.get(key)
-    if (!data) {
-      data = solidPng(
-        ffmpegPath,
-        frame.color,
-        frame.width ?? 320,
-        frame.height ?? 240,
-      ).toString('base64')
-      images.set(key, data)
-    }
-    return data
+const images = new Map<string, string>()
+const image = (frame: Omit<ScriptedFrame, 'at'>): string => {
+  const key = `${frame.color}-${String(frame.width)}x${String(frame.height)}`
+  let data = images.get(key)
+  if (!data) {
+    data = solidPng(
+      ffmpegPath,
+      frame.color,
+      frame.width ?? 320,
+      frame.height ?? 240,
+    ).toString('base64')
+    images.set(key, data)
   }
+  return data
+}
+
+/** A scripted screencast on a fake page, with a controllable clock. */
+const createFrameSource = (first: ScriptedFrame) => {
   let now = 0
-  let hold: (() => void) | undefined
   let sessionId = 0
   const session = Object.assign(new EventEmitter(), {
     detach: async () => {},
     send: async (method: string) => {
       if (method === 'Page.startScreencast') {
-        emit(frames[0] as ScriptedFrame)
+        emit(first)
       }
       return {}
     },
@@ -158,14 +164,67 @@ const recordScripted = async (
       sessionId,
     })
   }
-  const page = createPage(session)
+  return {
+    emit,
+    monotonicNow: () => now,
+    page: createPage(session),
+    setNow: (milliseconds: number) => {
+      now = milliseconds
+    },
+  }
+}
+
+/** The output path, reserved by an empty file as the service reserves it. */
+const reserveOutput = async (
+  name: string,
+  format: OutputFormat,
+): Promise<string> => {
+  const output = path.join(directory, `${name}.${format}`)
+  await fs.writeFile(output, '')
+  return output
+}
+
+/** Records scripted frames, firing the one-second hold timer as time passes. */
+const recordScripted = async (
+  name: string,
+  frames: readonly ScriptedFrame[],
+  stopAt: number,
+  recorderOptions: RecordOptions = {},
+): Promise<{
+  output: string
+  recorder: ScreencastRecorder
+  /** Queue measurements just before a stalled encoder is released. */
+  stalledStats: ScreencastQueueStats | undefined
+}> => {
+  const format = recorderOptions.format ?? 'webm'
+  const output = await reserveOutput(name, format)
+  let hold: (() => void) | undefined
+  const source = createFrameSource(frames[0] as ScriptedFrame)
   let release: (() => void) | undefined
+  let piped: Promise<void> | undefined
+  const spawnProcess = (command: string, args: string[]): ChildProcess => {
+    const { pipeTo } = recorderOptions
+    if (pipeTo) {
+      const child = spawn(command, [...args.slice(0, -1), 'pipe:1'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+      const file = createWriteStream(pipeTo)
+      child.stdout?.pipe(file)
+      piped = finished(file)
+      return child
+    }
+    const child = spawnEncoder(command, args)
+    release = stallInput(child)
+    return child
+  }
   const recorder = await recordScreencast(
-    page,
+    source.page,
     {
       ffmpegPath,
-      format: 'webm',
+      format,
       fps: 30,
+      outputPath: output,
       quality: 30,
       scale: 1,
       speed: recorderOptions.speed ?? 1,
@@ -179,41 +238,33 @@ const recordScripted = async (
           return { unref: () => {} } as unknown as NodeJS.Timeout
         },
       },
-      monotonicNow: () => now,
+      monotonicNow: source.monotonicNow,
       ...(recorderOptions.queueLimits
         ? { queueLimits: recorderOptions.queueLimits }
         : {}),
-      ...(recorderOptions.stalled
-        ? {
-            spawnProcess: (command: string, args: string[]) => {
-              const child = spawnEncoder(command, args)
-              release = stallInput(child)
-              return child
-            },
-          }
+      // Otherwise FFmpeg is spawned exactly as the service spawns it.
+      ...(recorderOptions.stalled || recorderOptions.pipeTo
+        ? { spawnProcess }
         : {}),
     },
   )
-  const output = path.join(directory, `${name}.webm`)
-  const file = createWriteStream(output)
-  recorder.pipe(file)
   let second = 1
   for (const frame of frames.slice(1)) {
     for (; second < frame.at; second += 1) {
-      now = second * 1_000
+      source.setNow(second * 1_000)
       hold?.()
     }
-    emit(frame)
+    source.emit(frame)
   }
   for (; second <= stopAt; second += 1) {
-    now = second * 1_000
+    source.setNow(second * 1_000)
     hold?.()
   }
-  now = stopAt * 1_000
+  source.setNow(stopAt * 1_000)
   const stalledStats = release ? recorder.queueStats : undefined
   release?.()
   await recorder.stop()
-  await finished(file)
+  await piped
   expect(recorder.ffmpegResult.code).toBe(0)
   return { output, recorder, stalledStats }
 }
@@ -229,8 +280,34 @@ const createPage = (session: EventEmitter): Page =>
     viewport: () => null,
   }) as unknown as Page
 
+// As the service spawns it: FFmpeg writes the output file, not its stdout.
 const spawnEncoder = (command: string, args: string[]): ChildProcess =>
-  spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  spawn(command, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
+
+/**
+ * A player sizes its timeline from the container. A finished recording's
+ * duration is where its last frame ends, to within one step of the grid.
+ */
+const expectFiniteDuration = (
+  output: string,
+  timeline: DecodedTimeline,
+  fps: number,
+): void => {
+  const duration = readContainerDuration(ffmpegPath, output)
+  expect(duration, `${output} reports Duration: N/A`).toBeDefined()
+  const lastEnd = timeline.spans.at(-1)?.end ?? 0
+  expect(Math.abs((duration ?? 0) - lastEnd)).toBeLessThanOrEqual(
+    1 / fps + 0.001,
+  )
+}
+
+/** The seek index FFmpeg writes once it can seek back into its output. */
+const expectSeekIndex = async (output: string): Promise<void> => {
+  const index = readMatroskaIndex(await fs.readFile(output))
+  expect(index.hasCues, `${output} has no Cues element`).toBe(true)
+  expect(index.cueTimesMs.length).toBeGreaterThan(0)
+  expect(index.durationMs).toBeGreaterThan(0)
+}
 
 describe('recorded frame timeline', () => {
   it('shows each frame for its span across a frame size change', async () => {
@@ -254,6 +331,8 @@ describe('recorded frame timeline', () => {
     expect(timeline.frames).toBeLessThan(20)
     // Widely playable 4:2:0 VP9, not planar RGB.
     expect(timeline.codecLine).toMatch(/vp9 \(Profile 0\).*yuv420p/u)
+    expectFiniteDuration(output, timeline, 30)
+    await expectSeekIndex(output)
   })
 
   it('keeps timing across a quiet stretch longer than a Matroska cluster', async () => {
@@ -265,12 +344,12 @@ describe('recorded frame timeline', () => {
       ],
       36,
     )
-    expect(
-      decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans,
-    ).toEqual([
+    const timeline = decodeColorTimeline(ffmpegPath, output, 30, passthrough)
+    expect(timeline.spans).toEqual([
       { color: 'red', start: 0, end: 35 },
       { color: 'green', start: 35, end: 36 },
     ])
+    expectFiniteDuration(output, timeline, 30)
   })
 
   it('plays back at the configured speed', async () => {
@@ -283,12 +362,13 @@ describe('recorded frame timeline', () => {
       4,
       { speed: 2 },
     )
-    expect(
-      decodeColorTimeline(ffmpegPath, output, 60, passthrough).spans,
-    ).toEqual([
+    const timeline = decodeColorTimeline(ffmpegPath, output, 60, passthrough)
+    expect(timeline.spans).toEqual([
       { color: 'red', start: 0, end: 1 },
       { color: 'green', start: 1, end: 2 },
     ])
+    // The container duration is in playback time too.
+    expectFiniteDuration(output, timeline, 60)
   })
 
   it('keeps every span and the exact duration through the H.264 transcode', async () => {
@@ -320,11 +400,58 @@ describe('recorded frame timeline', () => {
       { color: 'blue', start: 3, end: 5 },
     ])
     // Players size the timeline from the container, not the last frame.
-    const probe = spawnSync(ffmpegPath, ['-hide_banner', '-i', output])
-    const duration = /Duration: (\d+):(\d+):([\d.]+)/u.exec(
-      probe.stderr.toString(),
+    expect(
+      Math.abs((readContainerDuration(ffmpegPath, output) ?? 0) - 5),
+    ).toBeLessThanOrEqual(1 / 30)
+  })
+})
+
+describe('recorded WebM duration and seek index', () => {
+  it('sizes and seeks to the end of a page held still for 39 seconds', async () => {
+    const output = await record(
+      'quiet-tail',
+      [
+        { at: 0, color: 'red' },
+        { at: 1, color: 'green' },
+      ],
+      40,
     )
-    expect(Math.abs(Number(duration?.[3]) - 5)).toBeLessThanOrEqual(1 / 30)
+    const timeline = decodeColorTimeline(ffmpegPath, output, 30, passthrough)
+    expect(timeline.spans).toEqual([
+      { color: 'red', start: 0, end: 1 },
+      { color: 'green', start: 1, end: 40 },
+    ])
+    expectFiniteDuration(output, timeline, 30)
+    await expectSeekIndex(output)
+    const index = readMatroskaIndex(await fs.readFile(output))
+    expect(Math.abs((index.durationMs ?? 0) - 40_000)).toBeLessThanOrEqual(34)
+    // Seeking as a player does, into the middle and the last second of the
+    // long hold, decodes the held frame.
+    expect(decodeColorAt(ffmpegPath, output, 0)).toBe('red')
+    expect(decodeColorAt(ffmpegPath, output, 20)).toBe('green')
+    expect(decodeColorAt(ffmpegPath, output, 39.5)).toBe('green')
+  })
+
+  it('owes its index to a seekable output: the same recording through a pipe has none', async () => {
+    const frames: ScriptedFrame[] = [
+      { at: 0, color: 'red' },
+      { at: 2, color: 'blue' },
+    ]
+    const output = await record('pipe-control', frames, 3)
+    // The service before this change: identical arguments, but FFmpeg wrote
+    // to its standard output and Node copied that into the file.
+    const pipedPath = path.join(directory, 'pipe-control-piped.webm')
+    await record('pipe-control-source', frames, 3, { pipeTo: pipedPath })
+
+    expect(
+      decodeColorTimeline(ffmpegPath, pipedPath, 30, passthrough).spans,
+    ).toEqual(decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans)
+    expect(readMatroskaIndex(await fs.readFile(pipedPath))).toMatchObject({
+      hasCues: false,
+    })
+    expect(readContainerDuration(ffmpegPath, pipedPath)).toBeUndefined()
+    await expectSeekIndex(output)
+    expect(readContainerDuration(ffmpegPath, output)).toBeCloseTo(3, 1)
   })
 })
 
@@ -347,6 +474,7 @@ describe('recorded frame timeline under a stalled encoder', () => {
     // The held frame spans the gap, across Matroska clusters, to the end.
     expect(timeline.spans).toEqual([{ color: 'red', start: 0, end: 61 }])
     expect(timeline.frames).toBeLessThan(8)
+    expectFiniteDuration(output, timeline, 30)
   })
 
   it('ends an overloaded recording where capture stopped, with every earlier span intact', async () => {
@@ -376,34 +504,324 @@ describe('recorded frame timeline under a stalled encoder', () => {
   })
 })
 
+/** Stops an attached recorder through the real engine, as the service does. */
+const stopThroughEngine = async (
+  recorder: ScreencastRecorder,
+  output: string,
+  format: OutputFormat = 'webm',
+): Promise<CaptureStopResult> => {
+  const captureSession = new CaptureSession()
+  captureSession.beginRecording('encoder-failure')
+  captureSession.attachCapture({
+    recorder,
+    segment: {
+      outputFormat: format,
+      outputPath: output,
+      recordingFormat: format,
+      recordingPath: output,
+      transcode: true,
+      transcodeOptions: { deleteOriginal: true },
+    },
+    windowHandle: undefined,
+  })
+  const engine = new PuppeteerCaptureEngine({
+    capture: resolveServiceConfiguration({}).options.capture,
+    clock: systemClock,
+    connectPuppeteer: async () => {
+      throw new Error('Capture is attached directly')
+    },
+    fileSystem: nodeFileSystem,
+    getSessionToken: () => 'session',
+    log: () => {},
+    onConnectionFailure: () => {},
+    onProtocolChanged: () => {},
+    session: captureSession,
+    startScreencast: async () => {
+      throw new Error('Capture is attached directly')
+    },
+    uuid: () => 'uuid',
+  })
+  return engine.stopCapture()
+}
+
+const waitFor = async (
+  condition: () => boolean | Promise<boolean>,
+  description: string,
+  timeoutMs = 10_000,
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!(await condition())) {
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out waiting for ${description}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+/**
+ * Starts a recording whose encoder is expected to fail on its output, feeds it
+ * frames until it exits, and returns why the service says it failed: the
+ * startup error, or the incomplete reason a stop through the engine reports.
+ * FFmpeg opens and writes its output only once it has probed some input, so
+ * which of the two it is depends on timing, and both must name the cause.
+ */
+const failingRecordingReason = async (outputPath: string): Promise<string> => {
+  const source = createFrameSource({ at: 0, color: 'red' })
+  let recorder: ScreencastRecorder
+  try {
+    recorder = await recordScreencast(
+      source.page,
+      {
+        ffmpegPath,
+        format: 'webm',
+        fps: 30,
+        outputPath,
+        quality: 30,
+        scale: 1,
+        speed: 1,
+      },
+      { monotonicNow: source.monotonicNow, spawnProcess: spawnEncoder },
+    )
+  } catch (error) {
+    return (error as Error).message
+  }
+  let at = 0
+  await waitFor(async () => {
+    at += 0.1
+    source.emit({ at, color: at % 0.2 < 0.1 ? 'red' : 'green' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    return recorder.ffmpegResult.code !== null
+  }, 'the encoder to fail')
+  const stopped = await stopThroughEngine(recorder, outputPath)
+  expect(stopped).toMatchObject({
+    segment: { transcode: false },
+    streamOk: false,
+  })
+  return stopped.incompleteReason ?? ''
+}
+
+describe('recorded frame timeline when the encoder fails on its output', () => {
+  it('reports an output file FFmpeg cannot open, and leaves no file behind', async () => {
+    // The reserved path's directory is gone, as when the output directory is
+    // removed while a test runs.
+    const missingDirectory = path.join(directory, 'removed-output-directory')
+    const outputPath = path.join(missingDirectory, 'segment.webm')
+
+    const reason = await failingRecordingReason(outputPath)
+
+    expect(reason).toMatch(/^FFmpeg exited with code -?\d+ /u)
+    // FFmpeg's own explanation, as FFmpeg 6 and later or 4.4 word it.
+    expect(reason).toMatch(/Error opening output|No such file or directory/u)
+    await expect(fs.stat(missingDirectory)).rejects.toThrow()
+  })
+
+  it.runIf(process.platform === 'win32' || process.platform === 'linux')(
+    'reports a write to the output failing mid-recording',
+    async () => {
+      // A full disk, made real: Linux's /dev/full refuses every write; on
+      // Windows a named pipe whose reader hangs up after the first bytes.
+      let outputPath = '/dev/full'
+      let server: net.Server | undefined
+      if (process.platform === 'win32') {
+        outputPath = `\\\\.\\pipe\\wdio-video-write-failure-${process.pid.toString()}`
+        server = net.createServer((socket) => {
+          socket.on('error', () => {})
+          socket.once('data', () => socket.destroy())
+        })
+        const listening = once(server, 'listening')
+        server.listen(outputPath)
+        await listening
+      }
+      try {
+        const reason = await failingRecordingReason(outputPath)
+
+        expect(reason).toMatch(/^FFmpeg exited with code -?\d+ /u)
+        // FFmpeg's own explanation, not a generic stream error.
+        expect(reason).toMatch(
+          /Error (muxing|writing|submitting)|write_frame|No space left|Invalid argument|Broken pipe/u,
+        )
+      } finally {
+        server?.close()
+      }
+    },
+  )
+})
+
+/** Waits until FFmpeg has stopped growing its output, so all it was given is written. */
+const waitForWrittenOutput = async (output: string): Promise<void> => {
+  let previous = -1
+  let stableSince = Date.now()
+  await waitFor(async () => {
+    const { size } = await fs.stat(output)
+    if (size !== previous) {
+      previous = size
+      stableSince = Date.now()
+    }
+    // Unchanged for a second, empty or not: an encoder that buffers its
+    // output would leave nothing, and the decode below then fails.
+    return Date.now() - stableSince >= 1_000
+  }, `${output} to stop growing`)
+}
+
+const CYCLE: readonly SolidColor[] = ['red', 'green', 'blue']
+const KILL_AT_SECONDS = 12
+
+/**
+ * Feeds the encoder 30 frames a second for twelve seconds, a new color each
+ * second, waits until its output stops growing, then kills it with SIGKILL as
+ * a crashed worker's encoder would be, before any stop. A page in motion keeps
+ * frames coming: FFmpeg's PNG decoder holds up to 16 frames across its
+ * threads, so a sparse feed would measure that latency rather than the muxer.
+ */
+const recordAndKill = async (
+  format: OutputFormat,
+): Promise<{ output: string; recorder: ScreencastRecorder }> => {
+  const output = await reserveOutput(`killed-${format}`, format)
+  const source = createFrameSource({ at: 0, color: 'red' })
+  let child: ChildProcess | undefined
+  const recorder = await recordScreencast(
+    source.page,
+    {
+      ffmpegPath,
+      format,
+      fps: 30,
+      outputPath: output,
+      quality: 30,
+      scale: 1,
+      speed: 1,
+    },
+    {
+      monotonicNow: source.monotonicNow,
+      spawnProcess: (command, args) => {
+        child = spawnEncoder(command, args)
+        return child
+      },
+    },
+  )
+  for (let frame = 1; frame <= KILL_AT_SECONDS * 30; frame += 1) {
+    const at = frame / 30
+    source.emit({ at, color: CYCLE[Math.floor(at) % 3] as SolidColor })
+  }
+  if (!child) {
+    throw new Error('The encoder was not spawned')
+  }
+  const closed = once(child, 'close')
+  try {
+    await waitForWrittenOutput(output)
+  } finally {
+    child.kill('SIGKILL')
+    await closed
+    await recorder.abort()
+  }
+  return { output, recorder }
+}
+
+const expectedKilledSpans = (decoded: number): ColorSpan[] =>
+  Array.from({ length: decoded }, (_unused, second) => ({
+    color: CYCLE[second % 3] as SolidColor,
+    start: second,
+    end: second + 1,
+  }))
+
+/**
+ * What a killed encoder leaves must decode, every span intact, to within two
+ * seconds of the last frame it had been given. Clusters close each second and
+ * every packet is flushed as it is written, so the open cluster, at most a
+ * second, plus the decoder's frames in flight (16 frames, about half a second
+ * here) can be lost; two seconds leaves a little margin. With FFmpeg's default
+ * cluster and flush settings the audit lost about 8 of 12 seconds, which this
+ * bound fails.
+ */
+const expectKilledTail = (output: string, recorder: ScreencastRecorder) => {
+  expect(recorder.incompleteReason).toMatch(
+    /^FFmpeg (was terminated by SIGKILL|exited with code -?\d+) before the recording was stopped/u,
+  )
+  const spans = decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans
+  const last = spans.at(-1)
+  expect(last?.start).toBeGreaterThanOrEqual(KILL_AT_SECONDS - 2)
+  // Every span before the last is exact; the last lasts one grid step.
+  expect(spans.slice(0, -1)).toEqual(expectedKilledSpans(spans.length - 1))
+  const expectedLast = expectedKilledSpans(spans.length).at(-1)
+  expect(last).toMatchObject({
+    color: expectedLast?.color,
+    start: expectedLast?.start,
+  })
+}
+
+describe('recorded frame timeline when the encoder is killed', () => {
+  it('leaves a WebM that decodes to within two seconds of what it was given', async () => {
+    const { output, recorder } = await recordAndKill('webm')
+    expectKilledTail(output, recorder)
+  }, 30_000)
+})
+
+describe.runIf(directMp4)(
+  'direct MP4 recording (needs an FFmpeg that accepts -movflags hybrid_fragmented, 7.1 or later)',
+  () => {
+    it('sizes and seeks to the end of a page held still', async () => {
+      const output = await record(
+        'direct-quiet-tail',
+        [
+          { at: 0, color: 'red' },
+          { at: 1, color: 'green' },
+        ],
+        20,
+        { format: 'mp4' },
+      )
+      const timeline = decodeColorTimeline(ffmpegPath, output, 30, passthrough)
+      expect(timeline.spans).toEqual([
+        { color: 'red', start: 0, end: 1 },
+        { color: 'green', start: 1, end: 20 },
+      ])
+      expectFiniteDuration(output, timeline, 30)
+      // A finished hybrid MP4 carries a regular index for players.
+      expect(readMp4TopLevelBoxes(await fs.readFile(output))).toContain('moov')
+      expect(decodeColorAt(ffmpegPath, output, 19.5)).toBe('green')
+    })
+
+    it('leaves a killed encoder an MP4 that decodes to within two seconds', async () => {
+      const { output, recorder } = await recordAndKill('mp4')
+      expectKilledTail(output, recorder)
+    }, 30_000)
+  },
+)
+
+/** The four-character types of an MP4's top-level boxes, in order. */
+const readMp4TopLevelBoxes = (bytes: Buffer): string[] => {
+  const boxes: string[] = []
+  let offset = 0
+  while (offset + 8 <= bytes.length) {
+    let size = bytes.readUInt32BE(offset)
+    boxes.push(bytes.toString('latin1', offset + 4, offset + 8))
+    if (size === 1 && offset + 16 <= bytes.length) {
+      size = Number(bytes.readBigUInt64BE(offset + 8))
+    }
+    if (size < 8) {
+      break
+    }
+    offset += size
+  }
+  return boxes
+}
+
 describe('recorded frame timeline when the encoder exits early', () => {
   it('keeps a successful early exit as unclean media rather than a healthy recording', async () => {
-    const data = solidPng(ffmpegPath, 'red', 320, 240).toString('base64')
-    let now = 0
-    let sessionId = 0
-    const session = Object.assign(new EventEmitter(), {
-      detach: async () => {},
-      send: async (method: string) => {
-        if (method === 'Page.startScreencast') {
-          emit()
-        }
-        return {}
-      },
-    })
-    const emit = (): void => {
-      sessionId += 1
-      session.emit('Page.screencastFrame', {
-        data,
-        metadata: { timestamp: 1_000 + now / 1_000 },
-        sessionId,
-      })
-    }
+    const output = await reserveOutput('early-exit', 'webm')
+    const source = createFrameSource({ at: 0, color: 'red' })
     const exited = Promise.withResolvers<void>()
     const recorder = await recordScreencast(
-      createPage(session),
-      { ffmpegPath, format: 'webm', fps: 30, quality: 30, scale: 1, speed: 1 },
+      source.page,
       {
-        monotonicNow: () => now,
+        ffmpegPath,
+        format: 'webm',
+        fps: 30,
+        outputPath: output,
+        quality: 30,
+        scale: 1,
+        speed: 1,
+      },
+      {
+        monotonicNow: source.monotonicNow,
         // As a configured FFmpeg wrapper limiting output length would: the
         // encoder finishes successfully while the test is still running.
         // Minimal probing lets it start encoding before input ends.
@@ -419,57 +837,14 @@ describe('recorded frame timeline when the encoder exits early', () => {
         },
       },
     )
-    const output = path.join(directory, 'early-exit.webm')
-    const file = createWriteStream(output)
-    const writeStreamDone = finished(file)
-    recorder.pipe(file)
     for (let frame = 1; frame <= 30; frame += 1) {
-      now = frame * 100
-      emit()
+      source.emit({ at: frame / 10, color: 'red' })
     }
     await exited.promise
-    await writeStreamDone
-
-    const captureSession = new CaptureSession()
-    captureSession.beginRecording('early-exit')
-    captureSession.attachCapture({
-      recorder,
-      segment: {
-        onRecorderError: () => {},
-        onWriteStreamError: () => {},
-        outputFormat: 'webm',
-        outputPath: output,
-        recordingFormat: 'webm',
-        recordingPath: output,
-        transcode: true,
-        transcodeOptions: { deleteOriginal: true },
-        writeStream: file,
-        writeStreamDone,
-        writeStreamErrored: false,
-      },
-      windowHandle: undefined,
-    })
-    const engine = new PuppeteerCaptureEngine({
-      capture: resolveServiceConfiguration({}).options.capture,
-      clock: systemClock,
-      connectPuppeteer: async () => {
-        throw new Error('Capture is attached directly')
-      },
-      fileSystem: nodeFileSystem,
-      getSessionToken: () => 'session',
-      log: () => {},
-      onConnectionFailure: () => {},
-      onProtocolChanged: () => {},
-      session: captureSession,
-      startScreencast: async () => {
-        throw new Error('Capture is attached directly')
-      },
-      uuid: () => 'uuid',
-    })
 
     // Exit code 0, three seconds of frames captured, but FFmpeg never saw the
     // end of its input: the recording is incomplete, not transcoded.
-    const stopped = await engine.stopCapture()
+    const stopped = await stopThroughEngine(recorder, output)
     expect(recorder.frameCount).toBe(31)
     expect(recorder.ffmpegResult.code).toBe(0)
     expect(stopped).toMatchObject({
