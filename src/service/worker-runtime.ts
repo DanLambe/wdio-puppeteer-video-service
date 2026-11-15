@@ -15,6 +15,7 @@ import {
 } from './composition.js'
 import { SPOOL_DIR_NAME } from './constants.js'
 import { ContextFollower } from './context-follower.js'
+import { DeferredEncoder } from './deferred-encode.js'
 import { FfmpegRuntime } from './ffmpeg-runtime.js'
 import { isInternalOperation } from './internal-operation.js'
 import {
@@ -148,6 +149,7 @@ export class WdioPuppeteerVideoWorkerRuntime
     )
     const ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
     this._ffmpegRuntime = new FfmpegRuntime({
+      clock: composition.clock,
       createPostProcessSlotScheduler: () =>
         composition.createPostProcessSlotScheduler(
           this._options,
@@ -208,6 +210,15 @@ export class WdioPuppeteerVideoWorkerRuntime
                 SPOOL_DIR_NAME,
                 launcherContext.runId,
               ),
+              encoder: new DeferredEncoder({
+                clock: composition.clock,
+                concurrency: this._options.concurrency,
+                ffmpeg: this._ffmpegRuntime,
+                fileSystem: this._fileSystem,
+                log: (level, message, details) => {
+                  this._log(level, message, details)
+                },
+              }),
               uuid: composition.uuid,
             },
           }

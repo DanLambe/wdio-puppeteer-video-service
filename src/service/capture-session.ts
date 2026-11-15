@@ -59,6 +59,12 @@ export interface HeldSegment {
   readonly tab?: SegmentTab
 }
 
+/** A held segment whose frames are still in its spool. */
+export type SpooledSegment = HeldSegment & { readonly spool: ScreencastSpool }
+
+export const isSpooledSegment = (held: HeldSegment): held is SpooledSegment =>
+  held.spool !== undefined
+
 /** How a stopped segment ended, as its capture reported it. */
 export interface StoppedSegmentDetails {
   readonly capturedSeconds: number

@@ -8,14 +8,16 @@ import {
   type SlugMetadata,
 } from '../video-name-utils.js'
 import { reserveArtifactPath } from './artifact-integrity.js'
-import type {
-  CaptureSession,
-  HeldSegment,
-  SegmentTab,
-  SegmentTabReason,
+import {
+  type CaptureSession,
+  type HeldSegment,
+  isSpooledSegment,
+  type SegmentTab,
+  type SegmentTabReason,
 } from './capture-session.js'
 import type { OutputFormat } from './constants.js'
 import type { ContextFollowerTarget, FollowReason } from './context-follower.js'
+import type { DeferredEncoder } from './deferred-encode.js'
 import type { FfmpegRuntime } from './ffmpeg-runtime.js'
 import type { ScreencastSpool } from './frame-sink.js'
 import { runInternal } from './internal-operation.js'
@@ -63,10 +65,11 @@ type RecordingSlotPort = Pick<
   'acquire' | 'ownsGlobalRecordingSlot' | 'ownsRecordingSlot' | 'release'
 >
 
-/** Where a worker writes the spools of deferred segments. */
+/** Where a worker writes the spools of deferred segments, and who encodes them. */
 export interface SpoolStorage {
   /** This run's spool directory, `<outputDir>/.wdio-video-spool/<runId>`. */
   readonly directory: string
+  readonly encoder: Pick<DeferredEncoder, 'encodeAll' | 'preserveFrames'>
   readonly uuid: () => string
 }
 
@@ -391,6 +394,9 @@ export class RecordingController implements ContextFollowerTarget {
         // The outcome is known: a kept recording's segments are processed now,
         // a discarded one's are deleted below without any.
         if (keepArtifacts) {
+          // Every spool is encoded first, within its own budget; transcodes
+          // and the merge follow under their usual rules.
+          await this.encodeHeldSpools()
           processingFailure = await this.finalizeHeldSegmentsReportingFailure()
         }
         if (processingFailure) {
@@ -477,7 +483,42 @@ export class RecordingController implements ContextFollowerTarget {
    */
   async finalizeWithoutOutcome(): Promise<void> {
     await this.stopRecording()
+    await this.encodeHeldSpools()
     await this.finalizeHeldSegments()
+  }
+
+  /**
+   * Encodes the held spools of a kept recording, in part order. An encoded
+   * segment takes its spool's place; one that cannot be encoded keeps its
+   * frames, any output FFmpeg wrote as unclean media, and makes the recording
+   * incomplete. No spool is held afterwards, so nothing encodes it again.
+   */
+  private async encodeHeldSpools(): Promise<void> {
+    const held = this.captureSession.heldSegments
+    const spooled = held.filter(isSpooledSegment)
+    const storage = this.spoolStorage
+    if (!storage || spooled.length === 0) {
+      return
+    }
+    const capturedSeconds = held.reduce(
+      (total, segment) => total + segment.capturedSeconds,
+      0,
+    )
+    for (const { held: segment, outcome } of await storage.encoder.encodeAll(
+      spooled,
+      capturedSeconds,
+    )) {
+      if (outcome.kind === 'encoded') {
+        this.captureSession.replaceHeldSegment(segment, outcome.segment)
+        continue
+      }
+      this.reportCaptureFailure(outcome.failure)
+      if (outcome.partial) {
+        this.captureSession.replaceHeldSegment(segment, outcome.partial)
+      } else {
+        this.captureSession.releaseHeldSegment(segment)
+      }
+    }
   }
 
   /**
@@ -503,10 +544,6 @@ export class RecordingController implements ContextFollowerTarget {
    */
   private async finalizeHeldSegments(): Promise<void> {
     for (const held of this.captureSession.heldSegments) {
-      if (held.spool) {
-        // Not encoded yet: its planned output is not this recording's file.
-        continue
-      }
       await this.media.finalizeSegment(held.segment)
       this.captureSession.releaseHeldSegment(held)
       this.log(
