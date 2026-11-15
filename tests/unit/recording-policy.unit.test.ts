@@ -361,4 +361,31 @@ describe('recording policy', () => {
       })
     },
   )
+
+  it('records failed processing as failed with its files and tabs, before a capture failure', () => {
+    const tabs = new Map([
+      [1, { contextId: 'tab-a', ordinal: 1, reason: 'start' as const }],
+    ])
+    expect(
+      createCompletedManifestOptions({
+        captureFailed: true,
+        deferred: false,
+        keepArtifacts: true,
+        result: 'failed',
+        paths: ['part1.webm'],
+        processing: resolveServiceConfiguration({
+          processing: { transcode: { enabled: true } },
+        }).options.processing,
+        processingFailure: 'Transcode failed',
+        tabs,
+      }),
+    ).toEqual({
+      decision: 'failed',
+      paths: ['part1.webm'],
+      processingOutcome: 'failed',
+      reason: 'Transcode failed',
+      result: 'failed',
+      tabs,
+    })
+  })
 })
