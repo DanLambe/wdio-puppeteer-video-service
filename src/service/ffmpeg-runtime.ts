@@ -2,7 +2,11 @@ import type {
   OutputFormat,
   ResolvedWdioPuppeteerVideoServiceOptions,
 } from '../types.js'
-import type { ProcessBoundary } from './boundaries.js'
+import {
+  type ClockBoundary,
+  type ProcessBoundary,
+  systemClock,
+} from './boundaries.js'
 import {
   getFfmpegCandidates,
   probeDirectMp4Support,
@@ -32,7 +36,16 @@ type FfmpegRuntimeOptions = Pick<
   'concurrency' | 'processing'
 >
 
+/** Bounds how long, and while what, work waits for a post-processing slot. */
+export interface PostProcessAdmission {
+  /** Aborted when the work is no longer wanted. */
+  readonly signal: AbortSignal
+  /** The longest wait for a slot, in milliseconds. */
+  readonly waitMs: number
+}
+
 export interface FfmpegRuntimeDependencies {
+  readonly clock?: ClockBoundary
   readonly options: FfmpegRuntimeOptions
   readonly process: ProcessBoundary
   readonly processRegistry: FfmpegProcessRegistry
@@ -47,6 +60,7 @@ export interface FfmpegRuntimeDependencies {
 }
 
 export class FfmpegRuntime {
+  private readonly clock: ClockBoundary
   private readonly options: FfmpegRuntimeOptions
   private readonly process: ProcessBoundary
   private readonly processRegistry: FfmpegProcessRegistry
@@ -75,6 +89,7 @@ export class FfmpegRuntime {
   private version: string | undefined
 
   constructor(dependencies: FfmpegRuntimeDependencies) {
+    this.clock = dependencies.clock ?? systemClock
     this.options = dependencies.options
     this.process = dependencies.process
     this.processRegistry = dependencies.processRegistry
@@ -153,7 +168,12 @@ export class FfmpegRuntime {
     overrides: Partial<
       Pick<
         RunFfmpegOptions,
-        'onStderr' | 'timeoutMs' | 'markUnavailable' | 'warnMissing'
+        | 'markUnavailable'
+        | 'onResult'
+        | 'onStderr'
+        | 'signal'
+        | 'timeoutMs'
+        | 'warnMissing'
       >
     > = {},
   ): Promise<boolean> {
@@ -227,15 +247,27 @@ export class FfmpegRuntime {
     }
   }
 
+  /** Whether new FFmpeg work may start; teardown stops accepting it. */
+  get isAcceptingWork(): boolean {
+    return this.acceptingWork
+  }
+
+  /**
+   * Runs a task while holding a post-processing slot, or resolves
+   * `undefined` without running it. With an admission, waiting for the slot
+   * is bounded and cancellable: a slot granted after the wait ended, or after
+   * the signal aborted, is released without running the task.
+   */
   async withPostProcessSlot<T>(
     operation: string,
     task: () => Promise<T>,
+    admission?: PostProcessAdmission,
   ): Promise<T | undefined> {
-    if (!this.acceptingWork) {
+    if (!this.acceptingWork || admission?.signal.aborted) {
       return undefined
     }
     const slotScheduler = this.createPostProcessSlotScheduler()
-    const acquired = await slotScheduler.acquire().catch((error: unknown) => {
+    const acquiring = slotScheduler.acquire().catch((error: unknown) => {
       this.log(
         'warn',
         `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
@@ -243,6 +275,9 @@ export class FfmpegRuntime {
       )
       return undefined
     })
+    const acquired = admission
+      ? await this.admit(slotScheduler, acquiring, admission, operation)
+      : await acquiring
     if (acquired === undefined) {
       // Let the media coordinator preserve sources and record the failed outcome
       // before applying failurePolicy, just as it does for FFmpeg failures.
@@ -259,12 +294,54 @@ export class FfmpegRuntime {
     this.activePostProcessSlotSchedulers.add(slotScheduler)
 
     try {
-      if (!this.acceptingWork) {
+      if (!this.acceptingWork || admission?.signal.aborted) {
         return undefined
       }
       return await task()
     } finally {
       await this.releasePostProcessSlot(slotScheduler)
+    }
+  }
+
+  /**
+   * Waits for a slot until the admission's wait ends or its signal aborts.
+   * A grant that arrives after that is released, unused, when it arrives.
+   */
+  private async admit(
+    slotScheduler: PostProcessSlotScheduler,
+    acquiring: Promise<boolean | undefined>,
+    admission: PostProcessAdmission,
+    operation: string,
+  ): Promise<boolean | undefined> {
+    const ended = Promise.withResolvers<'aborted' | 'expired'>()
+    const onAbort = (): void => {
+      ended.resolve('aborted')
+    }
+    admission.signal.addEventListener('abort', onAbort, { once: true })
+    const timer = this.clock.setTimeout(() => {
+      ended.resolve('expired')
+    }, admission.waitMs)
+    timer.unref?.()
+    try {
+      const outcome = await Promise.race([acquiring, ended.promise])
+      if (outcome !== 'aborted' && outcome !== 'expired') {
+        return outcome
+      }
+      void acquiring.then(async (granted) => {
+        if (granted) {
+          await slotScheduler.release()
+        }
+      })
+      if (outcome === 'expired') {
+        this.log(
+          'warn',
+          `[WdioPuppeteerVideoService] Unable to start ${operation} within ${admission.waitMs.toString()}ms because post-processing capacity is exhausted.`,
+        )
+      }
+      return undefined
+    } finally {
+      this.clock.clearTimeout(timer)
+      admission.signal.removeEventListener('abort', onAbort)
     }
   }
 

@@ -7,7 +7,10 @@ export interface FfmpegProcess {
   pid?: number | undefined
   stderr?: NodeJS.ReadableStream | null
   kill(signal?: NodeJS.Signals | number): boolean
-  on(event: 'close', listener: (code: number | null) => void): this
+  on(
+    event: 'close',
+    listener: (code: number | null, signal?: NodeJS.Signals | null) => void,
+  ): this
   on(event: 'error', listener: (error: Error) => void): this
 }
 

@@ -680,3 +680,165 @@ describe('FfmpegRuntime', () => {
     expect(harness.runFfmpeg).toHaveBeenCalledOnce()
   })
 })
+
+describe('FfmpegRuntime cancellable admission', () => {
+  const pendingGrant = (harness: ReturnType<typeof createHarness>) => {
+    const grant = createDeferred<boolean>()
+    harness.scheduler.acquire.mockReturnValue(grant.promise)
+    return grant
+  }
+
+  it('runs the task when a slot is granted within the wait', async () => {
+    const harness = createHarness()
+    const task = vi.fn(async () => 'encoded')
+
+    await expect(
+      harness.runtime.withPostProcessSlot('spool encode', task, {
+        signal: new AbortController().signal,
+        waitMs: 1_000,
+      }),
+    ).resolves.toBe('encoded')
+    expect(task).toHaveBeenCalledOnce()
+    expect(harness.scheduler.release).toHaveBeenCalledOnce()
+  })
+
+  it('stops waiting at the wait limit and releases a later grant unused', async () => {
+    vi.useFakeTimers()
+    try {
+      const harness = createHarness()
+      const grant = pendingGrant(harness)
+      const task = vi.fn(async () => 'encoded')
+
+      const waiting = harness.runtime.withPostProcessSlot(
+        'spool encode',
+        task,
+        {
+          signal: new AbortController().signal,
+          waitMs: 30_000,
+        },
+      )
+      await vi.advanceTimersByTimeAsync(30_000)
+      await expect(waiting).resolves.toBeUndefined()
+      expect(harness.log).toHaveBeenCalledWith(
+        'warn',
+        '[WdioPuppeteerVideoService] Unable to start spool encode within 30000ms because post-processing capacity is exhausted.',
+      )
+
+      grant.resolve(true)
+      await vi.waitFor(() => {
+        expect(harness.scheduler.release).toHaveBeenCalledOnce()
+      })
+      expect(task).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops waiting when cancelled and releases a later grant unused', async () => {
+    const harness = createHarness()
+    const grant = pendingGrant(harness)
+    const task = vi.fn(async () => 'encoded')
+    const controller = new AbortController()
+
+    const waiting = harness.runtime.withPostProcessSlot('spool encode', task, {
+      signal: controller.signal,
+      waitMs: 60_000,
+    })
+    controller.abort()
+    await expect(waiting).resolves.toBeUndefined()
+    grant.resolve(true)
+    await vi.waitFor(() => {
+      expect(harness.scheduler.release).toHaveBeenCalledOnce()
+    })
+    expect(task).not.toHaveBeenCalled()
+    // A cancellation is not a capacity problem.
+    expect(harness.log).not.toHaveBeenCalled()
+  })
+
+  it('releases nothing for a late refusal or a late storage error', async () => {
+    const harness = createHarness()
+    const refusal = pendingGrant(harness)
+    const controller = new AbortController()
+    const refused = harness.runtime.withPostProcessSlot(
+      'spool encode',
+      async () => 'never',
+      { signal: controller.signal, waitMs: 60_000 },
+    )
+    controller.abort()
+    await expect(refused).resolves.toBeUndefined()
+    refusal.resolve(false)
+
+    const failing = createDeferred<boolean>()
+    harness.scheduler.acquire.mockReturnValue(
+      failing.promise.then(() => {
+        throw new Error('lease storage failed')
+      }),
+    )
+    const second = new AbortController()
+    const storage = harness.runtime.withPostProcessSlot(
+      'spool encode',
+      async () => 'never',
+      { signal: second.signal, waitMs: 60_000 },
+    )
+    second.abort()
+    await expect(storage).resolves.toBeUndefined()
+    failing.resolve(true)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(harness.scheduler.release).not.toHaveBeenCalled()
+  })
+
+  it('never asks for a slot once cancelled', async () => {
+    const harness = createHarness()
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      harness.runtime.withPostProcessSlot('spool encode', async () => 'x', {
+        signal: controller.signal,
+        waitMs: 1_000,
+      }),
+    ).resolves.toBeUndefined()
+    expect(harness.scheduler.acquire).not.toHaveBeenCalled()
+  })
+
+  it('checks the signal again when a slot is granted in time', async () => {
+    const harness = createHarness()
+    const controller = new AbortController()
+    harness.scheduler.acquire.mockImplementation(async () => {
+      // Cancelled in the same turn the slot is granted.
+      controller.abort()
+      return true
+    })
+    const task = vi.fn(async () => 'encoded')
+
+    await expect(
+      harness.runtime.withPostProcessSlot('spool encode', task, {
+        signal: controller.signal,
+        waitMs: 1_000,
+      }),
+    ).resolves.toBeUndefined()
+    expect(task).not.toHaveBeenCalled()
+    expect(harness.scheduler.release).toHaveBeenCalledOnce()
+  })
+
+  it('passes a result callback and a signal through to the runner', async () => {
+    const harness = createHarness()
+    await harness.runtime.ensureReady()
+    const onResult = vi.fn()
+    const { signal } = new AbortController()
+
+    await harness.runtime.run(['-i', 'spool.mkv'], 'spool encode', {
+      onResult,
+      signal,
+    })
+
+    expect(harness.runFfmpeg).toHaveBeenCalledWith(
+      expect.objectContaining({ onResult, operation: 'spool encode', signal }),
+      harness.processRegistry,
+    )
+    expect(harness.runtime.isAcceptingWork).toBe(true)
+    await harness.runtime.terminateAll()
+    expect(harness.runtime.isAcceptingWork).toBe(false)
+  })
+})

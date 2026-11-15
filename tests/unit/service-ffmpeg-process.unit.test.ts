@@ -322,3 +322,164 @@ describe('ffmpeg runner process handling', () => {
     expect(registry.size).toBe(0)
   })
 })
+
+describe('ffmpeg runner results', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const runWithResult = (
+    process: FakeFfmpegProcess | undefined,
+    overrides: Partial<RunFfmpegOptions> = {},
+    registry?: FfmpegProcessRegistry,
+  ) => {
+    const onResult = vi.fn<NonNullable<RunFfmpegOptions['onResult']>>()
+    const spawnProcess = vi.fn(() => {
+      if (!process) {
+        throw new Error('ENOENT')
+      }
+      return process
+    })
+    const result = runFfmpeg(
+      {
+        args: [],
+        available: true,
+        ffmpegPath: 'ffmpeg',
+        log: () => {},
+        markUnavailable: () => {},
+        onResult,
+        operation: 'spool encode',
+        timeoutMs: 0,
+        warnMissing: () => {},
+        ...overrides,
+      },
+      {
+        ...(registry ? { processRegistry: registry } : {}),
+        spawnProcess,
+        terminateProcessTree: async () => {
+          process?.emit('close', null, 'SIGTERM')
+        },
+      },
+    )
+    return { onResult, result, spawnProcess }
+  }
+
+  it.each([
+    [0, null, true],
+    [1, null, false],
+    [null, 'SIGKILL', false],
+  ] as const)(
+    'reports an exit with code %s and signal %s with its diagnostic',
+    async (code, signal, succeeded) => {
+      const process = new FakeFfmpegProcess()
+      const run = runWithResult(process)
+      process.stderr?.write('  encoder said this \n')
+      process.emit('close', code, signal)
+
+      await expect(run.result).resolves.toBe(succeeded)
+      expect(run.onResult.mock.calls).toEqual([
+        [{ code, diagnostic: 'encoder said this', kind: 'exited', signal }],
+      ])
+    },
+  )
+
+  it('reports a spawn failure and an unavailable FFmpeg', async () => {
+    const failed = runWithResult(undefined)
+    await expect(failed.result).resolves.toBe(false)
+    expect(failed.onResult.mock.calls).toEqual([
+      [{ kind: 'spawn-failed', message: 'FFmpeg failed to start: ENOENT' }],
+    ])
+
+    const unavailable = runWithResult(new FakeFfmpegProcess(), {
+      available: false,
+    })
+    await expect(unavailable.result).resolves.toBe(false)
+    expect(unavailable.spawnProcess).not.toHaveBeenCalled()
+    expect(unavailable.onResult).toHaveBeenCalledWith({
+      kind: 'spawn-failed',
+      message: 'Skipping ffmpeg spool encode because ffmpeg is unavailable.',
+    })
+  })
+
+  it('never spawns for a signal already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const run = runWithResult(new FakeFfmpegProcess(), {
+      signal: controller.signal,
+    })
+
+    await expect(run.result).resolves.toBe(false)
+    expect(run.spawnProcess).not.toHaveBeenCalled()
+    expect(run.onResult.mock.calls).toEqual([
+      [{ kind: 'stopped', reason: 'cancelled' }],
+    ])
+  })
+
+  it('stops a running process when its signal aborts', async () => {
+    const controller = new AbortController()
+    const registry = new FfmpegProcessRegistry()
+    const run = runWithResult(
+      new FakeFfmpegProcess(),
+      { signal: controller.signal },
+      registry,
+    )
+    controller.abort()
+
+    await expect(run.result).resolves.toBe(false)
+    expect(run.onResult.mock.calls).toEqual([
+      [{ kind: 'stopped', reason: 'cancelled' }],
+    ])
+    expect(registry.size).toBe(0)
+  })
+
+  it('tells its own timeout from a shutdown', async () => {
+    vi.useFakeTimers()
+    const timedOut = runWithResult(new FakeFfmpegProcess(), { timeoutMs: 10 })
+    await vi.advanceTimersByTimeAsync(10)
+    await expect(timedOut.result).resolves.toBe(false)
+    expect(timedOut.onResult.mock.calls).toEqual([
+      [{ kind: 'stopped', reason: 'timeout' }],
+    ])
+    vi.useRealTimers()
+
+    const registry = new FfmpegProcessRegistry()
+    const shutDown = runWithResult(new FakeFfmpegProcess(), {}, registry)
+    await registry.terminateAll()
+    await expect(shutDown.result).resolves.toBe(false)
+    expect(shutDown.onResult.mock.calls).toEqual([
+      [{ kind: 'stopped', reason: 'cancelled' }],
+    ])
+  })
+
+  it('reports a stopped process whose error follows the stop', async () => {
+    const controller = new AbortController()
+    const process = new FakeFfmpegProcess()
+    const onResult = vi.fn()
+    const result = runFfmpeg(
+      {
+        args: [],
+        available: true,
+        ffmpegPath: 'ffmpeg',
+        log: () => {},
+        markUnavailable: () => {},
+        onResult,
+        operation: 'spool encode',
+        signal: controller.signal,
+        timeoutMs: 0,
+        warnMissing: () => {},
+      },
+      {
+        spawnProcess: () => process,
+        terminateProcessTree: async () => {
+          process.emit('error', new Error('kill failed'))
+        },
+      },
+    )
+    controller.abort()
+
+    await expect(result).resolves.toBe(false)
+    expect(onResult.mock.calls).toEqual([
+      [{ kind: 'stopped', reason: 'cancelled' }],
+    ])
+  })
+})
