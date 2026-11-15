@@ -294,9 +294,10 @@ that moves recording to another tab took this much longer than unrecorded:
 - on a desktop Chrome or Edge: about 0.3 s.
 
 A command that stays on its tab adds a few milliseconds. Tests that alternate
-between tabs run slower while recorded. With `format: 'mp4'` and the default
-`processing.timing: 'after-test'`, the finished segment is also transcoded
-during the move; `'after-worker'` moves that work out of the test.
+between tabs run slower while recorded. A move does not process the segment it
+ends: a kept recording's segments are transcoded and merged when the test ends
+(or when the worker ends, with `processing.timing: 'after-worker'`), and a
+recording that retention discards is not processed at all.
 
 Those times are for a browser that answers promptly. The service puts its own
 limits on finding the new tab's page (2 s, and 2 s more if it falls back to
