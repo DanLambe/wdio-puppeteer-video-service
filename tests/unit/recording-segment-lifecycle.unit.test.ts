@@ -19,7 +19,11 @@ import {
 } from '../../src/service/recording-controller.js'
 import { RecordingMediaCoordinator } from '../../src/service/recording-media-coordinator.js'
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
-import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
+import {
+  type RecordingAllurePort,
+  type RecordingManifestPort,
+  WorkerRecordingCoordinator,
+} from '../../src/service/worker-recording-coordinator.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 
@@ -208,6 +212,7 @@ const createHarness = (serviceOptions: WdioPuppeteerVideoServiceOptions) => {
     partsOf,
     recordThreeTabs,
     releaseSlot,
+    reportFailure,
     resolved,
     segmentPath,
     session,
@@ -215,6 +220,63 @@ const createHarness = (serviceOptions: WdioPuppeteerVideoServiceOptions) => {
     transcode,
   }
 }
+
+type Harness = ReturnType<typeof createHarness>
+
+/**
+ * The worker coordinator over a harness's controller, with a manifest and an
+ * Allure port that record what they are given.
+ */
+const createReportingCoordinator = (
+  harness: Harness,
+  attachRetainedVideos: RecordingAllurePort['attachRetainedVideos'] = async (
+    paths,
+  ) => ({ attachedPaths: [...paths] }),
+) => {
+  const completeCurrent = vi.fn<RecordingManifestPort['completeCurrent']>(
+    async () => 'entry',
+  )
+  const attach = vi.fn(attachRetainedVideos)
+  const reset = vi.spyOn(harness.controller, 'reset')
+  const coordinator = new WorkerRecordingCoordinator({
+    actions: {
+      finalizeMedia: (passed, keep) =>
+        harness.controller.finalizeMedia(passed, keep),
+      getAvailability: () => ({ available: true }),
+      getRecordedPaths: () => harness.session.filePaths,
+      isRecordingActive: () => harness.session.isRecordingActive,
+      resetRecording: () => harness.controller.reset(),
+      runSerialized: (task) => harness.controller.runSerialized(task),
+      startRecording: (metadata, retry) =>
+        harness.controller.startForMetadata(metadata, retry),
+    },
+    allure: { attachRetainedVideos: attach },
+    getLogLevel: () => 'warn',
+    log: vi.fn(),
+    options: harness.resolved.options,
+  })
+  coordinator.configureSession({
+    framework: 'mocha',
+    specFileRetryAttempt: 0,
+    manifest: {
+      currentEntryId: 'entry',
+      beginEntity: async () => 'entry',
+      completeCurrent,
+      recordResult: async () => {},
+      recordSkippedEntity: async () => 'entry',
+      setCurrentAttempt: () => {},
+    },
+  })
+  const endFailedTest = () =>
+    coordinator.endEntity({ manifestResult: 'failed', passed: false })
+  return { attach, completeCurrent, endFailedTest, reset }
+}
+
+const THREE_TABS = new Map([
+  [1, { contextId: 'tab-a', ordinal: 1, reason: 'start' }],
+  [2, { contextId: 'tab-b', ordinal: 2, reason: 'command' }],
+  [3, { contextId: 'tab-a', ordinal: 1, reason: 'switch-to-window' }],
+])
 
 const MP4 = {
   format: 'mp4',
@@ -489,72 +551,175 @@ describe('Segment life cycle', () => {
     expect(harness.transcode).toHaveBeenCalledOnce()
     expect(finalized.paths).toEqual([harness.segmentPath(1, 'mp4')])
   })
+})
 
-  it('keeps and reports every unfinished segment when finalization throws', async () => {
-    const harness = createHarness({ failurePolicy: 'error', processing: MP4 })
-    const failure = new Error('transcode slot unavailable')
-    harness.transcode.mockImplementationOnce(async (request) => {
-      await fs.writeFile(request.outputPath, 'h264')
+/** How a segment's transcode fails: it reports failure, or it throws. */
+type TranscodeFailure = 'returns' | 'throws'
+
+/**
+ * Makes the transcode of one part fail; the others succeed. Returns the error
+ * the failure surfaces as.
+ */
+const failTranscodeOf = (
+  harness: Harness,
+  part: number,
+  mode: TranscodeFailure,
+  options: Readonly<{ deleteInput?: boolean }> = {},
+): (() => unknown) => {
+  const succeed = harness.transcode.getMockImplementation()
+  const thrown = new Error(`transcode of part ${part.toString()} crashed`)
+  harness.transcode.mockImplementation(async (request) => {
+    if (!path.basename(request.inputPath).includes(`_part${part}.`)) {
+      return succeed?.(request)
+    }
+    if (options.deleteInput) {
       await fs.rm(request.inputPath)
-      return request.outputPath
-    })
-    harness.transcode.mockRejectedValueOnce(failure)
-    const completeCurrent = vi.fn(async () => 'entry')
-    const coordinator = new WorkerRecordingCoordinator({
-      actions: {
-        finalizeMedia: (passed, keep) =>
-          harness.controller.finalizeMedia(passed, keep),
-        getAvailability: () => ({ available: true }),
-        getRecordedPaths: () => harness.session.filePaths,
-        isRecordingActive: () => harness.session.isRecordingActive,
-        resetRecording: () => harness.controller.reset(),
-        runSerialized: (task) => harness.controller.runSerialized(task),
-        startRecording: (metadata, retry) =>
-          harness.controller.startForMetadata(metadata, retry),
+    }
+    if (mode === 'throws') {
+      throw thrown
+    }
+    return undefined
+  })
+  return () =>
+    mode === 'throws'
+      ? thrown
+      : harness.reportFailure.mock.results.find(
+          (result) => result.type === 'throw',
+        )?.value
+}
+
+describe('Segment processing failure at the end of a kept recording', () => {
+  it.each([
+    { part: 1, mode: 'returns' },
+    { part: 1, mode: 'throws' },
+    // Part 1 is a finished MP4 and parts 2 and 3 remain WebM.
+    { part: 2, mode: 'returns' },
+    { part: 2, mode: 'throws' },
+  ] as const)(
+    'reports the files, tabs and attachment when part $part $mode failure',
+    async ({ part, mode }) => {
+      const harness = createHarness({ failurePolicy: 'error', processing: MP4 })
+      const failure = failTranscodeOf(harness, part, mode)
+      const reporting = createReportingCoordinator(harness)
+      await harness.recordThreeTabs()
+      // Parts before the failure are finalized; the rest are the files they are.
+      const files = [1, 2, 3].map((each) =>
+        harness.segmentPath(each, each < part ? 'mp4' : 'webm'),
+      )
+
+      const ended = reporting.endFailedTest()
+
+      await expect(ended).rejects.toThrow()
+      const error = failure()
+      await expect(ended).rejects.toBe(error)
+      expect(reporting.completeCurrent).toHaveBeenCalledOnce()
+      expect(reporting.completeCurrent).toHaveBeenCalledWith({
+        decision: 'failed',
+        paths: files,
+        processingOutcome: 'failed',
+        reason: (error as Error).message,
+        result: 'failed',
+        tabs: THREE_TABS,
+      })
+      expect(reporting.attach).toHaveBeenCalledExactlyOnceWith(files, false)
+      for (const file of files) {
+        expect(await exists(file)).toBe(true)
+      }
+      expect(harness.logs).toContainEqual({
+        level: 'warn',
+        message: `[WdioPuppeteerVideoService] Keeping ${(4 - part).toString()} unprocessed recording segment(s): ${files.slice(part - 1).join(', ')}`,
+      })
+      expect(reporting.reset).toHaveBeenCalled()
+      expect(harness.session.isRecordingActive).toBe(false)
+      expect(harness.session.heldSegments).toEqual([])
+      // Nothing is merged, queued or transcoded again.
+      expect(harness.transcode).toHaveBeenCalledTimes(part)
+      expect(harness.media.pendingTaskCount).toBe(0)
+      await harness.media.flush()
+      expect(harness.transcode).toHaveBeenCalledTimes(part)
+      expect(harness.merge).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    {
+      attachment: 'returns an error',
+      attach: async () => ({
+        attachedPaths: [],
+        error: new Error('allure unavailable'),
+      }),
+    },
+    {
+      attachment: 'throws',
+      attach: async (): Promise<never> => {
+        throw new Error('allure crashed')
       },
-      getLogLevel: () => 'warn',
-      log: vi.fn(),
-      options: harness.resolved.options,
-    })
-    coordinator.configureSession({
-      framework: 'mocha',
-      specFileRetryAttempt: 0,
-      manifest: {
-        currentEntryId: 'entry',
-        beginEntity: async () => 'entry',
-        completeCurrent,
-        recordResult: async () => {},
-        recordSkippedEntity: async () => 'entry',
-        setCurrentAttempt: () => {},
-      },
-    })
+    },
+  ])(
+    'throws the processing error when the attachment $attachment',
+    async ({ attach }) => {
+      const harness = createHarness({ failurePolicy: 'error', processing: MP4 })
+      const failure = failTranscodeOf(harness, 2, 'throws')
+      const reporting = createReportingCoordinator(harness, attach)
+      await harness.recordThreeTabs()
+
+      await expect(reporting.endFailedTest()).rejects.toBe(failure())
+
+      expect(reporting.completeCurrent.mock.calls[0]?.[0]).toMatchObject({
+        decision: 'failed',
+        tabs: THREE_TABS,
+      })
+      expect(reporting.attach).toHaveBeenCalledOnce()
+      expect(reporting.reset).toHaveBeenCalled()
+      expect(harness.session.isRecordingActive).toBe(false)
+    },
+  )
+
+  it('lists and attaches only the files that still exist', async () => {
+    const harness = createHarness({ failurePolicy: 'error', processing: MP4 })
+    const failure = failTranscodeOf(harness, 2, 'throws', { deleteInput: true })
+    const reporting = createReportingCoordinator(harness)
     await harness.recordThreeTabs()
-    // Part 1 is finalized; parts 2 and 3 are listed as the files they are.
     const files = [
       harness.segmentPath(1, 'mp4'),
-      harness.segmentPath(2, 'webm'),
       harness.segmentPath(3, 'webm'),
     ]
 
-    await expect(
-      coordinator.endEntity({ manifestResult: 'failed', passed: false }),
-    ).rejects.toThrow(failure)
+    await expect(reporting.endFailedTest()).rejects.toBe(failure())
 
-    expect(completeCurrent).toHaveBeenCalledWith({
-      decision: 'failed',
-      paths: files,
-      processingOutcome: 'failed',
-      reason: failure.message,
-      result: 'failed',
-    })
-    for (const file of files) {
-      expect(await exists(file)).toBe(true)
-    }
-    expect(harness.logs).toContainEqual({
-      level: 'warn',
-      message: `[WdioPuppeteerVideoService] Keeping 2 unprocessed recording segment(s): ${files.slice(1).join(', ')}`,
-    })
-    expect(harness.session.isRecordingActive).toBe(false)
-    expect(harness.session.heldSegments).toEqual([])
+    expect(reporting.completeCurrent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        paths: files,
+        tabs: new Map([
+          [1, THREE_TABS.get(1)],
+          [3, THREE_TABS.get(3)],
+        ]),
+      }),
+    )
+    expect(reporting.attach).toHaveBeenCalledExactlyOnceWith(files, false)
+  })
+
+  it('keeps the existing warn-policy report when a transcode reports failure', async () => {
+    const harness = createHarness({ processing: MP4 })
+    failTranscodeOf(harness, 2, 'returns')
+    const reporting = createReportingCoordinator(harness)
+    await harness.recordThreeTabs()
+    const files = [
+      harness.segmentPath(1, 'mp4'),
+      harness.segmentPath(2, 'webm'),
+      harness.segmentPath(3, 'mp4'),
+    ]
+
+    await expect(reporting.endFailedTest()).resolves.toBeUndefined()
+
+    expect(reporting.completeCurrent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        decision: 'recorded',
+        paths: files,
+        processingOutcome: 'completed',
+        tabs: THREE_TABS,
+      }),
+    )
+    expect(reporting.attach).toHaveBeenCalledExactlyOnceWith(files, false)
   })
 })

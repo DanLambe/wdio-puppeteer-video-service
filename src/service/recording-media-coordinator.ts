@@ -485,7 +485,8 @@ export class RecordingMediaCoordinator {
       .catch(() => undefined)
   }
 
-  private async findExisting(paths: readonly string[]): Promise<string[]> {
+  /** The given files that are on disk, in the given order. */
+  async findExisting(paths: readonly string[]): Promise<string[]> {
     const found = await Promise.all(
       paths.map(async (filePath) =>
         this.fileSystem

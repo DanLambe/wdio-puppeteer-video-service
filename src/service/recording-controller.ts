@@ -363,6 +363,7 @@ export class RecordingController implements ContextFollowerTarget {
 
     const deferredTaskCount = this.media.pendingTaskCount
     let tabs: ReadonlyMap<number, SegmentTab> | undefined
+    let processingFailure: { readonly error: unknown } | undefined
     this.confirmGap()
     await this.lifecycle.finalize({
       stopRecording: async () => {
@@ -372,10 +373,16 @@ export class RecordingController implements ContextFollowerTarget {
         // The outcome is known: a kept recording's segments are processed now,
         // a discarded one's are deleted below without any.
         if (keepArtifacts) {
-          await this.finalizeHeldSegments()
+          processingFailure = await this.finalizeHeldSegmentsReportingFailure()
+        }
+        if (processingFailure) {
+          // The files kept so far are reported as they are: never merged, and
+          // never processed again.
+          this.media.dropTasksForPaths(this.captureSession.filePaths)
+          return
         }
         // Every segment is finalized and no merge has run yet.
-        tabs = this.readRetainedSegmentTabs()
+        tabs = this.readRetainedSegmentTabs(this.captureSession.recordedPaths)
         this.log(
           'debug',
           `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${keepArtifacts}).`,
@@ -400,21 +407,31 @@ export class RecordingController implements ContextFollowerTarget {
       },
     })
 
+    let paths = this.captureSession.recordedPaths
+    if (processingFailure) {
+      // Finalized parts and the held parts after the failure, while their tab
+      // history is still known.
+      paths = await this.media.findExisting(this.captureSession.filePaths)
+      tabs = this.readRetainedSegmentTabs(paths)
+    }
     return {
       ...(this.captureFailure ? { captureFailure: this.captureFailure } : {}),
       deferred: this.media.pendingTaskCount > deferredTaskCount,
-      paths: this.captureSession.recordedPaths,
+      paths,
+      ...(processingFailure ? { processingFailure } : {}),
       ...(tabs?.size ? { tabs } : {}),
     }
   }
 
-  /** Tabs of the segments whose files were kept, keyed by part number. */
-  private readRetainedSegmentTabs(): ReadonlyMap<number, SegmentTab> {
+  /** Tabs of the segments whose files are listed, keyed by part number. */
+  private readRetainedSegmentTabs(
+    paths: readonly string[],
+  ): ReadonlyMap<number, SegmentTab> {
     const tabs = this.captureSession.segmentTabs
     const retained = new Map<number, SegmentTab>()
     for (const segmentPath of artifactPaths.collectCurrentTestSegmentPaths(
       this.captureSession.currentTestSlug,
-      this.captureSession.recordedPaths,
+      paths,
     )) {
       const part = artifactPaths.extractPartNumber(segmentPath)
       const tab = tabs.get(part)
@@ -432,6 +449,22 @@ export class RecordingController implements ContextFollowerTarget {
   async finalizeWithoutOutcome(): Promise<void> {
     await this.stopRecording()
     await this.finalizeHeldSegments()
+  }
+
+  /**
+   * Finalizes the held segments of a kept recording. A processing error is
+   * returned, not thrown, so the recording can still be reported with the
+   * files it has before the error is applied.
+   */
+  private async finalizeHeldSegmentsReportingFailure(): Promise<
+    { readonly error: unknown } | undefined
+  > {
+    try {
+      await this.finalizeHeldSegments()
+      return undefined
+    } catch (error) {
+      return { error }
+    }
   }
 
   /**

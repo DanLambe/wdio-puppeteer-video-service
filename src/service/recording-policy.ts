@@ -197,9 +197,21 @@ export const createCompletedManifestOptions = (input: {
   readonly result: CompleteManifestEntryOptions['result']
   readonly paths: readonly string[]
   readonly processing: ResolvedProcessingOptions
+  /** Why processing the kept segments failed; the listed files stay as they are. */
+  readonly processingFailure?: string
   readonly tabs?: CompleteManifestEntryOptions['tabs']
 }): CompleteManifestEntryOptions => {
   const tabs = input.tabs ? { tabs: input.tabs } : {}
+  if (input.processingFailure !== undefined) {
+    return {
+      decision: 'failed',
+      result: input.result,
+      paths: [...input.paths],
+      reason: input.processingFailure,
+      processingOutcome: 'failed',
+      ...tabs,
+    }
+  }
   if (input.captureFailed) {
     // Any retained bytes are listed, but the capture is not a recording.
     return {
