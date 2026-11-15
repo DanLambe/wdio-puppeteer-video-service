@@ -1523,11 +1523,14 @@ describe('Puppeteer capture engine, deferred capture', () => {
   it('stops an attached spool on reset and hands it back undeleted', async () => {
     const tempDir = await createTempDir()
     const harness = createHarness()
-    const { spoolPath } = await startSpooled(harness, tempDir)
+    const { plannedPath, spoolPath } = await startSpooled(harness, tempDir)
     await fs.writeFile(spoolPath, 'frames')
 
     await expect(harness.engine.resetRecording()).resolves.toEqual({
-      spool: { path: spoolPath, settings: spoolSettings },
+      spooled: {
+        plannedPath,
+        spool: { path: spoolPath, settings: spoolSettings },
+      },
     })
 
     expect(harness.recorder.stop).toHaveBeenCalledOnce()

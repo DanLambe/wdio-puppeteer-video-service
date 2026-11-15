@@ -17,9 +17,8 @@ import {
 } from './capture-session.js'
 import type { OutputFormat } from './constants.js'
 import type { ContextFollowerTarget, FollowReason } from './context-follower.js'
-import type { DeferredEncoder } from './deferred-encode.js'
+import type { DeferredEncoder, UnencodedSpool } from './deferred-encode.js'
 import type { FfmpegRuntime } from './ffmpeg-runtime.js'
-import type { ScreencastSpool } from './frame-sink.js'
 import { runInternal } from './internal-operation.js'
 import type { ServiceLogger } from './logging.js'
 import type { ManifestWorkerRecorder } from './manifest-runtime.js'
@@ -619,33 +618,64 @@ export class RecordingController implements ContextFollowerTarget {
   async reset(): Promise<void> {
     await this.lifecycle.reset(async () => {
       const held = this.captureSession.heldSegments
+      const part = this.captureSession.currentSegment
+      const tab = this.captureSession.segmentTabs.get(part)
       this.captureFailure = undefined
       this.closingContextId = undefined
       this.failedStarts.clear()
       this.unconfirmedGap = undefined
-      const { spool } = await this.captureEngine.resetRecording()
-      this.warnAboutUnprocessedSegments(held, spool)
+      const { spooled } = await this.captureEngine.resetRecording()
+      // Released first: keeping frames never holds a recording slot.
       await this.recordingSlotScheduler.release()
+      this.warnAboutUnprocessedSegments(
+        held.filter((segment) => !segment.spool),
+      )
+      await this.preserveUnencodedSpools([
+        ...held.filter(isSpooledSegment).map((segment) => ({
+          part: segment.part,
+          plannedPath: segment.segment.recordingPath,
+          spool: segment.spool,
+          ...(segment.tab ? { tab: segment.tab } : {}),
+        })),
+        ...(spooled ? [{ ...spooled, part, ...(tab ? { tab } : {}) }] : []),
+      ])
     })
   }
 
   // A reset normally follows finalization. Segments still held were stopped by
   // a recording whose finalization failed: their files stay, unprocessed.
-  private warnAboutUnprocessedSegments(
-    held: readonly HeldSegment[],
-    activeSpool: ScreencastSpool | undefined,
-  ): void {
-    const files = held.map(heldFile)
-    if (activeSpool) {
-      files.push(activeSpool.path)
-    }
-    if (files.length === 0) {
+  private warnAboutUnprocessedSegments(held: readonly HeldSegment[]): void {
+    if (held.length === 0) {
       return
     }
+    const files = held.map((segment) => segment.segment.recordingPath)
     this.log(
       'warn',
-      `[WdioPuppeteerVideoService] Keeping ${files.length.toString()} unprocessed recording segment(s): ${files.join(', ')}`,
+      `[WdioPuppeteerVideoService] Keeping ${held.length.toString()} unprocessed recording segment(s): ${files.join(', ')}`,
     )
+  }
+
+  /**
+   * A spool of a kept or undecided recording is never deleted by a reset: it
+   * becomes a frames file, or stays where it is if it cannot be moved, and a
+   * warning names where its frames are. It is never encoded here, so a reset
+   * after an encode step that was cancelled or ran out cannot start one.
+   */
+  private async preserveUnencodedSpools(
+    spools: readonly UnencodedSpool[],
+  ): Promise<void> {
+    const storage = this.spoolStorage
+    if (!storage) {
+      return
+    }
+    for (const spool of spools) {
+      const tab = spool.tab ? ` (tab ${spool.tab.ordinal.toString()})` : ''
+      const frames = await storage.encoder.preserveFrames(spool)
+      this.log(
+        'warn',
+        `[WdioPuppeteerVideoService] Segment ${spool.part.toString()}${tab} was not encoded before its recording was reset. ${frames}`,
+      )
+    }
   }
 
   async runSerialized(task: () => Promise<void>): Promise<void> {
@@ -861,10 +891,6 @@ const NOTHING_STOPPED: CaptureStopResult = Object.freeze({
   segment: undefined,
   streamOk: false,
 })
-
-/** The file a held segment has on disk: its spool, or its recording. */
-const heldFile = (held: HeldSegment): string =>
-  held.spool?.path ?? held.segment.recordingPath
 
 const replaceFileExtension = (
   filePath: string,

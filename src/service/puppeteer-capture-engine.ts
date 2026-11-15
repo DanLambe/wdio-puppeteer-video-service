@@ -92,8 +92,12 @@ export interface CaptureStopResult {
 
 /** A capture a reset stopped without deciding what happens to its frames. */
 export interface CaptureResetResult {
-  /** The stopped capture's spool, which the caller now owns. */
-  readonly spool?: ScreencastSpool
+  /** A stopped spooled capture, whose spool the caller now owns. */
+  readonly spooled?: {
+    /** The segment's planned, unreserved file. */
+    readonly plannedPath: string
+    readonly spool: ScreencastSpool
+  }
 }
 
 export interface CaptureWindowOperations {
@@ -520,7 +524,9 @@ export class PuppeteerCaptureEngine {
     if (recorder && output?.kind === 'spool') {
       await this.stopRecorder(recorder)
       this.session.resetRecording()
-      return { spool: output.spool }
+      return {
+        spooled: { plannedPath: segment.recordingPath, spool: output.spool },
+      }
     }
     await this.cleanupPartialCapture(recorder, segment?.recordingPath)
     this.session.resetRecording()

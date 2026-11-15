@@ -9,6 +9,7 @@ import {
   DeferredEncoder,
   type DeferredEncoderOptions,
 } from '../../src/service/deferred-encode.js'
+import type { FfmpegRunResult } from '../../src/service/ffmpeg-runner.js'
 import type { ScreencastSpool } from '../../src/service/frame-sink.js'
 import type { ServiceLogger } from '../../src/service/logging.js'
 import type { MediaPipeline } from '../../src/service/media-pipeline.js'
@@ -79,6 +80,9 @@ const listTree = async (): Promise<string[]> =>
     .sort((left, right) => left.localeCompare(right))
 
 interface HarnessOptions {
+  readonly encoder?: Partial<
+    Pick<DeferredEncoderOptions, 'limits' | 'linkFile'>
+  >
   readonly service?: WdioPuppeteerVideoServiceOptions
   readonly spoolStorage?: boolean
 }
@@ -178,9 +182,11 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
   const resetRecording = vi.fn(async () => {
     const spool = spools.get(session.currentSegment)
     spools.clear()
-    session.detachCapture()
+    const { segment } = session.detachCapture()
     session.resetRecording()
-    return spool ? { spool } : {}
+    return spool && segment
+      ? { spooled: { plannedPath: segment.recordingPath, spool } }
+      : {}
   })
   const captureEngine: RecordingControllerOptions['captureEngine'] = {
     afterWindowCommand: vi.fn(async () => {}),
@@ -226,14 +232,24 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
   let recordingSlotOwned = false
   // How the next spool encode ends; FFmpeg writes the output by default.
   const encodes = {
+    accepting: true,
     failParts: new Set<number>(),
-    onRun: undefined as (() => void) | undefined,
+    // Replaces the run: how it ends, as the runner would report it.
+    run: undefined as
+      | ((signal: AbortSignal | undefined) => Promise<FfmpegRunResult>)
+      | undefined,
   }
   const encodeFfmpeg: DeferredEncoderOptions['ffmpeg'] = {
-    isAcceptingWork: true,
+    get isAcceptingWork() {
+      return encodes.accepting
+    },
     resolvePath: () => 'ffmpeg',
     run: vi.fn(async (args: string[], _operation: string, overrides = {}) => {
-      encodes.onRun?.()
+      if (encodes.run) {
+        const result = await encodes.run(overrides.signal)
+        overrides.onResult?.(result)
+        return false
+      }
       const outputPath = args.at(-1) ?? ''
       const part = Number(/_part(\d+)\./u.exec(outputPath)?.[1])
       if (encodes.failParts.has(part)) {
@@ -254,7 +270,10 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
       })
       return true
     }),
-    withPostProcessSlot: vi.fn(async (_operation, task) => {
+    withPostProcessSlot: vi.fn(async (_operation, task, admission) => {
+      if (!encodes.accepting || admission?.signal.aborted) {
+        return undefined
+      }
       leases.push(
         recordingSlotOwned
           ? 'processing slot while recording'
@@ -269,6 +288,7 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
     ffmpeg: encodeFfmpeg,
     fileSystem: nodeFileSystem,
     log,
+    ...harnessOptions.encoder,
   })
   let uuidIndex = 0
   const spoolDirectory = path.join(outputDir, '.wdio-video-spool', 'run-1')
@@ -728,5 +748,151 @@ describe('kept deferred recordings', () => {
     ])
     expect(harness.session.heldSegments).toEqual([])
     expect(harness.leases).not.toContain('processing slot while recording')
+  })
+})
+
+const framesFiles = async (): Promise<string[]> =>
+  (await listTree()).filter((file) => file.endsWith('.frames.mkv'))
+
+const spoolFiles = async (): Promise<string[]> =>
+  (await listTree()).filter((file) => file.includes('.wdio-video-spool/'))
+
+describe('resetting or ending a worker with spools', () => {
+  it('turns held and attached spools into frames files, never encoding or deleting them', async () => {
+    const harness = createHarness({ service: { capture: DEFERRED } })
+    await harness.recordThreeTabs()
+    const slug = harness.session.currentTestSlug
+
+    // As when finalization failed before its encode step.
+    await harness.controller.reset()
+
+    expect(harness.encodeFfmpeg.run).not.toHaveBeenCalled()
+    expect(await spoolFiles()).toEqual([])
+    expect(await framesFiles()).toEqual([
+      `${slug}_part1.frames.mkv`,
+      `${slug}_part2.frames.mkv`,
+      `${slug}_part3.frames.mkv`,
+    ])
+    for (const part of [1, 2, 3]) {
+      const framesPath = path.join(
+        outputDir,
+        `${slug}_part${part.toString()}.frames.mkv`,
+      )
+      await expect(fs.readFile(framesPath, 'utf8')).resolves.toBe(
+        'spooled-frames',
+      )
+      expect(harness.logs).toContainEqual({
+        level: 'warn',
+        message: expect.stringContaining(
+          `Segment ${part.toString()} (tab ${part === 2 ? '2' : '1'}) was not encoded before its recording was reset. Its frames are kept at ${framesPath}`,
+        ),
+      })
+    }
+    expect(harness.session.heldSegments).toEqual([])
+    expect(harness.leases).not.toContain('processing slot while recording')
+  })
+
+  it('leaves a spool it cannot move in place, names it, and lets it go', async () => {
+    const linkFile = vi.fn(async () => {
+      throw Object.assign(new Error('EXDEV: cross-device link'), {
+        code: 'EXDEV',
+      })
+    })
+    const harness = createHarness({
+      encoder: { linkFile },
+      service: { capture: DEFERRED },
+    })
+    await harness.recordThreeTabs()
+    const spools = [harness.spoolOf(1), harness.spoolOf(2), harness.spoolOf(3)]
+
+    await harness.controller.reset()
+
+    for (const spool of spools) {
+      await expect(fs.readFile(spool, 'utf8')).resolves.toBe('spooled-frames')
+      expect(harness.logs).toContainEqual({
+        level: 'warn',
+        message: expect.stringContaining(
+          `could not be moved (EXDEV: cross-device link) and stay at ${spool}`,
+        ),
+      })
+    }
+    expect(await framesFiles()).toEqual([])
+    // Ownership is cleared once the warning names the path: nothing retries.
+    expect(harness.session.heldSegments).toEqual([])
+    await harness.controller.reset()
+    expect(linkFile).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not encode again on teardown after the encode step was cancelled at shutdown', async () => {
+    const harness = createHarness({ service: { capture: DEFERRED } })
+    await harness.recordThreeTabs()
+    harness.encodes.run = async () => {
+      harness.encodes.accepting = false
+      return { kind: 'stopped', reason: 'cancelled' }
+    }
+
+    const finalized = await harness.controller.finalizeMedia(false, true)
+    expect(finalized.captureFailure).toContain(
+      'the encode was cancelled at shutdown',
+    )
+    const frames = await framesFiles()
+
+    // Teardown: the worker resumes work, ends the recording and resets it.
+    harness.encodes.accepting = true
+    harness.encodes.run = undefined
+    await harness.controller.finalizeWithoutOutcome()
+    await harness.controller.reset()
+
+    expect(harness.encodeFfmpeg.run).toHaveBeenCalledOnce()
+    expect(await framesFiles()).toEqual(frames)
+    expect(frames).toHaveLength(3)
+    expect(await spoolFiles()).toEqual([])
+  })
+
+  it('does not encode again on teardown after the budget ran out', async () => {
+    const harness = createHarness({
+      encoder: {
+        limits: {
+          budgetMsPerCapturedSecond: 0,
+          maximumBudgetMs: 50,
+          maximumSlotWaitMs: 30_000,
+          minimumBudgetMs: 50,
+        },
+      },
+      service: { capture: DEFERRED },
+    })
+    await harness.recordThreeTabs()
+    // An encoder that only stops when it is told to.
+    harness.encodes.run = async (signal) => {
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve()
+        })
+      })
+      return { kind: 'stopped', reason: 'cancelled' }
+    }
+
+    const finalized = await harness.controller.finalizeMedia(false, true)
+    expect(finalized.captureFailure).toContain(
+      'the deferred-encode budget of 0.05s ran out',
+    )
+    harness.encodes.run = undefined
+    await harness.controller.finalizeWithoutOutcome()
+    await harness.controller.reset()
+
+    expect(harness.encodeFfmpeg.run).toHaveBeenCalledOnce()
+    expect(await framesFiles()).toHaveLength(3)
+    expect(await spoolFiles()).toEqual([])
+  })
+
+  it('deletes no spool of a recording reset after it was discarded', async () => {
+    const harness = createHarness({ service: { capture: DEFERRED } })
+    await harness.recordThreeTabs()
+
+    await harness.controller.finalizeMedia(true, false)
+    await harness.controller.reset()
+
+    expect(await listTree()).toEqual([])
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
   })
 })
