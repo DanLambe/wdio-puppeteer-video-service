@@ -3,6 +3,7 @@ import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import {
   recordScreencast,
+  type ScreencastOutputTarget,
   type ScreencastRecorder,
   type ScreencastRecorderOptions,
 } from './screencast-recorder.js'
@@ -36,16 +37,21 @@ export type ScreencastRecordFunction = (
   options: ScreencastRecorderOptions,
 ) => Promise<ScreencastRecorder>
 
-export interface StartScreencastOptions {
+interface StartScreencastSettings {
   capture: ResolvedCaptureOptions
   /** Bounds the restored-surface paint; defaults to the system clock. */
   clock?: ClockBoundary
   ffmpegPath: string
   format: OutputFormat
   onViewportRestoreError?: (error: unknown) => void
-  /** The reserved segment file the encoder writes. */
-  outputPath: string
 }
+
+/**
+ * Starts encoding into `outputPath`, the reserved segment file, by default;
+ * with `spoolPath`, spools the stream there for a later encode instead.
+ */
+export type StartScreencastOptions = StartScreencastSettings &
+  ScreencastOutputTarget
 
 export const startScreencast = async (
   page: Page,
@@ -86,26 +92,26 @@ export const startScreencast = async (
 }
 
 export const createScreencastOptions = (
-  options: Pick<
-    StartScreencastOptions,
-    'capture' | 'ffmpegPath' | 'format' | 'outputPath'
-  >,
+  options: Pick<StartScreencastSettings, 'capture' | 'ffmpegPath' | 'format'> &
+    ScreencastOutputTarget,
 ): ScreencastRecorderOptions => {
   const { capture } = options
-  return {
+  const settings = {
     format: options.format,
     fps: capture.fps,
     quality: capture.quality,
     scale: capture.scale,
     speed: capture.speed,
     ffmpegPath: options.ffmpegPath,
-    outputPath: options.outputPath,
     ...(capture.maxWidth === undefined ? {} : { maxWidth: capture.maxWidth }),
     ...(capture.maxHeight === undefined
       ? {}
       : { maxHeight: capture.maxHeight }),
     ...(capture.crop ? { crop: capture.crop } : {}),
   }
+  return 'spoolPath' in options
+    ? { ...settings, spoolPath: options.spoolPath }
+    : { ...settings, outputPath: options.outputPath }
 }
 
 /**

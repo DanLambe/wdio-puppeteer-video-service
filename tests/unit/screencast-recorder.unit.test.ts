@@ -7,8 +7,9 @@ import {
   type ClockBoundary,
   systemClock,
 } from '../../src/service/boundaries.js'
+import { EncoderSink } from '../../src/service/frame-sink.js'
+import { createFfmpegArguments } from '../../src/service/screencast-arguments.js'
 import {
-  createFfmpegArguments,
   recordScreencast,
   resolveCaptureCanvas,
   ScreencastRecorder,
@@ -261,7 +262,7 @@ const startRecorder = async (
 const createRecorder = (ffmpeg: FakeFfmpeg, session: CDPSession) => {
   return ScreencastRecorder.create({
     canvas: { width: 1280, height: 720 },
-    ffmpeg: ffmpeg.child,
+    sink: new EncoderSink(ffmpeg.child),
     fps: 30,
     monotonicNow: () => 0,
     session,
@@ -1543,11 +1544,13 @@ describe('screencast recorder frame timing', () => {
     const recorder = ScreencastRecorder.create({
       canvas: { width: 1280, height: 720 },
       clock: systemClock,
-      ffmpeg: ffmpeg.child,
       fps: 30,
       monotonicNow: () => 0,
       session: createFakeSession(),
-      terminateProcessTree,
+      sink: new EncoderSink(ffmpeg.child, {
+        clock: systemClock,
+        terminateProcessTree,
+      }),
     })
     try {
       const aborted = recorder.abort()
