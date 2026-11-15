@@ -106,29 +106,36 @@ const createHarness = (serviceOptions: WdioPuppeteerVideoServiceOptions) => {
       const part = session.currentSegment
       const { segment } = session.detachCapture()
       if (!segment) {
-        return { segment: undefined, streamOk: false }
+        return { capturedSeconds: 0, segment: undefined, streamOk: false }
       }
       if (stop.discard) {
         await fs.rm(segment.recordingPath, { force: true })
-        return { segment: undefined, streamOk: true }
+        return { capturedSeconds: 0, segment: undefined, streamOk: true }
       }
       if (!engine.uncleanParts.has(part)) {
-        return { segment, streamOk: true }
+        return { capturedSeconds: 0, segment, streamOk: true }
       }
       segment.transcode = false
       segment.outputPath = segment.recordingPath
       segment.outputFormat = segment.recordingFormat
-      return { incompleteReason: 'encoder exited', segment, streamOk: false }
+      return {
+        capturedSeconds: 0,
+        incompleteReason: 'encoder exited',
+        segment,
+        streamOk: false,
+      }
     },
   )
   const captureEngine: RecordingControllerOptions['captureEngine'] = {
     afterWindowCommand: vi.fn(async () => {}),
     beforeWindowCommand: vi.fn(async () => {}),
     currentWindowHandle: vi.fn(async () => engine.current),
+    discardSpool: vi.fn(async () => {}),
     isRecordedPageClosed: false,
     resetRecording: vi.fn(async () => {
       session.detachCapture()
       session.resetRecording()
+      return {}
     }),
     startCapture,
     stopCapture,

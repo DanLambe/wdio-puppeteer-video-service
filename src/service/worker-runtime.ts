@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { Frameworks, Services } from '@wdio/types'
 import type { Browser } from 'webdriverio'
 import type {
@@ -12,6 +13,7 @@ import {
   createWorkerCompositionRoot,
   type WorkerCompositionOverrides,
 } from './composition.js'
+import { SPOOL_DIR_NAME } from './constants.js'
 import { ContextFollower } from './context-follower.js'
 import { FfmpegRuntime } from './ffmpeg-runtime.js'
 import { isInternalOperation } from './internal-operation.js'
@@ -198,6 +200,18 @@ export class WdioPuppeteerVideoWorkerRuntime
       media: this._mediaCoordinator,
       options: this._options,
       recordingSlotScheduler,
+      ...(launcherContext
+        ? {
+            spoolStorage: {
+              directory: path.join(
+                this._options.outputDir,
+                SPOOL_DIR_NAME,
+                launcherContext.runId,
+              ),
+              uuid: composition.uuid,
+            },
+          }
+        : {}),
     })
     recordingController = this._recordingController
     this._contextFollower = new ContextFollower({

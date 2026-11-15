@@ -69,18 +69,20 @@ const createHarness = (options: WdioPuppeteerVideoServiceOptions = {}) => {
     afterWindowCommand: vi.fn(async () => {}),
     beforeWindowCommand: vi.fn(async () => {}),
     currentWindowHandle: vi.fn(async () => engine.current),
+    discardSpool: vi.fn(async () => {}),
     get isRecordedPageClosed() {
       return engine.pageClosed
     },
     resetRecording: vi.fn(async () => {
       session.resetRecording()
+      return {}
     }),
     startCapture,
     stopCapture: vi.fn(async () => {
       session.detachCapture()
       engine.pageClosed = false
       // Retention discards the media here; these tests follow tabs only.
-      return { segment: undefined, streamOk: true }
+      return { capturedSeconds: 0, segment: undefined, streamOk: true }
     }),
   }
   const controller = new RecordingController({

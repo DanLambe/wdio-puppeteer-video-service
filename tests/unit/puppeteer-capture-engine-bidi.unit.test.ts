@@ -45,6 +45,7 @@ const createRecorder = () => {
   const recorder = new PassThrough() as PassThrough & Record<string, unknown>
   Object.assign(recorder, {
     abort: vi.fn(async () => recorder.destroy()),
+    output: { kind: 'encoded' as const },
     ffmpegResult: { code: 0, diagnostic: '', signal: null },
     frameCount: 1,
     incompleteReason: undefined,

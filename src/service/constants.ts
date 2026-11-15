@@ -94,6 +94,9 @@ export const DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS = 10_000
 export const DEFAULT_CAPTURE_ENCODING: CaptureEncoding = 'live'
 export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
+// Under `outputDir`, one subdirectory per WDIO run holds deferred segments'
+// frames until each is encoded or discarded.
+export const SPOOL_DIR_NAME = '.wdio-video-spool'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 

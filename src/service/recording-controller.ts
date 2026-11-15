@@ -10,24 +10,28 @@ import {
 import { reserveArtifactPath } from './artifact-integrity.js'
 import type {
   CaptureSession,
+  HeldSegment,
   SegmentTab,
   SegmentTabReason,
 } from './capture-session.js'
-import type { ActiveSegment, OutputFormat } from './constants.js'
+import type { OutputFormat } from './constants.js'
 import type { ContextFollowerTarget, FollowReason } from './context-follower.js'
 import type { FfmpegRuntime } from './ffmpeg-runtime.js'
+import type { ScreencastSpool } from './frame-sink.js'
 import { runInternal } from './internal-operation.js'
 import type { ServiceLogger } from './logging.js'
 import type { ManifestWorkerRecorder } from './manifest-runtime.js'
 import * as artifactPaths from './paths.js'
 import type {
   CaptureSegmentOutput,
+  CaptureStopResult,
   CaptureTarget,
   CaptureWindowOperations,
   PuppeteerCaptureEngine,
 } from './puppeteer-capture-engine.js'
 import { RecordingLifecycle } from './recording-lifecycle.js'
 import type { RecordingMediaCoordinator } from './recording-media-coordinator.js'
+import { selectCaptureMode } from './recording-policy.js'
 import type { RecordingSlotScheduler } from './recording-slots.js'
 import type { RecordingMediaFinalization } from './worker-recording-coordinator.js'
 
@@ -42,6 +46,7 @@ type CaptureEnginePort = Pick<
   | 'afterWindowCommand'
   | 'beforeWindowCommand'
   | 'currentWindowHandle'
+  | 'discardSpool'
   | 'isRecordedPageClosed'
   | 'resetRecording'
   | 'startCapture'
@@ -58,6 +63,13 @@ type RecordingSlotPort = Pick<
   'acquire' | 'ownsGlobalRecordingSlot' | 'ownsRecordingSlot' | 'release'
 >
 
+/** Where a worker writes the spools of deferred segments. */
+export interface SpoolStorage {
+  /** This run's spool directory, `<outputDir>/.wdio-video-spool/<runId>`. */
+  readonly directory: string
+  readonly uuid: () => string
+}
+
 export interface RecordingControllerOptions {
   readonly captureEngine: CaptureEnginePort
   readonly captureSession: CaptureSession
@@ -68,6 +80,8 @@ export interface RecordingControllerOptions {
   readonly media: RecordingMediaCoordinator
   readonly options: ResolvedWdioPuppeteerVideoServiceOptions
   readonly recordingSlotScheduler: RecordingSlotPort
+  /** Without it, every segment is encoded live. */
+  readonly spoolStorage?: SpoolStorage
 }
 
 /** Owns capture lifecycle, serialization, naming, and recording-slot invariants. */
@@ -87,11 +101,13 @@ export class RecordingController implements ContextFollowerTarget {
   private readonly maxSlugLength: number
   private readonly media: RecordingMediaCoordinator
   private readonly options: ResolvedWdioPuppeteerVideoServiceOptions
+  private recordingRetryCount = 0
   private recordingTask: Promise<void> = Promise.resolve()
   private readonly recordingSlotScheduler: RecordingSlotPort
   private sessionFullToken = ''
   private sessionToken = ''
   private readonly slugUsageCount = new Map<string, number>()
+  private readonly spoolStorage: SpoolStorage | undefined
   private warnedAboutMp4Compatibility = false
 
   constructor(options: RecordingControllerOptions) {
@@ -104,6 +120,7 @@ export class RecordingController implements ContextFollowerTarget {
     this.media = options.media
     this.options = options.options
     this.recordingSlotScheduler = options.recordingSlotScheduler
+    this.spoolStorage = options.spoolStorage
   }
 
   get sessionIdToken(): string {
@@ -327,7 +344,7 @@ export class RecordingController implements ContextFollowerTarget {
 
   async startForMetadata(
     metadata: Readonly<SlugMetadata>,
-    _retryCount: number,
+    retryCount: number,
   ): Promise<boolean> {
     if (this.captureSession.currentTestSlug) {
       return true
@@ -350,6 +367,7 @@ export class RecordingController implements ContextFollowerTarget {
     this.closingContextId = undefined
     this.failedStarts.clear()
     this.unconfirmedGap = undefined
+    this.recordingRetryCount = retryCount
     return this.startRecording()
   }
 
@@ -388,6 +406,7 @@ export class RecordingController implements ContextFollowerTarget {
           `[WdioPuppeteerVideoService] Finished test recording (passed=${passed}, keepArtifacts=${keepArtifacts}).`,
         )
         if (!keepArtifacts) {
+          await this.discardHeldSpools()
           await this.media.deleteRecordedSegments()
         }
         if (this.captureFailure) {
@@ -420,6 +439,16 @@ export class RecordingController implements ContextFollowerTarget {
       paths,
       ...(processingFailure ? { processingFailure } : {}),
       ...(tabs?.size ? { tabs } : {}),
+    }
+  }
+
+  /** Deletes the spools of a recording that is not being kept, unencoded. */
+  private async discardHeldSpools(): Promise<void> {
+    for (const held of this.captureSession.heldSegments) {
+      if (held.spool) {
+        await this.captureEngine.discardSpool(held.spool)
+        this.captureSession.releaseHeldSegment(held)
+      }
     }
   }
 
@@ -474,6 +503,10 @@ export class RecordingController implements ContextFollowerTarget {
    */
   private async finalizeHeldSegments(): Promise<void> {
     for (const held of this.captureSession.heldSegments) {
+      if (held.spool) {
+        // Not encoded yet: its planned output is not this recording's file.
+        continue
+      }
       await this.media.finalizeSegment(held.segment)
       this.captureSession.releaseHeldSegment(held)
       this.log(
@@ -490,44 +523,19 @@ export class RecordingController implements ContextFollowerTarget {
   async stopRecording(
     options: Readonly<{ keepArtifacts?: boolean }> = {},
   ): Promise<void> {
-    let activeSegment: ActiveSegment | undefined
-    let streamOk = false
-    let incompleteReason: string | undefined
+    let stopped: CaptureStopResult = NOTHING_STOPPED
     const hadWorkAtInvocation = this.captureSession.hasCapture
 
     await this.lifecycle.stop({
       hasWork: () => this.captureSession.hasCapture,
       stopCapture: async () => {
-        const stoppedCapture = await this.captureEngine.stopCapture({
+        stopped = await this.captureEngine.stopCapture({
           discard: options.keepArtifacts === false,
         })
-        activeSegment = stoppedCapture.segment
-        streamOk = stoppedCapture.streamOk
-        incompleteReason = stoppedCapture.incompleteReason
       },
       processCapture: async () => {
         try {
-          if (!activeSegment) {
-            // Retention already deleted the media, but capture had failed
-            // before then: the entry and failure policy must still say so.
-            if (incompleteReason) {
-              this.reportCaptureFailure(
-                `Discarded recording was incomplete (${incompleteReason})`,
-              )
-            }
-            return
-          }
-          if (!streamOk) {
-            const reason = incompleteReason ? ` (${incompleteReason})` : ''
-            this.reportCaptureFailure(
-              `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}${reason}`,
-            )
-          }
-          const held = this.captureSession.holdSegment(activeSegment, streamOk)
-          this.log(
-            'debug',
-            `[WdioPuppeteerVideoService] Stopped segment ${held.part.toString()} (${activeSegment.recordingPath}); it is processed once the recording's outcome is known.`,
-          )
+          this.holdStoppedSegment(stopped)
         } finally {
           await this.recordingSlotScheduler.release()
         }
@@ -539,29 +547,67 @@ export class RecordingController implements ContextFollowerTarget {
     }
   }
 
+  /** Holds what a stop left, and reports a capture that stopped short. */
+  private holdStoppedSegment(stopped: CaptureStopResult): void {
+    const { incompleteReason, segment, streamOk } = stopped
+    if (!segment) {
+      // Retention already deleted the media, but capture had failed before
+      // then: the entry and failure policy must still say so.
+      if (incompleteReason) {
+        this.reportCaptureFailure(
+          `Discarded recording was incomplete (${incompleteReason})`,
+        )
+      }
+      return
+    }
+    const file = stopped.spool?.path ?? segment.recordingPath
+    if (!streamOk) {
+      const reason = incompleteReason ? ` (${incompleteReason})` : ''
+      this.reportCaptureFailure(
+        `Recording stream did not finish cleanly for: ${file}${reason}`,
+      )
+    }
+    const held = this.captureSession.holdSegment(segment, {
+      capturedSeconds: stopped.capturedSeconds,
+      clean: streamOk,
+      ...(incompleteReason === undefined ? {} : { incompleteReason }),
+      ...(stopped.spool ? { spool: stopped.spool } : {}),
+    })
+    this.log(
+      'debug',
+      `[WdioPuppeteerVideoService] Stopped segment ${held.part.toString()} (${file}); it is processed once the recording's outcome is known.`,
+    )
+  }
+
   async reset(): Promise<void> {
     await this.lifecycle.reset(async () => {
-      this.warnAboutUnprocessedSegments()
+      const held = this.captureSession.heldSegments
       this.captureFailure = undefined
       this.closingContextId = undefined
       this.failedStarts.clear()
       this.unconfirmedGap = undefined
-      await this.captureEngine.resetRecording()
+      const { spool } = await this.captureEngine.resetRecording()
+      this.warnAboutUnprocessedSegments(held, spool)
       await this.recordingSlotScheduler.release()
     })
   }
 
   // A reset normally follows finalization. Segments still held were stopped by
   // a recording whose finalization failed: their files stay, unprocessed.
-  private warnAboutUnprocessedSegments(): void {
-    const held = this.captureSession.heldSegments
-    if (held.length === 0) {
+  private warnAboutUnprocessedSegments(
+    held: readonly HeldSegment[],
+    activeSpool: ScreencastSpool | undefined,
+  ): void {
+    const files = held.map(heldFile)
+    if (activeSpool) {
+      files.push(activeSpool.path)
+    }
+    if (files.length === 0) {
       return
     }
-    const files = held.map((segment) => segment.segment.recordingPath)
     this.log(
       'warn',
-      `[WdioPuppeteerVideoService] Keeping ${held.length.toString()} unprocessed recording segment(s): ${files.join(', ')}`,
+      `[WdioPuppeteerVideoService] Keeping ${files.length.toString()} unprocessed recording segment(s): ${files.join(', ')}`,
     )
   }
 
@@ -643,19 +689,27 @@ export class RecordingController implements ContextFollowerTarget {
     }
 
     try {
+      const spoolPath = this.createSpoolPath()
       const result = await this.captureEngine.startCapture({
+        // A spooled segment's output is reserved only once it is encoded, so
+        // a discarded recording leaves no placeholder.
         createOutput: async () =>
-          this.reserveRecordingOutput(this.createRecordingOutput()),
+          spoolPath === undefined
+            ? this.reserveRecordingOutput(this.createRecordingOutput())
+            : this.createRecordingOutput(),
         ffmpegPath: this.ffmpegRuntime.resolvePath(),
+        ...(spoolPath === undefined ? {} : { spoolPath }),
         ...(target ? { target } : {}),
         transcodeOptions: this.options.processing.transcode,
       })
       if (!result.started) {
         return false
       }
+      const spooling =
+        spoolPath === undefined ? '' : ` (spooling frames to ${spoolPath})`
       this.log(
         'debug',
-        `[WdioPuppeteerVideoService] Recording segment ${this.captureSession.currentSegment} to ${this.captureSession.activeSegment?.outputPath ?? 'unknown output'}`,
+        `[WdioPuppeteerVideoService] Recording segment ${this.captureSession.currentSegment} to ${this.captureSession.activeSegment?.outputPath ?? 'unknown output'}${spooling}`,
       )
       this.getManifestRecorder()?.markCaptureStarted()
       return true
@@ -689,6 +743,30 @@ export class RecordingController implements ContextFollowerTarget {
       `[WdioPuppeteerVideoService] Recording slot acquisition failed${timeoutSuffix}. Recording skipped for this segment.`,
     )
     return false
+  }
+
+  /**
+   * A new spool file for the current segment when it is captured deferred,
+   * named so an orphan can be traced to its recording and part.
+   */
+  private createSpoolPath(): string | undefined {
+    const storage = this.spoolStorage
+    if (!storage) {
+      return undefined
+    }
+    const mode = selectCaptureMode({
+      encoding: this.options.capture.encoding,
+      retain: this.options.recording.retain,
+      retryCount: this.recordingRetryCount,
+    })
+    if (mode === 'live') {
+      return undefined
+    }
+    const part = this.captureSession.currentSegment.toString()
+    return path.join(
+      storage.directory,
+      `${this.captureSession.currentTestSlug}_part${part}.${storage.uuid()}.mkv`,
+    )
   }
 
   private createRecordingOutput(): CaptureSegmentOutput {
@@ -740,6 +818,16 @@ export class RecordingController implements ContextFollowerTarget {
     }
   }
 }
+
+const NOTHING_STOPPED: CaptureStopResult = Object.freeze({
+  capturedSeconds: 0,
+  segment: undefined,
+  streamOk: false,
+})
+
+/** The file a held segment has on disk: its spool, or its recording. */
+const heldFile = (held: HeldSegment): string =>
+  held.spool?.path ?? held.segment.recordingPath
 
 const replaceFileExtension = (
   filePath: string,

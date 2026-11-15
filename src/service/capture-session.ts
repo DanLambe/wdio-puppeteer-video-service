@@ -1,6 +1,7 @@
 import type { Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { ActiveSegment } from './constants.js'
+import type { ScreencastSpool } from './frame-sink.js'
 import type { SessionProtocol } from './protocol.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
 
@@ -34,15 +35,55 @@ export interface SegmentTab {
 
 /**
  * A segment whose capture has stopped, held without post-processing until the
- * recording's outcome is known.
+ * recording's outcome is known. This is the one record of a stopped segment:
+ * its part, tab, files and whether it was captured whole.
  */
 export interface HeldSegment {
-  /** Whether the encoder finished the file as a whole recording. */
+  /** How long the segment was captured, in seconds. */
+  readonly capturedSeconds: number
+  /**
+   * Whether the segment was captured whole: its encoder finished the file, or
+   * its spool holds every frame.
+   */
   readonly clean: boolean
+  /** Why capture stopped short, when the recorder knows. */
+  readonly incompleteReason?: string
   readonly part: number
+  /**
+   * The segment's files. A spooled segment's paths are planned, not yet
+   * reserved: nothing is at them until the spool is encoded.
+   */
   readonly segment: ActiveSegment
+  /** A spooled segment's frames, still to be encoded. */
+  readonly spool?: ScreencastSpool
   readonly tab?: SegmentTab
 }
+
+/** How a stopped segment ended, as its capture reported it. */
+export interface StoppedSegmentDetails {
+  readonly capturedSeconds: number
+  readonly clean: boolean
+  readonly incompleteReason?: string
+  readonly spool?: ScreencastSpool
+}
+
+const createHeldSegment = (
+  part: number,
+  segment: ActiveSegment,
+  details: StoppedSegmentDetails,
+  tab: SegmentTab | undefined,
+): HeldSegment =>
+  Object.freeze({
+    capturedSeconds: details.capturedSeconds,
+    clean: details.clean,
+    ...(details.incompleteReason === undefined
+      ? {}
+      : { incompleteReason: details.incompleteReason }),
+    part,
+    segment,
+    ...(details.spool ? { spool: details.spool } : {}),
+    ...(tab ? { tab } : {}),
+  })
 
 export interface AttachCaptureOptions {
   readonly recorder: ScreencastRecorder
@@ -99,14 +140,17 @@ export class CaptureSession {
   }
 
   /**
-   * Every file the recording has on disk: its recorded paths, and the files of
-   * the segments still held.
+   * Every media file the recording has on disk: its recorded paths, and the
+   * files of the live segments still held. Spools are not media; a spooled
+   * segment's planned path is not the recording's until it is encoded.
    */
   get filePaths(): readonly string[] {
     return Object.freeze([
       ...new Set([
         ...this.retainedPaths,
-        ...this.stoppedSegments.map((held) => held.segment.recordingPath),
+        ...this.stoppedSegments
+          .filter((held) => !held.spool)
+          .map((held) => held.segment.recordingPath),
       ]),
     ])
   }
@@ -219,21 +263,48 @@ export class CaptureSession {
   }
 
   /** Holds a segment stopped as the current part, with that part's tab. */
-  holdSegment(segment: ActiveSegment, clean: boolean): HeldSegment {
+  holdSegment(
+    segment: ActiveSegment,
+    details: StoppedSegmentDetails,
+  ): HeldSegment {
     if (!this.recordingSlug) {
       throw new Error('Cannot hold a segment without an active recording')
     }
-    const tab = this.tabsBySegment.get(this.segmentNumber)
-    const held: HeldSegment = Object.freeze({
-      clean,
-      part: this.segmentNumber,
+    const held = createHeldSegment(
+      this.segmentNumber,
       segment,
-      ...(tab ? { tab } : {}),
-    })
+      details,
+      this.tabsBySegment.get(this.segmentNumber),
+    )
     // Parts are numbered as they start and stop one at a time, so the order
     // they stop in is part order.
     this.stoppedSegments.push(held)
     return held
+  }
+
+  /**
+   * Replaces a spooled segment, once its spool is encoded, with the segment
+   * now on disk, keeping its place in part order.
+   */
+  replaceHeldSegment(held: HeldSegment, segment: ActiveSegment): HeldSegment {
+    const index = this.stoppedSegments.indexOf(held)
+    if (index < 0) {
+      throw new Error('Cannot replace a segment that is not held')
+    }
+    const replacement = createHeldSegment(
+      held.part,
+      segment,
+      {
+        capturedSeconds: held.capturedSeconds,
+        clean: held.clean,
+        ...(held.incompleteReason === undefined
+          ? {}
+          : { incompleteReason: held.incompleteReason }),
+      },
+      held.tab,
+    )
+    this.stoppedSegments[index] = replacement
+    return replacement
   }
 
   /** Stops holding a segment once it has been finalized. */

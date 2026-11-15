@@ -15,12 +15,12 @@ import {
   ACTIVE_PAGE_TIMEOUT_MS,
   type ActiveSegment,
   RECORDER_STOP_TIMEOUT_MS,
-  RECORDING_UNLINK_ATTEMPTS,
-  RECORDING_UNLINK_RETRY_MS,
   type ResolvedTranscodeOptions,
   SEGMENT_SWITCH_DELAY_MS,
   WINDOW_SEGMENT_COMMANDS,
 } from './constants.js'
+import { removeFileWithRetry } from './file-removal.js'
+import type { ScreencastSpool } from './frame-sink.js'
 import type { ServiceLogger } from './logging.js'
 import { describeError } from './normalization.js'
 import {
@@ -53,8 +53,17 @@ export interface CaptureTarget {
 }
 
 export interface CaptureStartOptions {
+  /**
+   * The segment's output. A live segment's is reserved; a spooled segment's is
+   * only planned, and reserved when it is encoded.
+   */
   readonly createOutput: () => Promise<CaptureSegmentOutput>
   readonly ffmpegPath: string
+  /**
+   * Spool the stream to this new file instead of encoding it now. Its
+   * directory is created; a start that fails removes the file.
+   */
+  readonly spoolPath?: string
   readonly target?: CaptureTarget
   readonly transcodeOptions: ResolvedTranscodeOptions
 }
@@ -64,14 +73,27 @@ export interface CaptureStartResult {
 }
 
 export interface CaptureStopResult {
+  /** How long the segment was captured, in seconds of wall-clock time. */
+  readonly capturedSeconds: number
   /**
    * Why capture was incomplete, when the recorder knows. Reported for a
    * discarded segment too: retention does not make a failed capture healthy.
    */
   readonly incompleteReason?: string
   readonly segment: ActiveSegment | undefined
-  /** Whether the encoder finished the segment file as a whole recording. */
+  /** A spooled segment's frames, sealed and still to be encoded. */
+  readonly spool?: ScreencastSpool
+  /**
+   * Whether the segment was captured whole: its encoder finished the file, or
+   * its spool holds every frame.
+   */
   readonly streamOk: boolean
+}
+
+/** A capture a reset stopped without deciding what happens to its frames. */
+export interface CaptureResetResult {
+  /** The stopped capture's spool, which the caller now owns. */
+  readonly spool?: ScreencastSpool
 }
 
 export interface CaptureWindowOperations {
@@ -110,6 +132,7 @@ export class PuppeteerCaptureEngine {
   private readonly onConnectionFailure: (reason: string) => void
   private readonly onProtocolChanged: (protocol: SessionProtocol) => void
   private activePage: Page | undefined
+  private captureStartedAt: number | undefined
   private markerCounter = 0
   private readonly session: CaptureSession
   private readonly startScreencast: PuppeteerCaptureEngineOptions['startScreencast']
@@ -369,15 +392,25 @@ export class PuppeteerCaptureEngine {
 
       const { page, windowHandle } = activePage
       const output = await options.createOutput()
-      pendingRecordingPath = output.recordingPath
+      const { spoolPath } = options
+      // A failed start removes only what it created: a spooled segment's
+      // output is planned, not reserved, and may belong to someone else.
+      pendingRecordingPath = spoolPath ?? output.recordingPath
+      if (spoolPath !== undefined) {
+        await this.fileSystem.mkdir(path.dirname(spoolPath))
+      }
+      // FFmpeg reads a name that starts with `-` as an option, and one with a
+      // colon as a protocol. An absolute path is neither.
+      const target =
+        spoolPath === undefined
+          ? { outputPath: path.resolve(output.recordingPath) }
+          : { spoolPath: path.resolve(spoolPath) }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
         clock: this.clock,
         ffmpegPath: options.ffmpegPath,
         format: output.recordingFormat,
-        // FFmpeg reads a name that starts with `-` as an option, and one
-        // with a colon as a protocol. An absolute path is neither.
-        outputPath: path.resolve(output.recordingPath),
+        ...target,
         onViewportRestoreError: (error) => {
           this.log(
             'warn',
@@ -403,6 +436,7 @@ export class PuppeteerCaptureEngine {
         ...(options.target?.reason ? { reason: options.target.reason } : {}),
       })
       this.activePage = page
+      this.captureStartedAt = this.clock.now()
       pendingRecorder = undefined
       pendingRecordingPath = undefined
       return { started: true }
@@ -416,21 +450,27 @@ export class PuppeteerCaptureEngine {
     options: Readonly<{ discard?: boolean }> = {},
   ): Promise<CaptureStopResult> {
     const { recorder, segment } = this.session.detachCapture()
-    this.activePage = undefined
+    const capturedSeconds = this.endCaptureClock()
     if (!recorder) {
-      return { segment: undefined, streamOk: false }
+      return { capturedSeconds, segment: undefined, streamOk: false }
     }
+    // Read first: a spool has no encoder, and so no encoder result to check.
+    const { output } = recorder
+    const spool = output.kind === 'spool' ? output.spool : undefined
     if (options.discard) {
       // Retention already decided this recording is not being kept. Frames are
       // encoded as they are captured, so the encoding already done cannot be
       // reclaimed; stopping gracefully would additionally drain whatever is
       // still queued, flush, and finish writing a file that is deleted moments
       // later. That tail is largest on a host whose encoder has fallen behind.
-      await this.discardCapture(recorder, segment)
+      // A spool is closed by the abort before it is deleted.
+      await recorder.abort()
+      await this.removeRecordingFile(spool?.path ?? segment.recordingPath)
       this.logQueueStats(recorder)
       // Read after the abort, which reports an encoder exit that preceded it.
       const incompleteReason = recorder.incompleteReason
       return {
+        capturedSeconds,
         ...(incompleteReason ? { incompleteReason } : {}),
         segment: undefined,
         streamOk: true,
@@ -441,23 +481,46 @@ export class PuppeteerCaptureEngine {
     // A stop that missed its deadline was already reported and aborted, which
     // leaves what the encoder had written; only a completed stop has an
     // encoder result of its own to check.
-    const streamOk = recorderStopped && this.checkEncoderResult(recorder)
+    const streamOk = recorderStopped && this.checkRecorderResult(recorder)
     if (!streamOk) {
       this.markSegmentAsUnclean(segment)
     }
     const incompleteReason = recorder.incompleteReason
     return {
+      capturedSeconds,
       ...(incompleteReason ? { incompleteReason } : {}),
       segment,
+      ...(spool ? { spool } : {}),
       streamOk,
     }
   }
 
-  async resetRecording(): Promise<void> {
+  /**
+   * Stops any attached capture and resets the recording. A live segment's
+   * file is removed; a spool is stopped and handed back, since its recording's
+   * outcome is not known here.
+   */
+  async resetRecording(): Promise<CaptureResetResult> {
     const { recorder, segment } = this.session.detachCapture()
-    this.activePage = undefined
+    this.endCaptureClock()
+    const output = recorder?.output
+    if (recorder && output?.kind === 'spool') {
+      await this.stopRecorder(recorder)
+      this.session.resetRecording()
+      return { spool: output.spool }
+    }
     await this.cleanupPartialCapture(recorder, segment?.recordingPath)
     this.session.resetRecording()
+    return {}
+  }
+
+  private endCaptureClock(): number {
+    const startedAt = this.captureStartedAt
+    this.activePage = undefined
+    this.captureStartedAt = undefined
+    return startedAt === undefined
+      ? 0
+      : Math.max(0, this.clock.now() - startedAt) / 1_000
   }
 
   resetConnection(): void {
@@ -545,39 +608,17 @@ export class PuppeteerCaptureEngine {
     }
   }
 
-  // Like `cleanupPartialCapture`, but never waits for a graceful stop: the
-  // encoder's remaining output is unwanted, so it is terminated outright.
-  private async discardCapture(
-    recorder: ScreencastRecorder,
-    segment: ActiveSegment,
-  ): Promise<void> {
-    await recorder.abort()
-    await this.removeRecordingFile(segment.recordingPath)
+  private async removeRecordingFile(filePath: string): Promise<void> {
+    await removeFileWithRetry(
+      { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
+      filePath,
+      'unused recording file',
+    )
   }
 
-  // On Windows, a file a process has just closed can stay locked for a
-  // moment. Retry that briefly; any other failure, or a lock that outlasts
-  // the retries, leaves the file and says so.
-  private async removeRecordingFile(filePath: string): Promise<void> {
-    for (let attempt = 1; attempt <= RECORDING_UNLINK_ATTEMPTS; attempt += 1) {
-      try {
-        await this.fileSystem.unlink(filePath)
-        return
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (code === 'ENOENT') {
-          return
-        }
-        if (!isFileLockedError(code) || attempt === RECORDING_UNLINK_ATTEMPTS) {
-          this.log(
-            'warn',
-            `[WdioPuppeteerVideoService] Could not remove the unused recording file ${filePath}: ${describeError(error)}`,
-          )
-          return
-        }
-      }
-      await this.clock.delay(RECORDING_UNLINK_RETRY_MS)
-    }
+  /** Deletes the spool of a stopped segment that is not being kept. */
+  async discardSpool(spool: ScreencastSpool): Promise<void> {
+    await this.removeRecordingFile(spool.path)
   }
 
   private async stopRecorder(recorder: ScreencastRecorder): Promise<boolean> {
@@ -617,7 +658,8 @@ export class PuppeteerCaptureEngine {
 
   // A file that finished writing is not a complete recording if the encoder
   // failed: keep its bytes as an unclean segment instead of transcoding them.
-  private checkEncoderResult(recorder: ScreencastRecorder): boolean {
+  // A spool has had no encoder yet; its encode is checked when it runs.
+  private checkRecorderResult(recorder: ScreencastRecorder): boolean {
     if (recorder.incompleteReason) {
       // Frames already accepted were still encoded, so the segment is kept as
       // unclean media rather than processed as a complete recording. The
@@ -630,6 +672,9 @@ export class PuppeteerCaptureEngine {
         '[WdioPuppeteerVideoService] The screencast delivered no frames before recording stopped, so the recording is empty.',
       )
       return false
+    }
+    if (recorder.output.kind === 'spool') {
+      return true
     }
     const { code, diagnostic, signal } = recorder.ffmpegResult
     if (code === 0 && signal === null) {
@@ -727,6 +772,3 @@ const createActiveSegment = (
   transcode: output.transcodeEnabled,
   transcodeOptions,
 })
-
-const isFileLockedError = (code: string | undefined): boolean =>
-  code === 'EBUSY' || code === 'EPERM' || code === 'EACCES'

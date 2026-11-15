@@ -93,14 +93,16 @@ const createHarness = (
       afterWindowCommand: vi.fn(async () => {}),
       beforeWindowCommand: vi.fn(async () => {}),
       currentWindowHandle: vi.fn(async () => undefined),
+      discardSpool: vi.fn(async () => {}),
       isRecordedPageClosed: false,
       resetRecording: vi.fn(async () => {
         session.resetRecording()
+        return {}
       }),
       startCapture,
       stopCapture: vi.fn(async () => {
         const { segment } = session.detachCapture()
-        return { segment, streamOk: true }
+        return { capturedSeconds: 0, segment, streamOk: true }
       }),
     }
   let slotOwned = false
@@ -234,6 +236,7 @@ const attachControlledCapture = (
 ): ControlledRecorder => {
   const recorder = {
     abort: vi.fn(async () => {}),
+    output: { kind: 'encoded' as const },
     ffmpegResult: { code: 0, diagnostic: '', signal: null },
     frameCount: 5,
     incompleteReason,
@@ -839,7 +842,7 @@ describe('RecordingController', () => {
     vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
       async () => {
         harness.session.detachCapture()
-        return { segment, streamOk: false }
+        return { capturedSeconds: 0, segment, streamOk: false }
       },
     )
     vi.spyOn(harness.media, 'finalizeSegment').mockResolvedValue(undefined)
@@ -865,7 +868,7 @@ describe('RecordingController', () => {
     vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
       async () => {
         harness.session.detachCapture()
-        return { segment: undefined, streamOk: true }
+        return { capturedSeconds: 0, segment: undefined, streamOk: true }
       },
     )
 
@@ -905,6 +908,7 @@ describe('RecordingController', () => {
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
           async () => ({
             ...harness.session.detachCapture(),
+            capturedSeconds: 0,
             ...(reason ? { incompleteReason: reason } : {}),
             streamOk: false,
           }),
@@ -1090,7 +1094,11 @@ describe('RecordingController', () => {
           windowHandle: undefined,
         })
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
-          async () => ({ ...harness.session.detachCapture(), streamOk: false }),
+          async () => ({
+            ...harness.session.detachCapture(),
+            capturedSeconds: 0,
+            streamOk: false,
+          }),
         )
         const merge = vi.spyOn(harness.media, 'mergeCurrentSegments')
         const queue = vi.spyOn(harness.media, 'queueDeferredMerge')
@@ -1104,7 +1112,11 @@ describe('RecordingController', () => {
           windowHandle: undefined,
         })
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
-          async () => ({ ...harness.session.detachCapture(), streamOk: true }),
+          async () => ({
+            ...harness.session.detachCapture(),
+            capturedSeconds: 0,
+            streamOk: true,
+          }),
         )
         harness.media.enqueue({
           kind: 'transcode',
