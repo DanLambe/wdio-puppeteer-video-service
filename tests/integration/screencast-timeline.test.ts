@@ -9,7 +9,11 @@ import { Writable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import type { CDPSession, Page } from 'puppeteer-core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
+import {
+  type ClockBoundary,
+  nodeFileSystem,
+  systemClock,
+} from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import {
   probeDirectMp4Support,
@@ -30,9 +34,16 @@ import {
   type ScreencastQueueStats,
   type ScreencastRecorder,
 } from '../../src/service/screencast-recorder.js'
+import {
+  encodeSpool,
+  type SpoolEncodeRunner,
+} from '../../src/service/spool-encode.js'
 import type { OutputFormat } from '../../src/types.js'
 import { requireE2eFfmpeg } from '../scripts/ffmpeg-detection.js'
-import { readMatroskaIndex } from '../utils/matroska-blocks.js'
+import {
+  parseMatroskaStream,
+  readMatroskaIndex,
+} from '../utils/matroska-blocks.js'
 import {
   type ColorSpan,
   type DecodedTimeline,
@@ -81,8 +92,12 @@ interface RecordOptions {
   readonly pipeTo?: string
   readonly queueLimits?: Partial<ScreencastQueueLimits>
   readonly speed?: number
+  /** Spool the stream, then encode the spool once stopped. */
+  readonly spool?: boolean
   /** Hold FFmpeg's input until stop, like an encoder starved of CPU. */
   readonly stalled?: boolean
+  /** Keep a copy of every byte the live encoder is given. */
+  readonly tapInput?: Buffer[]
 }
 
 // Puts a gate in front of FFmpeg's input that accepts nothing until opened.
@@ -184,6 +199,107 @@ const reserveOutput = async (
   return output
 }
 
+/** Copies every write to the encoder's input into `chunks`. */
+const tapInput = (child: ChildProcess, chunks: Buffer[]): void => {
+  const input = child.stdin
+  if (!input) {
+    throw new Error('FFmpeg has no input')
+  }
+  const write = input.write.bind(input)
+  input.write = ((chunk: Buffer) => {
+    chunks.push(Buffer.from(chunk))
+    return write(chunk)
+  }) as typeof input.write
+}
+
+/** Runs FFmpeg as the service's runtime would, reporting how it exited. */
+const runFfmpegProcess: SpoolEncodeRunner = async ({ args, ffmpegPath }) => {
+  const child = spawn(ffmpegPath, args, {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  })
+  const stderr: Buffer[] = []
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+  const [code, signal] = (await once(child, 'close')) as [
+    number | null,
+    NodeJS.Signals | null,
+  ]
+  return {
+    code,
+    diagnostic: Buffer.concat(stderr).toString().trim(),
+    signal,
+  }
+}
+
+const spoolSettings = (format: OutputFormat, speed: number) => ({
+  ffmpegPath,
+  format,
+  fps: 30,
+  quality: 30,
+  scale: 1,
+  speed,
+})
+
+/** Encodes a stopped or abandoned spool into the reserved output. */
+const encodeSpooled = async (
+  recorder: ScreencastRecorder,
+  outputPath: string,
+): Promise<void> => {
+  const { output } = recorder
+  if (output.kind !== 'spool') {
+    throw new Error('The recording was not spooled')
+  }
+  const encoded = await encodeSpool(
+    { ffmpegPath, outputPath, spool: output.spool },
+    runFfmpegProcess,
+  )
+  expect(encoded).toEqual({ ok: true })
+}
+
+/**
+ * Emits the frames after the first at their times, firing the one-second hold
+ * timer as each second passes, and leaves the clock at `until`.
+ */
+const playScripted = (
+  source: ReturnType<typeof createFrameSource>,
+  hold: () => void,
+  frames: readonly ScriptedFrame[],
+  until: number,
+): void => {
+  let second = 1
+  for (const frame of frames.slice(1)) {
+    for (; second < frame.at; second += 1) {
+      source.setNow(second * 1_000)
+      hold()
+    }
+    source.emit(frame)
+  }
+  for (; second <= until; second += 1) {
+    source.setNow(second * 1_000)
+    hold()
+  }
+  source.setNow(until * 1_000)
+}
+
+/** A clock whose hold timer the script fires by hand. */
+const createHoldClock = (): {
+  clock: ClockBoundary
+  hold: () => void
+} => {
+  let hold: (() => void) | undefined
+  return {
+    clock: {
+      ...systemClock,
+      clearInterval: () => {},
+      setInterval: (callback) => {
+        hold = callback
+        return { unref: () => {} } as unknown as NodeJS.Timeout
+      },
+    },
+    hold: () => hold?.(),
+  }
+}
+
 /** Records scripted frames, firing the one-second hold timer as time passes. */
 const recordScripted = async (
   name: string,
@@ -198,12 +314,20 @@ const recordScripted = async (
 }> => {
   const format = recorderOptions.format ?? 'webm'
   const output = await reserveOutput(name, format)
-  let hold: (() => void) | undefined
+  const spoolPath = recorderOptions.spool
+    ? path.join(directory, `${name}.spool.mkv`)
+    : undefined
+  const holdClock = createHoldClock()
   const source = createFrameSource(frames[0] as ScriptedFrame)
   let release: (() => void) | undefined
   let piped: Promise<void> | undefined
   const spawnProcess = (command: string, args: string[]): ChildProcess => {
     const { pipeTo } = recorderOptions
+    if (recorderOptions.tapInput) {
+      const child = spawnEncoder(command, args)
+      tapInput(child, recorderOptions.tapInput)
+      return child
+    }
     if (pipeTo) {
       const child = spawn(command, [...args.slice(0, -1), 'pipe:1'], {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -218,54 +342,37 @@ const recordScripted = async (
     release = stallInput(child)
     return child
   }
+  const settings = spoolSettings(format, recorderOptions.speed ?? 1)
   const recorder = await recordScreencast(
     source.page,
+    spoolPath
+      ? { ...settings, spoolPath }
+      : { ...settings, outputPath: output },
     {
-      ffmpegPath,
-      format,
-      fps: 30,
-      outputPath: output,
-      quality: 30,
-      scale: 1,
-      speed: recorderOptions.speed ?? 1,
-    },
-    {
-      clock: {
-        ...systemClock,
-        clearInterval: () => {},
-        setInterval: (callback) => {
-          hold = callback
-          return { unref: () => {} } as unknown as NodeJS.Timeout
-        },
-      },
+      clock: holdClock.clock,
       monotonicNow: source.monotonicNow,
       ...(recorderOptions.queueLimits
         ? { queueLimits: recorderOptions.queueLimits }
         : {}),
       // Otherwise FFmpeg is spawned exactly as the service spawns it.
-      ...(recorderOptions.stalled || recorderOptions.pipeTo
+      ...(recorderOptions.stalled ||
+      recorderOptions.pipeTo ||
+      recorderOptions.tapInput
         ? { spawnProcess }
         : {}),
     },
   )
-  let second = 1
-  for (const frame of frames.slice(1)) {
-    for (; second < frame.at; second += 1) {
-      source.setNow(second * 1_000)
-      hold?.()
-    }
-    source.emit(frame)
-  }
-  for (; second <= stopAt; second += 1) {
-    source.setNow(second * 1_000)
-    hold?.()
-  }
-  source.setNow(stopAt * 1_000)
+  playScripted(source, holdClock.hold, frames, stopAt)
   const stalledStats = release ? recorder.queueStats : undefined
   release?.()
   await recorder.stop()
   await piped
-  expect(recorder.ffmpegResult.code).toBe(0)
+  if (spoolPath) {
+    expect(recorder.incompleteReason).toBeUndefined()
+    await encodeSpooled(recorder, output)
+  } else {
+    expect(recorder.ffmpegResult.code).toBe(0)
+  }
   return { output, recorder, stalledStats }
 }
 
@@ -452,6 +559,237 @@ describe('recorded WebM duration and seek index', () => {
     expect(readContainerDuration(ffmpegPath, pipedPath)).toBeUndefined()
     await expectSeekIndex(output)
     expect(readContainerDuration(ffmpegPath, output)).toBeCloseTo(3, 1)
+  })
+})
+
+interface SpanCase {
+  readonly name: string
+  readonly frames: readonly ScriptedFrame[]
+  readonly stopAt: number
+  /** Playback frames per second of the decoded video. */
+  readonly fps?: number
+  readonly speed?: number
+}
+
+const SPAN_CASES: readonly SpanCase[] = [
+  {
+    name: 'sparse',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 2, color: 'blue' },
+    ],
+    stopAt: 3,
+  },
+  {
+    name: 'burst',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 0.1, color: 'green' },
+      { at: 0.2, color: 'red' },
+      { at: 2, color: 'green' },
+      { at: 3, color: 'blue' },
+    ],
+    stopAt: 5,
+  },
+  {
+    name: 'resize',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 3, color: 'green', width: 322 },
+      { at: 4, color: 'blue' },
+    ],
+    stopAt: 6,
+  },
+  {
+    name: 'long-gap',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 35, color: 'green' },
+    ],
+    stopAt: 36,
+  },
+  {
+    name: 'speed',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 2, color: 'green' },
+    ],
+    stopAt: 4,
+    fps: 60,
+    speed: 2,
+  },
+  // End markers: the final frame held to stop on two blocks one step apart.
+  {
+    name: 'held-end',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 2, color: 'green' },
+    ],
+    stopAt: 5,
+  },
+  // End markers: a final frame first shown at the last position before stop
+  // is extended by one step rather than left alone.
+  {
+    name: 'lone-end',
+    frames: [
+      { at: 0, color: 'red' },
+      { at: 2.95, color: 'green' },
+    ],
+    stopAt: 3,
+  },
+]
+
+describe('spooled recordings', () => {
+  it.each(SPAN_CASES)(
+    'encode to the live timeline: $name',
+    async ({ name, frames, stopAt, fps = 30, speed = 1 }) => {
+      const liveInput: Buffer[] = []
+      const live = await recordScripted(`${name}-live`, frames, stopAt, {
+        speed,
+        tapInput: liveInput,
+      })
+      const spooled = await recordScripted(`${name}-spooled`, frames, stopAt, {
+        speed,
+        spool: true,
+      })
+      // The spool is the stream the live encoder was given, holds included.
+      const spoolPath = path.join(directory, `${name}-spooled.spool.mkv`)
+      expect(
+        (await fs.readFile(spoolPath)).equals(Buffer.concat(liveInput)),
+      ).toBe(true)
+
+      const liveTimeline = decodeColorTimeline(
+        ffmpegPath,
+        live.output,
+        fps,
+        passthrough,
+      )
+      const spooledTimeline = decodeColorTimeline(
+        ffmpegPath,
+        spooled.output,
+        fps,
+        passthrough,
+      )
+      expect(spooledTimeline.spans).toEqual(liveTimeline.spans)
+      expect(spooledTimeline.timestamps).toEqual(liveTimeline.timestamps)
+      expect(readContainerDuration(ffmpegPath, spooled.output)).toBe(
+        readContainerDuration(ffmpegPath, live.output),
+      )
+      // Finished like a live segment: sized and seekable.
+      expectFiniteDuration(spooled.output, spooledTimeline, fps)
+      await expectSeekIndex(spooled.output)
+    },
+  )
+})
+
+/**
+ * Spools scripted frames and then stops as a killed worker does: no stop, so
+ * no end markers, once everything given to the file has reached it.
+ */
+const spoolAndKill = async (
+  name: string,
+  frames: readonly ScriptedFrame[],
+  killAt: number,
+): Promise<{ recorder: ScreencastRecorder; spoolPath: string }> => {
+  const spoolPath = path.join(directory, `${name}.spool.mkv`)
+  const holdClock = createHoldClock()
+  const source = createFrameSource(frames[0] as ScriptedFrame)
+  const recorder = await recordScreencast(
+    source.page,
+    { ...spoolSettings('webm', 1), spoolPath },
+    { clock: holdClock.clock, monotonicNow: source.monotonicNow },
+  )
+  playScripted(source, holdClock.hold, frames, killAt)
+  await waitFor(
+    () => recorder.queueStats.pendingBlocks === 0,
+    'the spool to take every block',
+  )
+  // Let the file system take what the stream buffered, then die.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  await recorder.abort()
+  expect(recorder.incompleteReason).toBeUndefined()
+  return { recorder, spoolPath }
+}
+
+describe('a spool left by a killed worker', () => {
+  it('shows the first frame, held up to the last hold, when nothing changed', async () => {
+    const { recorder } = await spoolAndKill(
+      'killed-first-frame',
+      [{ at: 0, color: 'red' }],
+      5,
+    )
+    const output = await reserveOutput('killed-first-frame', 'webm')
+    await encodeSpooled(recorder, output)
+
+    const spans = decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans
+    // Holds trail real time by half a second: the last, at 5 s, marks 4.5 s
+    // and the block before it starts at 3.5 s.
+    expect(spans).toEqual([{ color: 'red', start: 0, end: 3.533 }])
+  })
+
+  it('keeps the newest image after a hold when a change is followed by a quiet period', async () => {
+    const { recorder } = await spoolAndKill(
+      'killed-quiet-tail',
+      [
+        { at: 0, color: 'red' },
+        { at: 1, color: 'green' },
+        { at: 2, color: 'blue' },
+      ],
+      8,
+    )
+    const output = await reserveOutput('killed-quiet-tail', 'webm')
+    await encodeSpooled(recorder, output)
+
+    const spans = decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans
+    expect(spans.slice(0, 2)).toEqual([
+      { color: 'red', start: 0, end: 1 },
+      { color: 'green', start: 1, end: 2 },
+    ])
+    // Blue is on disk, held until the last hold before the kill.
+    expect(spans[2]).toEqual({ color: 'blue', start: 2, end: 6.533 })
+    expect(spans).toHaveLength(3)
+  })
+
+  it('encodes a spool cut off mid-block up to its last complete frame', async () => {
+    const colors: SolidColor[] = ['red', 'green', 'blue']
+    const frames = Array.from({ length: 8 }, (_unused, second) => ({
+      at: second,
+      color: colors[second % 3] as SolidColor,
+    }))
+    const { recorder, spoolPath } = await spoolAndKill(
+      'killed-truncated',
+      frames,
+      8,
+    )
+    // The kill landed while the sixth image was being written.
+    const bytes = await fs.readFile(spoolPath)
+    const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    let offset = -1
+    for (let image = 0; image < 6; image += 1) {
+      offset = bytes.indexOf(signature, offset + 1)
+    }
+    expect(offset).toBeGreaterThan(0)
+    await fs.writeFile(spoolPath, bytes.subarray(0, offset + 20))
+    const output = await reserveOutput('killed-truncated', 'webm')
+    await encodeSpooled(recorder, output)
+
+    // Every complete block before the cut, the last one lasting a step.
+    const blocks = parseMatroskaStream(bytes.subarray(0, offset + 20)).frames
+    const spans = decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans
+    const lastStart = (blocks.at(-1)?.timestampMs ?? 0) / 1_000
+    expect(spans.slice(0, -1)).toEqual(
+      Array.from({ length: spans.length - 1 }, (_unused, second) => ({
+        color: colors[second % 3],
+        start: second,
+        end: second + 1,
+      })),
+    )
+    expect(spans.at(-1)).toMatchObject({
+      color: colors[(spans.length - 1) % 3],
+      start: spans.length - 1,
+      end: Number((lastStart + 1 / 30).toFixed(3)),
+    })
+    expect(spans.length).toBeGreaterThanOrEqual(4)
   })
 })
 

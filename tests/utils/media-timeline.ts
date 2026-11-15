@@ -20,6 +20,8 @@ export interface DecodedTimeline {
   /** Decoded frames, each with its own timestamp; no frames are invented. */
   readonly frames: number
   readonly spans: ColorSpan[]
+  /** Each decoded frame's timestamp in seconds, from the first. */
+  readonly timestamps: number[]
 }
 
 const run = (ffmpegPath: string, args: string[]) => {
@@ -120,6 +122,9 @@ export const decodeColorTimeline = (
       start: Number(span.start.toFixed(3)),
       end: Number(span.end.toFixed(3)),
     })),
+    timestamps: timestamps.map((timestamp) =>
+      Number((timestamp - origin).toFixed(3)),
+    ),
   }
 }
 
