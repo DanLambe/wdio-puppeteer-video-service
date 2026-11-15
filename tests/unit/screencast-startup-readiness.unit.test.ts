@@ -1,8 +1,11 @@
 import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import type { CDPSession, Page } from 'puppeteer-core'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { systemClock } from '../../src/service/boundaries.js'
 import type { SpoolFileStream } from '../../src/service/frame-sink.js'
 import { recordScreencast } from '../../src/service/screencast-recorder.js'
@@ -192,6 +195,63 @@ describe('screencast startup waits a bounded time for its output', () => {
     await settle()
     expect(outcome.state).toBe('failed')
     expect(outcome.error?.message).toContain('opening the frame spool')
+  })
+
+  it('removes a spool that opens and closes only after a timed-out startup gave up', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'late-spool-'))
+    try {
+      const spoolPath = path.join(directory, 'late.mkv')
+      const time = createClock()
+      const { page, state } = createPage()
+      let release = (): void => {}
+      const file = Object.assign(
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            callback()
+          },
+          // The file closes only once its late open has completed.
+          destroy(error, callback) {
+            release = () => {
+              callback(error)
+            }
+          },
+        }),
+        { pending: true, bytesWritten: 0 },
+      ) as SpoolFileStream
+      const outcome = track(
+        recordScreencast(
+          page,
+          { ...spoolOptions, spoolPath },
+          {
+            clock: time.clock,
+            monotonicNow: time.now,
+            openSpoolFile: () => file,
+          },
+        ),
+      )
+      await settle()
+      time.advance(10_000)
+      await settle()
+      time.advance(1_000)
+      await settle()
+      // Startup is over within its bounds, and never attached to the page.
+      expect(outcome.state).toBe('failed')
+      expect(state.attachments).toBe(0)
+      expect(time.pendingTimers()).toBe(0)
+
+      // The exclusive open completes late and creates the file; it is this
+      // startup's, and is removed once it closes.
+      await fs.writeFile(spoolPath, 'header')
+      file.emit('open', 3)
+      file.emit('ready')
+      release()
+      await vi.waitFor(async () => {
+        await expect(fs.access(spoolPath)).rejects.toThrow()
+      })
+      expect(state.attachments).toBe(0)
+    } finally {
+      await fs.rm(directory, { force: true, recursive: true })
+    }
   })
 
   it('fails an encoder that never spawns, without attaching to the page', async () => {

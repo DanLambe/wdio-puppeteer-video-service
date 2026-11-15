@@ -1,7 +1,9 @@
 import { type ChildProcess, spawn } from 'node:child_process'
+import fs from 'node:fs/promises'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
+import { removeFileWithRetry } from './file-removal.js'
 import {
   EncoderSink,
   type OpenSpoolFile,
@@ -63,6 +65,11 @@ export interface ScreencastEncodeTarget {
 export interface ScreencastSpoolTarget {
   /** A new file for the stream a live encoder would be given. */
   readonly spoolPath: string
+  /**
+   * Told why a spool that a failed startup created could not be removed.
+   * Startup removes only a file its own exclusive open created.
+   */
+  readonly onSpoolCleanupFailure?: (message: string) => void
 }
 
 export type ScreencastOutputTarget =
@@ -869,12 +876,55 @@ export const recordScreencast = async (
       void session?.detach().catch(() => undefined)
       await sink.abort()
     }
+    if (sink.kind === 'spool') {
+      await disposeFailedSpool(sink, clock, options)
+    }
     throw error
   } finally {
     if (timer) {
       clock.clearTimeout(timer)
     }
     page.off?.('close', onPageClosed)
+  }
+}
+
+/**
+ * A failed startup owns only a file its own exclusive open created; nobody
+ * else is handed the spool, so it is removed here. The file is removed once
+ * it closes, even if it opens or closes after startup has given up waiting,
+ * and startup waits for that only a bounded time.
+ */
+const disposeFailedSpool = async (
+  sink: SpoolSink,
+  clock: ClockBoundary,
+  options: ScreencastRecorderOptions,
+): Promise<void> => {
+  const report =
+    'onSpoolCleanupFailure' in options
+      ? options.onSpoolCleanupFailure
+      : undefined
+  const disposal = sink.closed.then(async () => {
+    if (!sink.created) {
+      return
+    }
+    await removeFileWithRetry(
+      {
+        clock,
+        fileSystem: { unlink: (filePath) => fs.unlink(filePath) },
+        log: (_level, message) => {
+          report?.(message)
+        },
+      },
+      sink.spool.path,
+      'frame spool of a recording that failed to start',
+    )
+  })
+  // The abort has already waited, a bounded time, for the file to close. A
+  // file still open is removed whenever it closes, without holding startup.
+  if (sink.isClosed) {
+    await disposal
+  } else {
+    void disposal.catch(() => undefined)
   }
 }
 

@@ -393,10 +393,14 @@ export class PuppeteerCaptureEngine {
       const { page, windowHandle } = activePage
       const output = await options.createOutput()
       const { spoolPath } = options
-      // A failed start removes only what it created: a spooled segment's
-      // output is planned, not reserved, and may belong to someone else.
-      pendingRecordingPath = spoolPath ?? output.recordingPath
-      if (spoolPath !== undefined) {
+      // A failed start removes only a file this start owns. A live output was
+      // reserved for it. A spooled segment's output is only planned and may
+      // be someone else's, and its spool is this start's only once the
+      // recorder whose exclusive open created it exists; before that, the
+      // recorder's own startup removes a spool it created.
+      if (spoolPath === undefined) {
+        pendingRecordingPath = output.recordingPath
+      } else {
         await this.fileSystem.mkdir(path.dirname(spoolPath))
       }
       // FFmpeg reads a name that starts with `-` as an option, and one with a
@@ -404,7 +408,12 @@ export class PuppeteerCaptureEngine {
       const target =
         spoolPath === undefined
           ? { outputPath: path.resolve(output.recordingPath) }
-          : { spoolPath: path.resolve(spoolPath) }
+          : {
+              onSpoolCleanupFailure: (message: string) => {
+                this.log('warn', message)
+              },
+              spoolPath: path.resolve(spoolPath),
+            }
       const recorder = await this.startScreencast(page, {
         capture: this.capture,
         clock: this.clock,
@@ -419,6 +428,10 @@ export class PuppeteerCaptureEngine {
         },
       })
       pendingRecorder = recorder
+      const recorderOutput = recorder.output
+      if (recorderOutput.kind === 'spool') {
+        pendingRecordingPath = recorderOutput.spool.path
+      }
       if (
         this.capture.framePriming &&
         !(await primeScreencastFrames(page, this.clock, recorder))

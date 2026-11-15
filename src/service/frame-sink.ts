@@ -174,6 +174,8 @@ export class SpoolSink implements FrameSink {
   private readonly failedState = Promise.withResolvers<Error>()
   private error: Error | undefined
   private aborting: Promise<void> | undefined
+  private opened = false
+  private closedState = false
 
   constructor(
     spool: ScreencastSpool,
@@ -189,7 +191,13 @@ export class SpoolSink implements FrameSink {
     const ready = Promise.withResolvers<void>()
     this.ready = ready.promise
     stream.on('error', this.onError)
+    // A file stream opens even when it was destroyed while opening, so this
+    // also records an open that completes after an abort.
+    stream.once('open', () => {
+      this.opened = true
+    })
     stream.once('close', () => {
+      this.closedState = true
       closed.resolve()
     })
     if (stream.pending === true) {
@@ -204,6 +212,19 @@ export class SpoolSink implements FrameSink {
   /** Bytes the file system has accepted. */
   get bytesWritten(): number {
     return this.stream.bytesWritten
+  }
+
+  /**
+   * Whether this sink's exclusive open created its file. Only then is the file
+   * this recording's: an open refused with `EEXIST` found someone else's.
+   */
+  get created(): boolean {
+    return this.opened
+  }
+
+  /** Whether the file has closed, so nothing holds it open any more. */
+  get isClosed(): boolean {
+    return this.closedState
   }
 
   /** Bytes accepted by `write` that the file system has not yet taken. */

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,7 +10,10 @@ import {
   nodeFileSystem,
   systemClock,
 } from '../../src/service/boundaries.js'
-import type { StartScreencastOptions } from '../../src/service/capture.js'
+import {
+  type StartScreencastOptions,
+  startScreencast,
+} from '../../src/service/capture.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type { ActiveSegment } from '../../src/service/constants.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
@@ -1411,28 +1415,72 @@ describe('Puppeteer capture engine, deferred capture', () => {
     await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
   })
 
-  it('removes the spool, and nothing at the planned output, when a start fails', async () => {
+  // The real capture, recorder and spool sink behind the engine, over a page
+  // whose CDP session the test controls.
+  const useRealScreencast = (
+    harness: ReturnType<typeof createHarness>,
+    send: (method: string) => Promise<unknown>,
+  ) => {
+    const session = Object.assign(new EventEmitter(), {
+      detach: vi.fn(async () => {}),
+      send: vi.fn(send),
+    })
+    const page = Object.assign(new EventEmitter(), {
+      createCDPSession: vi.fn(async () => session),
+      evaluate: async () => ({ devicePixelRatio: 1, height: 64, width: 64 }),
+      setViewport: async () => {},
+      viewport: () => ({ height: 64, width: 64 }),
+    })
+    harness.startScreencast.mockImplementation(
+      async (_page, options) =>
+        (await startScreencast(page as unknown as Page, options)) as never,
+    )
+    return page
+  }
+
+  it('keeps a file already at the spool path when the exclusive open is refused', async () => {
     const tempDir = await createTempDir()
     const harness = createHarness()
+    const page = useRealScreencast(harness, async () => ({}))
+    const spoolPath = spoolPathIn(tempDir)
     const plannedPath = path.join(tempDir, 'checkout_part1.webm')
+    await fs.mkdir(path.dirname(spoolPath), { recursive: true })
+    await fs.writeFile(spoolPath, 'frames of another recording')
     await fs.writeFile(plannedPath, 'someone else')
-    harness.startScreencast.mockImplementation(async (_page, options) => {
-      if ('spoolPath' in options) {
-        // The open completed before startup failed.
-        await fs.writeFile(options.spoolPath, 'header')
-      }
-      throw new Error('screencast refused')
-    })
 
-    await expect(startSpooled(harness, tempDir)).rejects.toThrow(
-      'screencast refused',
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow('EEXIST')
+
+    await expect(fs.readFile(spoolPath, 'utf8')).resolves.toBe(
+      'frames of another recording',
     )
-
-    await expect(fs.access(spoolPathIn(tempDir))).rejects.toThrow()
     await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(page.createCDPSession).not.toHaveBeenCalled()
+    expect(harness.session.hasCapture).toBe(false)
   })
 
-  it('removes a spool whose directory could not be created', async () => {
+  it('removes a spool its own startup created when the screencast then fails', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    useRealScreencast(harness, async (method) => {
+      if (method === 'Page.startScreencast') {
+        throw new Error('Target closed')
+      }
+      return {}
+    })
+    const plannedPath = path.join(tempDir, 'checkout_part1.webm')
+    await fs.writeFile(plannedPath, 'someone else')
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow(
+      'Target closed',
+    )
+
+    // The spool had its Matroska header and nothing else.
+    await expect(fs.access(spoolPathIn(tempDir))).rejects.toThrow()
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('removes nothing when the spool directory cannot be created', async () => {
     const tempDir = await createTempDir()
     const unlink = vi.fn(async () => {})
     const harness = createHarness({
@@ -1448,7 +1496,28 @@ describe('Puppeteer capture engine, deferred capture', () => {
     await expect(startSpooled(harness, tempDir)).rejects.toThrow('EACCES')
 
     expect(harness.startScreencast).not.toHaveBeenCalled()
-    expect(unlink).toHaveBeenCalledExactlyOnceWith(spoolPathIn(tempDir))
+    expect(unlink).not.toHaveBeenCalled()
+  })
+
+  it('owns, and removes, a spool once its recorder started and the start then failed', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    vi.spyOn(harness.session, 'attachCapture').mockImplementation(() => {
+      throw new Error('attach refused')
+    })
+    const spoolPath = spoolPathIn(tempDir)
+    harness.startScreencast.mockImplementation(async () => {
+      await fs.mkdir(path.dirname(spoolPath), { recursive: true })
+      await fs.writeFile(spoolPath, 'header')
+      return harness.recorder as never
+    })
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow(
+      'attach refused',
+    )
+
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    await expect(fs.access(spoolPath)).rejects.toThrow()
   })
 
   it('stops an attached spool on reset and hands it back undeleted', async () => {

@@ -109,9 +109,16 @@ export const createScreencastOptions = (
       : { maxHeight: capture.maxHeight }),
     ...(capture.crop ? { crop: capture.crop } : {}),
   }
-  return 'spoolPath' in options
-    ? { ...settings, spoolPath: options.spoolPath }
-    : { ...settings, outputPath: options.outputPath }
+  if (!('spoolPath' in options)) {
+    return { ...settings, outputPath: options.outputPath }
+  }
+  return {
+    ...settings,
+    spoolPath: options.spoolPath,
+    ...(options.onSpoolCleanupFailure
+      ? { onSpoolCleanupFailure: options.onSpoolCleanupFailure }
+      : {}),
+  }
 }
 
 /**
