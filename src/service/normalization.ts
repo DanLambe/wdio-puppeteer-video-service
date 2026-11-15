@@ -128,20 +128,6 @@ export const toNonEmptyString = (value: unknown): string | undefined => {
   return trimmed
 }
 
-export const isBenignStreamWriteError = (
-  error: NodeJS.ErrnoException,
-): boolean => {
-  if (error.code === 'EPIPE') {
-    return true
-  }
-
-  const message = error.message.toLowerCase()
-  return (
-    message.includes('cannot call write after a stream was destroyed') ||
-    message.includes('write after end')
-  )
-}
-
 export const describeError = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message

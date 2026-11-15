@@ -1,4 +1,4 @@
-import { finished } from 'node:stream/promises'
+import path from 'node:path'
 import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
@@ -15,13 +15,14 @@ import {
   ACTIVE_PAGE_TIMEOUT_MS,
   type ActiveSegment,
   RECORDER_STOP_TIMEOUT_MS,
+  RECORDING_UNLINK_ATTEMPTS,
+  RECORDING_UNLINK_RETRY_MS,
   type ResolvedTranscodeOptions,
   SEGMENT_SWITCH_DELAY_MS,
   WINDOW_SEGMENT_COMMANDS,
-  WRITE_STREAM_TIMEOUT_MS,
 } from './constants.js'
 import type { ServiceLogger } from './logging.js'
-import { describeError, isBenignStreamWriteError } from './normalization.js'
+import { describeError } from './normalization.js'
 import {
   beforeDeadline,
   findActivePage,
@@ -69,6 +70,7 @@ export interface CaptureStopResult {
    */
   readonly incompleteReason?: string
   readonly segment: ActiveSegment | undefined
+  /** Whether the encoder finished the segment file as a whole recording. */
   readonly streamOk: boolean
 }
 
@@ -358,7 +360,6 @@ export class PuppeteerCaptureEngine {
     options: CaptureStartOptions,
   ): Promise<CaptureStartResult> {
     let pendingRecorder: ScreencastRecorder | undefined
-    let pendingSegment: ActiveSegment | undefined
     let pendingRecordingPath: string | undefined
     try {
       const activePage = await this.preparePage(options.target)
@@ -374,6 +375,9 @@ export class PuppeteerCaptureEngine {
         clock: this.clock,
         ffmpegPath: options.ffmpegPath,
         format: output.recordingFormat,
+        // FFmpeg reads a name that starts with `-` as an option, and one
+        // with a colon as a protocol. An absolute path is neither.
+        outputPath: path.resolve(output.recordingPath),
         onViewportRestoreError: (error) => {
           this.log(
             'warn',
@@ -382,13 +386,6 @@ export class PuppeteerCaptureEngine {
         },
       })
       pendingRecorder = recorder
-      const segment = this.createActiveSegment(
-        recorder,
-        output,
-        options.transcodeOptions,
-      )
-      pendingSegment = segment
-      recorder.pipe(segment.writeStream)
       if (
         this.capture.framePriming &&
         !(await primeScreencastFrames(page, this.clock, recorder))
@@ -401,22 +398,16 @@ export class PuppeteerCaptureEngine {
 
       this.session.attachCapture({
         recorder,
-        segment,
+        segment: createActiveSegment(output, options.transcodeOptions),
         windowHandle,
         ...(options.target?.reason ? { reason: options.target.reason } : {}),
       })
       this.activePage = page
       pendingRecorder = undefined
-      pendingSegment = undefined
       pendingRecordingPath = undefined
       return { started: true }
     } catch (error) {
-      await this.cleanupPartialCapture(pendingRecorder, pendingSegment)
-      if (pendingRecordingPath && !pendingSegment) {
-        await this.fileSystem
-          .unlink(pendingRecordingPath)
-          .catch(() => undefined)
-      }
+      await this.cleanupPartialCapture(pendingRecorder, pendingRecordingPath)
       throw error
     }
   }
@@ -447,37 +438,25 @@ export class PuppeteerCaptureEngine {
     }
     const recorderStopped = await this.stopRecorder(recorder)
     this.logQueueStats(recorder)
-    if (!recorderStopped && !segment.writeStream.destroyed) {
-      // Destroying a pipe's source does not end its destination. Flush bytes
-      // already accepted by the file without waiting for an impossible EOF.
-      segment.writeStream.end()
+    // A stop that missed its deadline was already reported and aborted, which
+    // leaves what the encoder had written; only a completed stop has an
+    // encoder result of its own to check.
+    const streamOk = recorderStopped && this.checkEncoderResult(recorder)
+    if (!streamOk) {
+      this.markSegmentAsUnclean(segment)
     }
-    // A stop that missed its deadline was already reported and aborted; only
-    // a completed stop has an encoder result of its own to check.
-    const encoderOk = recorderStopped && this.checkEncoderResult(recorder)
-
-    try {
-      const streamFinished = await this.waitForWriteStream(segment)
-      const streamOk = encoderOk && streamFinished
-      if (!streamOk) {
-        this.markSegmentAsUnclean(segment)
-      }
-      const incompleteReason = recorder.incompleteReason
-      return {
-        ...(incompleteReason ? { incompleteReason } : {}),
-        segment,
-        streamOk,
-      }
-    } finally {
-      recorder.off('error', segment.onRecorderError)
-      segment.writeStream.off('error', segment.onWriteStreamError)
+    const incompleteReason = recorder.incompleteReason
+    return {
+      ...(incompleteReason ? { incompleteReason } : {}),
+      segment,
+      streamOk,
     }
   }
 
   async resetRecording(): Promise<void> {
     const { recorder, segment } = this.session.detachCapture()
     this.activePage = undefined
-    await this.cleanupPartialCapture(recorder, segment)
+    await this.cleanupPartialCapture(recorder, segment?.recordingPath)
     this.session.resetRecording()
   }
 
@@ -552,83 +531,18 @@ export class PuppeteerCaptureEngine {
     }
   }
 
-  private createActiveSegment(
-    recorder: ScreencastRecorder,
-    output: CaptureSegmentOutput,
-    transcodeOptions: ResolvedTranscodeOptions,
-  ): ActiveSegment {
-    const writeStream = this.fileSystem.createWriteStream(
-      output.recordingPath,
-      'r+',
-    )
-    const writeStreamDone = finished(writeStream)
-    let segment: ActiveSegment | undefined
-    let recorderErrorLogged = false
-    const onWriteStreamError = (error: NodeJS.ErrnoException) => {
-      if (segment?.writeStreamErrored) {
-        return
-      }
-      const writeErrorMessage = describeError(error)
-      if (segment) {
-        segment.writeStreamErrored = true
-        segment.writeStreamErrorMessage = writeErrorMessage
-      }
-      const benignError = isBenignStreamWriteError(error)
-      this.log(
-        benignError ? 'debug' : 'warn',
-        benignError
-          ? `[WdioPuppeteerVideoService] Recording stream closed while recorder was still flushing (${writeErrorMessage}).`
-          : `[WdioPuppeteerVideoService] Recording stream error: ${writeErrorMessage}`,
-      )
-    }
-    const onRecorderError = (error: unknown) => {
-      if (recorderErrorLogged) {
-        return
-      }
-      recorderErrorLogged = true
-      this.log(
-        'warn',
-        `[WdioPuppeteerVideoService] Recorder stream error: ${describeError(error)}`,
-      )
-    }
-    writeStream.on('error', onWriteStreamError)
-    recorder.on('error', onRecorderError)
-    segment = {
-      outputFormat: output.outputFormat,
-      outputPath: output.outputPath,
-      recordingFormat: output.recordingFormat,
-      recordingPath: output.recordingPath,
-      transcode: output.transcodeEnabled,
-      transcodeOptions,
-      writeStream,
-      writeStreamDone,
-      writeStreamErrored: false,
-      onWriteStreamError,
-      onRecorderError,
-    }
-    return segment
-  }
-
+  // FFmpeg owns the segment file, so it is removed only once the encoder has
+  // closed: the stop or abort awaited before the removal.
   private async cleanupPartialCapture(
     recorder: ScreencastRecorder | undefined,
-    segment: ActiveSegment | undefined,
+    recordingPath: string | undefined,
   ): Promise<void> {
     if (recorder) {
       await this.stopRecorder(recorder)
-      if (!recorder.destroyed) {
-        recorder.destroy()
-      }
     }
-    if (!segment) {
-      return
+    if (recordingPath) {
+      await this.removeRecordingFile(recordingPath)
     }
-    recorder?.off('error', segment.onRecorderError)
-    segment.writeStream.off('error', segment.onWriteStreamError)
-    if (!segment.writeStream.destroyed) {
-      segment.writeStream.destroy()
-    }
-    await segment.writeStreamDone.catch(() => undefined)
-    await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
   }
 
   // Like `cleanupPartialCapture`, but never waits for a graceful stop: the
@@ -638,16 +552,32 @@ export class PuppeteerCaptureEngine {
     segment: ActiveSegment,
   ): Promise<void> {
     await recorder.abort()
-    if (!recorder.destroyed) {
-      recorder.destroy()
+    await this.removeRecordingFile(segment.recordingPath)
+  }
+
+  // On Windows, a file a process has just closed can stay locked for a
+  // moment. Retry that briefly; any other failure, or a lock that outlasts
+  // the retries, leaves the file and says so.
+  private async removeRecordingFile(filePath: string): Promise<void> {
+    for (let attempt = 1; attempt <= RECORDING_UNLINK_ATTEMPTS; attempt += 1) {
+      try {
+        await this.fileSystem.unlink(filePath)
+        return
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ENOENT') {
+          return
+        }
+        if (!isFileLockedError(code) || attempt === RECORDING_UNLINK_ATTEMPTS) {
+          this.log(
+            'warn',
+            `[WdioPuppeteerVideoService] Could not remove the unused recording file ${filePath}: ${describeError(error)}`,
+          )
+          return
+        }
+      }
+      await this.clock.delay(RECORDING_UNLINK_RETRY_MS)
     }
-    recorder.off('error', segment.onRecorderError)
-    segment.writeStream.off('error', segment.onWriteStreamError)
-    if (!segment.writeStream.destroyed) {
-      segment.writeStream.destroy()
-    }
-    await segment.writeStreamDone.catch(() => undefined)
-    await this.fileSystem.unlink(segment.recordingPath).catch(() => undefined)
   }
 
   private async stopRecorder(recorder: ScreencastRecorder): Promise<boolean> {
@@ -713,40 +643,6 @@ export class PuppeteerCaptureEngine {
       'warn',
       `[WdioPuppeteerVideoService] FFmpeg ${exit} while recording${details}`,
     )
-    return false
-  }
-
-  private async waitForWriteStream(segment: ActiveSegment): Promise<boolean> {
-    if (segment.writeStreamErrored) {
-      await segment.writeStreamDone.catch(() => undefined)
-      return false
-    }
-    const { promise: timeoutTask, resolve: resolveTimeout } =
-      Promise.withResolvers<false>()
-    const timeout = this.clock.setTimeout(() => {
-      resolveTimeout(false)
-    }, WRITE_STREAM_TIMEOUT_MS)
-    timeout.unref()
-    let streamOk: boolean
-    try {
-      streamOk = await Promise.race([
-        segment.writeStreamDone.then(() => true).catch(() => false),
-        timeoutTask,
-      ])
-    } finally {
-      this.clock.clearTimeout(timeout)
-    }
-    if (streamOk) {
-      return true
-    }
-    const timeoutMessage = `Timed out waiting for recording stream to finish: ${segment.recordingPath}`
-    this.log('warn', timeoutMessage)
-    segment.writeStreamErrored = true
-    segment.writeStreamErrorMessage = timeoutMessage
-    if (!segment.writeStream.destroyed) {
-      segment.writeStream.destroy(new Error(timeoutMessage))
-    }
-    await segment.writeStreamDone.catch(() => undefined)
     return false
   }
 
@@ -819,3 +715,18 @@ export class PuppeteerCaptureEngine {
     return this.session.browser?.getWindowHandle().catch(() => undefined)
   }
 }
+
+const createActiveSegment = (
+  output: CaptureSegmentOutput,
+  transcodeOptions: ResolvedTranscodeOptions,
+): ActiveSegment => ({
+  outputFormat: output.outputFormat,
+  outputPath: output.outputPath,
+  recordingFormat: output.recordingFormat,
+  recordingPath: output.recordingPath,
+  transcode: output.transcodeEnabled,
+  transcodeOptions,
+})
+
+const isFileLockedError = (code: string | undefined): boolean =>
+  code === 'EBUSY' || code === 'EPERM' || code === 'EACCES'

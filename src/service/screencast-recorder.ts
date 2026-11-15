@@ -1,5 +1,4 @@
 import { type ChildProcess, spawn } from 'node:child_process'
-import { PassThrough } from 'node:stream'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
@@ -42,6 +41,8 @@ export interface ScreencastRecorderOptions {
   /** Bounds the dimensions Chrome is asked to produce for each frame. */
   readonly maxWidth?: number
   readonly maxHeight?: number
+  /** The segment file FFmpeg writes; it replaces any placeholder there. */
+  readonly outputPath: string
   readonly quality: number
   readonly scale: number
   readonly speed: number
@@ -184,11 +185,12 @@ export interface ScreencastRecorderInit {
 }
 
 /**
- * Records a page's screencast into FFmpeg. Replaces Puppeteer 24's
- * `ScreenRecorder`, whose output does not play back in real time: it passes
- * `-framerate` after `-i`, so FFmpeg assumes 25 fps; it rounds each frame gap on
- * its own, dropping frames Chrome captures faster than `fps`; and its
- * `-avioflags direct` input makes FFmpeg discard the first two frames.
+ * Records a page's screencast into FFmpeg, which writes the segment file
+ * itself. Replaces Puppeteer 24's `ScreenRecorder`, whose output does not play
+ * back in real time: it passes `-framerate` after `-i`, so FFmpeg assumes
+ * 25 fps; it rounds each frame gap on its own, dropping frames Chrome captures
+ * faster than `fps`; and its `-avioflags direct` input makes FFmpeg discard
+ * the first two frames.
  *
  * Frames are placed on an `fps` grid anchored at the first frame, using
  * Chrome's timestamps bounded by when each frame actually arrived. Each
@@ -199,7 +201,7 @@ export interface ScreencastRecorderInit {
  * the recording is reported incomplete rather than growing without bound. An
  * encoder that exits before the recording is stopped leaves it incomplete too.
  */
-export class ScreencastRecorder extends PassThrough {
+export class ScreencastRecorder {
   private readonly ffmpeg: ChildProcess
   private readonly encoder: ScreencastEncoder
   private readonly fps: number
@@ -246,7 +248,6 @@ export class ScreencastRecorder extends PassThrough {
   }
 
   private constructor(init: ScreencastRecorderInit) {
-    super({ allowHalfOpen: false })
     this.session = init.session
     this.ffmpeg = init.ffmpeg
     this.fps = init.fps
@@ -269,7 +270,6 @@ export class ScreencastRecorder extends PassThrough {
         ...init.canvas,
       }),
     )
-    init.ffmpeg.stdout?.pipe(this)
     init.session.on('Page.screencastFrame', this.onFrame)
   }
 
@@ -331,27 +331,12 @@ export class ScreencastRecorder extends PassThrough {
     return this.aborting
   }
 
-  override _destroy(
-    error: Error | null,
-    callback: (error?: Error | null) => void,
-  ): void {
-    this.stopCapturing()
-    // Normal stream auto-destruction can precede FFmpeg's close event. An
-    // explicit destroy during stop is different: it must still cancel stop.
-    if (!this.readableEnded || !this.writableFinished) {
-      void this.abort()
-    }
-    void this.detachSession()
-    callback(error)
-  }
-
   private async abortRecording(): Promise<void> {
     this.stopCapturing()
     this.cancelled.resolve()
     this.resolveFirstFrame?.()
     this.releasePending()
-    this.ffmpeg.stdout?.unpipe(this)
-    this.destroy()
+    void this.detachSession()
     await this.encoder.abort()
   }
 
@@ -374,6 +359,7 @@ export class ScreencastRecorder extends PassThrough {
     this.stopCapturing()
     this.releasePending()
     void this.session.send('Page.stopScreencast').catch(() => undefined)
+    void this.detachSession()
   }
 
   private get encoderExited(): boolean {
@@ -840,9 +826,6 @@ export const recordScreencast = async (
     timer = undefined
     await Promise.race([recorder.waitForFirstFrame(clock), interrupted])
     checkStartup()
-    if (recorder.destroyed) {
-      throw new Error('Recorder closed during screencast startup')
-    }
     encoder.markStarted()
     return recorder
   } catch (error) {
@@ -863,7 +846,10 @@ export const recordScreencast = async (
 }
 
 export const createFfmpegArguments = (
-  options: Pick<ScreencastRecorderOptions, 'format' | 'quality'> &
+  options: Pick<
+    ScreencastRecorderOptions,
+    'format' | 'outputPath' | 'quality'
+  > &
     Partial<Pick<ScreencastRecorderOptions, 'scale'>>,
   dimensions: Pick<PixelDimensions, 'width' | 'height'>,
   crop: Readonly<CaptureCrop> | undefined,
@@ -912,15 +898,28 @@ export const createFfmpegArguments = (
           '-f',
           'mp4',
         ]
-      : ['-f', 'webm'],
+      : [
+          '-f',
+          'webm',
+          // FFmpeg writes the duration and seek index when it finishes a file
+          // it can seek in. Short clusters, flushed as written, keep what an
+          // encoder killed mid-recording leaves behind decodable to within
+          // about a second of what it had encoded.
+          '-cluster_time_limit',
+          '1000',
+          '-flush_packets',
+          '1',
+        ],
     ['-vf', filters.join()],
-    ['-y', 'pipe:1'],
+    // Replaces the empty file that reserved the path.
+    ['-y', options.outputPath],
   ].flat()
 }
 
+// FFmpeg writes the segment file itself, so its standard output is unused.
 const spawnFfmpeg = (command: string, args: string[]): ChildProcess => {
   return spawn(command, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', 'ignore', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,
   })

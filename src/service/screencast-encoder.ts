@@ -147,7 +147,6 @@ export class ScreencastEncoder {
         this.child.on('error', ignoreStreamError)
         this.child.once('close', removeLateErrorGuard)
       }
-      this.child.stdout?.destroy()
       this.child.stderr?.destroy()
       this.child.unref?.()
     }

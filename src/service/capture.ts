@@ -43,6 +43,8 @@ export interface StartScreencastOptions {
   ffmpegPath: string
   format: OutputFormat
   onViewportRestoreError?: (error: unknown) => void
+  /** The reserved segment file the encoder writes. */
+  outputPath: string
 }
 
 export const startScreencast = async (
@@ -84,7 +86,10 @@ export const startScreencast = async (
 }
 
 export const createScreencastOptions = (
-  options: Pick<StartScreencastOptions, 'capture' | 'ffmpegPath' | 'format'>,
+  options: Pick<
+    StartScreencastOptions,
+    'capture' | 'ffmpegPath' | 'format' | 'outputPath'
+  >,
 ): ScreencastRecorderOptions => {
   const { capture } = options
   return {
@@ -94,6 +99,7 @@ export const createScreencastOptions = (
     scale: capture.scale,
     speed: capture.speed,
     ffmpegPath: options.ffmpegPath,
+    outputPath: options.outputPath,
     ...(capture.maxWidth === undefined ? {} : { maxWidth: capture.maxWidth }),
     ...(capture.maxHeight === undefined
       ? {}

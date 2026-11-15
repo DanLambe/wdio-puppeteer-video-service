@@ -235,7 +235,10 @@ at stop. From `1.0.0-rc.6`, an unchanged page is not re-encoded at all: each
 distinct frame reaches the encoder once and the video holds it, which removed
 stop timeouts from a two-CPU, four-worker reproduction that still hit them in
 `1.0.0-rc.5`. If a stop still times out, the recorder terminates its owned encoder
-tree, closes the file, and preserves partial bytes as an unclean segment. An
+tree and preserves the bytes it had written as an unclean segment. From
+`2.0.0-rc.1` FFmpeg writes the recording file itself, so the service no longer
+waits for a separate file stream after a stop, and the `Timed out waiting for
+recording stream to finish` warning is gone. An
 encoder that exits before the recording stops, whether with an error, a signal
 or exit code 0, is reported with its exit code or signal, and its file is
 likewise kept as an unclean segment rather than processed as a complete

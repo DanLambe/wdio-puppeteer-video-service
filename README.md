@@ -399,7 +399,9 @@ After:
 Videos are written beneath `outputDir`. Test-oriented naming uses
 `test_title_<session>_<hash>_partN.<webm|mp4>`. Session-only styles append
 `_runN` when needed to prevent overwrites. Successful merging removes the
-`_partN` suffix; failed merges preserve their source segments.
+`_partN` suffix; failed merges preserve their source segments. FFmpeg writes
+each recording file itself, so a WebM recording carries its duration and a seek
+index: players and the HTML report show its length and seek anywhere in it.
 
 The service applies the configured basename limit and a Windows path-aware
 budget. Keep `outputDir` reasonably short on Windows.
@@ -558,8 +560,9 @@ byte-identical HTML for reproducible artifacts.
 
 If FFmpeg is missing or not executable, the service warns once and disables
 recording for that worker. Failed or timed-out merge/transcode operations retain
-source media and remove partial output. Expected teardown stream failures such
-as `EPIPE` are contained without repeated log spam.
+source media and remove partial output. If the capture encoder cannot open or
+write its recording file, its exit code and FFmpeg's own message are reported
+as the reason the recording is incomplete.
 
 Direct MP4 compatibility is probed once per worker in `mp4Mode: 'auto'`. An
 incompatible build falls back to WebM capture plus H.264 transcode.
