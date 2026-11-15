@@ -369,7 +369,12 @@ export class RecordingController implements ContextFollowerTarget {
         await this.stopRecording({ keepArtifacts })
       },
       processArtifacts: async () => {
-        // Every segment is stopped and no merge has run yet.
+        // The outcome is known: a kept recording's segments are processed now,
+        // a discarded one's are deleted below without any.
+        if (keepArtifacts) {
+          await this.finalizeHeldSegments()
+        }
+        // Every segment is finalized and no merge has run yet.
         tabs = this.readRetainedSegmentTabs()
         this.log(
           'debug',
@@ -420,20 +425,41 @@ export class RecordingController implements ContextFollowerTarget {
     return retained
   }
 
+  /**
+   * Ends a recording whose outcome will never be known, as when the worker
+   * ends or the session reloads mid-recording: its media is kept.
+   */
+  async finalizeWithoutOutcome(): Promise<void> {
+    await this.stopRecording()
+    await this.finalizeHeldSegments()
+  }
+
+  /**
+   * Finalizes each held segment in part order. A segment stays held until its
+   * finalization returns, so one that throws is still among the recording's
+   * files, with every segment after it.
+   */
+  private async finalizeHeldSegments(): Promise<void> {
+    for (const held of this.captureSession.heldSegments) {
+      await this.media.finalizeSegment(held.segment)
+      this.captureSession.releaseHeldSegment(held)
+      this.log(
+        'debug',
+        `[WdioPuppeteerVideoService] Finalized segment ${held.part.toString()} (${held.segment.outputPath})`,
+      )
+    }
+  }
+
+  /**
+   * Stops the current capture. A stopped segment is held, unprocessed, until
+   * the recording's outcome is known; a discarded capture leaves none.
+   */
   async stopRecording(
     options: Readonly<{ keepArtifacts?: boolean }> = {},
   ): Promise<void> {
     let activeSegment: ActiveSegment | undefined
     let streamOk = false
     let incompleteReason: string | undefined
-    let recordingSlotReleased = false
-    const releaseRecordingSlot = async (): Promise<void> => {
-      if (recordingSlotReleased) {
-        return
-      }
-      recordingSlotReleased = true
-      await this.recordingSlotScheduler.release()
-    }
     const hadWorkAtInvocation = this.captureSession.hasCapture
 
     await this.lifecycle.stop({
@@ -464,16 +490,13 @@ export class RecordingController implements ContextFollowerTarget {
               `Recording stream did not finish cleanly for: ${activeSegment.recordingPath}${reason}`,
             )
           }
-          await releaseRecordingSlot()
-          await this.media.finalizeSegment(activeSegment, {
-            keepArtifacts: options.keepArtifacts ?? true,
-          })
+          const held = this.captureSession.holdSegment(activeSegment, streamOk)
           this.log(
             'debug',
-            `[WdioPuppeteerVideoService] Finalized segment ${this.captureSession.currentSegment} (${activeSegment.outputPath})`,
+            `[WdioPuppeteerVideoService] Stopped segment ${held.part.toString()} (${activeSegment.recordingPath}); it is processed once the recording's outcome is known.`,
           )
         } finally {
-          await releaseRecordingSlot()
+          await this.recordingSlotScheduler.release()
         }
       },
     })
@@ -485,6 +508,7 @@ export class RecordingController implements ContextFollowerTarget {
 
   async reset(): Promise<void> {
     await this.lifecycle.reset(async () => {
+      this.warnAboutUnprocessedSegments()
       this.captureFailure = undefined
       this.closingContextId = undefined
       this.failedStarts.clear()
@@ -492,6 +516,20 @@ export class RecordingController implements ContextFollowerTarget {
       await this.captureEngine.resetRecording()
       await this.recordingSlotScheduler.release()
     })
+  }
+
+  // A reset normally follows finalization. Segments still held were stopped by
+  // a recording whose finalization failed: their files stay, unprocessed.
+  private warnAboutUnprocessedSegments(): void {
+    const held = this.captureSession.heldSegments
+    if (held.length === 0) {
+      return
+    }
+    const files = held.map((segment) => segment.segment.recordingPath)
+    this.log(
+      'warn',
+      `[WdioPuppeteerVideoService] Keeping ${held.length.toString()} unprocessed recording segment(s): ${files.join(', ')}`,
+    )
   }
 
   async runSerialized(task: () => Promise<void>): Promise<void> {

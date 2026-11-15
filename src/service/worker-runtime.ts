@@ -217,7 +217,7 @@ export class WdioPuppeteerVideoWorkerRuntime
             ? { reason: this._recordingDisabledReason }
             : {}),
         }),
-        getRecordedPaths: () => this._captureSession.recordedPaths,
+        getRecordedPaths: () => this._captureSession.filePaths,
         isRecordingActive: () => this._captureSession.isRecordingActive,
         resetRecording: () => this._recordingController.reset(),
         runSerialized: (task) => this._recordingController.runSerialized(task),
@@ -486,7 +486,7 @@ export class WdioPuppeteerVideoWorkerRuntime
             ) {
               await this._recordingCoordinator.finalizeSpecRecording()
             } else {
-              await this._recordingController.stopRecording()
+              await this._recordingController.finalizeWithoutOutcome()
               await this._recordingController.reset()
             }
           }

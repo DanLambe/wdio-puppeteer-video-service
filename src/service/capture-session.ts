@@ -32,6 +32,18 @@ export interface SegmentTab {
   readonly reason: SegmentTabReason
 }
 
+/**
+ * A segment whose capture has stopped, held without post-processing until the
+ * recording's outcome is known.
+ */
+export interface HeldSegment {
+  /** Whether the encoder finished the file as a whole recording. */
+  readonly clean: boolean
+  readonly part: number
+  readonly segment: ActiveSegment
+  readonly tab?: SegmentTab
+}
+
 export interface AttachCaptureOptions {
   readonly recorder: ScreencastRecorder
   readonly segment: ActiveSegment
@@ -47,6 +59,7 @@ export class CaptureSession {
   private segmentNumber = 0
   private recordingSlug = ''
   private readonly retainedPaths = new Set<string>()
+  private readonly stoppedSegments: HeldSegment[] = []
   private activeWindowHandle: string | undefined
   private readonly tabOrdinals = new Map<string, number>()
   private readonly tabsBySegment = new Map<number, SegmentTab>()
@@ -78,6 +91,24 @@ export class CaptureSession {
 
   get recordedPaths(): readonly string[] {
     return Object.freeze([...this.retainedPaths])
+  }
+
+  /** Stopped segments not yet finalized or discarded, in part order. */
+  get heldSegments(): readonly HeldSegment[] {
+    return Object.freeze([...this.stoppedSegments])
+  }
+
+  /**
+   * Every file the recording has on disk: its recorded paths, and the files of
+   * the segments still held.
+   */
+  get filePaths(): readonly string[] {
+    return Object.freeze([
+      ...new Set([
+        ...this.retainedPaths,
+        ...this.stoppedSegments.map((held) => held.segment.recordingPath),
+      ]),
+    ])
   }
 
   get currentWindowHandle(): string | undefined {
@@ -133,6 +164,7 @@ export class CaptureSession {
     this.segmentNumber = 1
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.stoppedSegments.length = 0
     this.clearTabs()
   }
 
@@ -186,12 +218,43 @@ export class CaptureSession {
     this.retainedPaths.clear()
   }
 
+  /** Holds a segment stopped as the current part, with that part's tab. */
+  holdSegment(segment: ActiveSegment, clean: boolean): HeldSegment {
+    if (!this.recordingSlug) {
+      throw new Error('Cannot hold a segment without an active recording')
+    }
+    const tab = this.tabsBySegment.get(this.segmentNumber)
+    const held: HeldSegment = Object.freeze({
+      clean,
+      part: this.segmentNumber,
+      segment,
+      ...(tab ? { tab } : {}),
+    })
+    // Parts are numbered as they start and stop one at a time, so the order
+    // they stop in is part order.
+    this.stoppedSegments.push(held)
+    return held
+  }
+
+  /** Stops holding a segment once it has been finalized. */
+  releaseHeldSegment(held: HeldSegment): void {
+    const index = this.stoppedSegments.indexOf(held)
+    if (index >= 0) {
+      this.stoppedSegments.splice(index, 1)
+    }
+  }
+
+  clearHeldSegments(): void {
+    this.stoppedSegments.length = 0
+  }
+
   resetRecording(): DetachedCapture {
     const detached = this.detachCapture()
     this.segmentNumber = 0
     this.recordingSlug = ''
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.stoppedSegments.length = 0
     this.clearTabs()
     return detached
   }

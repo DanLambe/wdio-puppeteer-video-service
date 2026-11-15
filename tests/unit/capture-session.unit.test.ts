@@ -145,3 +145,52 @@ describe('capture session', () => {
     )
   })
 })
+
+describe('capture session held segments', () => {
+  it('holds stopped segments in part order until each is released', () => {
+    const session = new CaptureSession()
+    expect(() => session.holdSegment(createSegment(), true)).toThrow(
+      'without an active recording',
+    )
+    session.beginRecording('held')
+    const segment = createSegment('part1.webm')
+    session.attachCapture({
+      recorder: {} as ScreencastRecorder,
+      segment,
+      windowHandle: 'tab-a',
+    })
+    session.detachCapture()
+    const first = session.holdSegment(segment, true)
+    session.advanceSegment()
+    const second = session.holdSegment(createSegment('part2.webm'), false)
+    session.addRecordedPath('part1.webm')
+
+    expect(first).toEqual({
+      clean: true,
+      part: 1,
+      segment,
+      tab: { contextId: 'tab-a', ordinal: 1, reason: 'start' },
+    })
+    // A part that never attached a tab holds none.
+    expect(second).toEqual({
+      clean: false,
+      part: 2,
+      segment: createSegment('part2.webm'),
+    })
+    expect(session.heldSegments).toEqual([first, second])
+    expect(session.filePaths).toEqual(['part1.webm', 'part2.webm'])
+
+    session.releaseHeldSegment(first)
+    session.releaseHeldSegment(first)
+    expect(session.heldSegments).toEqual([second])
+
+    session.clearHeldSegments()
+    expect(session.heldSegments).toEqual([])
+    session.holdSegment(createSegment('part2.webm'), true)
+    session.beginRecording('next')
+    expect(session.heldSegments).toEqual([])
+    session.holdSegment(createSegment('part1.webm'), true)
+    session.resetRecording()
+    expect(session.filePaths).toEqual([])
+  })
+})

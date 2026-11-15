@@ -267,7 +267,7 @@ const createEntityCoordinator = (
       finalizeMedia: (passed, keep) =>
         harness.controller.finalizeMedia(passed, keep),
       getAvailability: () => ({ available: true }),
-      getRecordedPaths: () => harness.session.recordedPaths,
+      getRecordedPaths: () => harness.session.filePaths,
       isRecordingActive: () => harness.session.isRecordingActive,
       resetRecording: () => harness.controller.reset(),
       runSerialized: (task) => harness.controller.runSerialized(task),
@@ -596,7 +596,7 @@ describe('RecordingController', () => {
     })
   })
 
-  it('still transcodes a mid-test segment before retention is known', async () => {
+  it('transcodes a mid-test segment only once retention keeps it', async () => {
     await withTempDir(async (tempDir) => {
       const recordingPath = path.join(tempDir, 'retained.webm')
       const outputPath = path.join(tempDir, 'retained.mp4')
@@ -612,8 +612,14 @@ describe('RecordingController', () => {
 
       await harness.controller.stopRecording()
 
+      expect(harness.transcode).not.toHaveBeenCalled()
+      expect(harness.session.recordedPaths).toEqual([])
+      expect(harness.session.filePaths).toEqual([recordingPath])
+
+      await expect(
+        harness.controller.finalizeMedia(false, true),
+      ).resolves.toEqual({ deferred: false, paths: [outputPath] })
       expect(harness.transcode).toHaveBeenCalledOnce()
-      expect(harness.session.recordedPaths).toEqual([outputPath])
     })
   })
 
@@ -785,7 +791,7 @@ describe('RecordingController', () => {
     })
   })
 
-  it('releases the recording slot before finalizing a stopped segment', async () => {
+  it('releases the recording slot when a segment stops, before finalizing it', async () => {
     const harness = createHarness()
     const order: string[] = []
     const segment = createActiveSegment('capture.webm')
@@ -808,6 +814,13 @@ describe('RecordingController', () => {
     )
 
     await harness.controller.stopRecording()
+
+    expect(order).toEqual(['release'])
+    expect(harness.session.heldSegments.map((held) => held.segment)).toEqual([
+      segment,
+    ])
+
+    await harness.controller.finalizeMedia(false, true)
 
     expect(order).toEqual(['release', 'finalize'])
     expect(harness.releaseSlot).toHaveBeenCalledOnce()

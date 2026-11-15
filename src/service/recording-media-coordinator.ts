@@ -81,8 +81,9 @@ export class RecordingMediaCoordinator {
     this.tasks.push(task)
   }
 
+  /** Deletes every file of the recording, finalized or still held. */
   async deleteRecordedSegments(): Promise<void> {
-    const filesToDelete = [...this.captureSession.recordedPaths]
+    const filesToDelete = [...this.captureSession.filePaths]
     await Promise.all(
       filesToDelete.map((file) =>
         this.fileSystem.unlink(file).catch(() => {
@@ -92,6 +93,7 @@ export class RecordingMediaCoordinator {
     )
     this.dropTasksForPaths(filesToDelete)
     this.captureSession.clearRecordedPaths()
+    this.captureSession.clearHeldSegments()
   }
 
   queueDeferredMerge(): void {
