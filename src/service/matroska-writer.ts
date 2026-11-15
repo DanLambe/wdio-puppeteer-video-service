@@ -3,7 +3,7 @@
 // frame-rate grid. FFmpeg then decodes and encodes a frame only when the page
 // changed, instead of once per grid position of an unchanged page.
 
-export type MatroskaImageCodec = 'jpeg' | 'png'
+export type MatroskaImageCodec = 'png'
 
 export interface MatroskaTrackOptions {
   readonly codec: MatroskaImageCodec
@@ -119,9 +119,6 @@ const pngCodecPrivate = (width: number, height: number): Buffer => {
 }
 
 const codecElements = (options: MatroskaTrackOptions): Buffer => {
-  if (options.codec === 'jpeg') {
-    return text(CODEC_ID, 'V_MJPEG')
-  }
   return Buffer.concat([
     text(CODEC_ID, 'V_MS/VFW/FOURCC'),
     element(CODEC_PRIVATE, pngCodecPrivate(options.width, options.height)),

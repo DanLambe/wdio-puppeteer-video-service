@@ -7,13 +7,10 @@ import {
 } from '../../src/service/matroska-writer.js'
 import { parseMatroskaStream } from '../utils/matroska-blocks.js'
 
-const write = (
-  frames: Array<[string, number]>,
-  codec: 'jpeg' | 'png' = 'png',
-): Buffer => {
+const write = (frames: Array<[string, number]>): Buffer => {
   const writer = new MatroskaBlockWriter()
   return Buffer.concat([
-    createMatroskaHeader({ codec, fps: 30, width: 1921, height: 1081 }),
+    createMatroskaHeader({ codec: 'png', fps: 30, width: 1921, height: 1081 }),
     ...frames.flatMap(([label, timestamp]) =>
       writer.frame(Buffer.from(label), timestamp),
     ),
@@ -51,12 +48,6 @@ describe('Matroska writer', () => {
     expect(header.readInt32LE(4)).toBe(1921)
     expect(header.readInt32LE(8)).toBe(1081)
     expect(header.toString('ascii', 16, 20)).toBe('MPNG')
-  })
-
-  it('describes JPEG frames as Motion JPEG without codec data', () => {
-    const stream = parseMatroskaStream(write([], 'jpeg'))
-    expect(stream.track?.codecId).toBe('V_MJPEG')
-    expect(stream.track?.codecPrivate).toBeUndefined()
   })
 
   it('opens a new cluster before a block offset would overflow', () => {
