@@ -28,6 +28,8 @@ const FIRST_FRAME_TIMEOUT_MS = 1_000
 const TIMESTAMP_ARRIVAL_SLACK_SECONDS = 0.25
 // Owned-session operations only; viewport restoration must remain awaited.
 const CDP_STARTUP_TIMEOUT_MS = 10_000
+// How long the encoder may take to spawn, or the spool file to open.
+const SINK_READY_TIMEOUT_MS = 10_000
 // Chrome sends no frames while a page is static, so the last frame's duration is
 // only known when another frame arrives or the recording stops. Mark it on this
 // cadence so a recording cut short by a crashed worker still covers the quiet
@@ -745,6 +747,12 @@ const detachQuietly = (session: CDPSession): void => {
   void session.detach().catch(() => undefined)
 }
 
+const describeSinkTimeout = (kind: ScreencastSink['kind']): string => {
+  const waited =
+    kind === 'spool' ? 'opening the frame spool' : 'starting the encoder'
+  return `Screencast startup timed out after ${SINK_READY_TIMEOUT_MS}ms ${waited}`
+}
+
 export const recordScreencast = async (
   page: Page,
   options: ScreencastRecorderOptions,
@@ -790,9 +798,16 @@ export const recordScreencast = async (
   void interrupted.catch(() => undefined)
   page.once?.('close', onPageClosed)
   try {
-    // The encoder has spawned, or the spool file is open.
+    // The encoder has spawned, or the spool file is open. Bound that wait:
+    // a stalled file open would otherwise attach to the page long after the
+    // test that asked for the recording.
+    timer = clock.setTimeout(() => {
+      cancel(new Error(describeSinkTimeout(sink.kind)))
+    }, SINK_READY_TIMEOUT_MS)
+    timer.unref?.()
     await Promise.race([sink.ready, interrupted])
     checkStartup()
+    clock.clearTimeout(timer)
     timer = clock.setTimeout(() => {
       cancel(
         new Error(
