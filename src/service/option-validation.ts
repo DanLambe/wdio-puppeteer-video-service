@@ -151,6 +151,7 @@ const validateCapture = (value: unknown): void => {
     'crop',
     'framePriming',
     'connectionTimeoutMs',
+    'encoding',
   ])
   validateCaptureViewport(capture.viewport)
   assertOptionalInteger(capture.fps, 'capture.fps', 1)
@@ -169,6 +170,11 @@ const validateCapture = (value: unknown): void => {
     'capture.connectionTimeoutMs',
     1,
   )
+  assertOptionalEnum(capture.encoding, 'capture.encoding', [
+    'live',
+    'auto',
+    'deferred',
+  ])
 }
 
 // A crop rectangle is expressed in viewport coordinates, but Chrome recomputes

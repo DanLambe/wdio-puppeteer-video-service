@@ -1,4 +1,4 @@
-import type { LogLevel, OutputFormat } from '../types.js'
+import type { CaptureEncoding, LogLevel, OutputFormat } from '../types.js'
 
 export interface ResolvedTranscodeOptions {
   readonly deleteOriginal: boolean
@@ -90,6 +90,8 @@ export const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 export const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
 export const DEFAULT_RECORDING_START_TIMEOUT_MS = 2_500
 export const DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS = 10_000
+// The one place `capture.encoding` defaults.
+export const DEFAULT_CAPTURE_ENCODING: CaptureEncoding = 'live'
 export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
 export const DEFAULT_OUTPUT_DIR = 'videos'
