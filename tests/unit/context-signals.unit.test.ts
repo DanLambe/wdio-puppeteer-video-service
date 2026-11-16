@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyCommand,
+  introductionLevel,
   readIntroducedContexts,
 } from '../../src/service/context-signals.js'
 
@@ -12,9 +13,16 @@ describe('WebDriver BiDi context signals', () => {
     expect(
       classifyCommand('inputPerformActions', [{ context: 'tab-b' }]),
     ).toEqual({ kind: 'drive', contextId: 'tab-b' })
+  })
+
+  it('reads the context a script runs in as a script signal', () => {
+    // WDIO sends scripts for its own setup, so they get a stricter rule.
     expect(
       classifyCommand('scriptCallFunction', [{ target: { context: 'frame' } }]),
-    ).toEqual({ kind: 'drive', contextId: 'frame' })
+    ).toEqual({ kind: 'script', contextId: 'frame' })
+    expect(
+      classifyCommand('scriptEvaluate', [{ target: { context: 'tab-b' } }]),
+    ).toEqual({ kind: 'script', contextId: 'tab-b' })
   })
 
   it('reads the navigable embedded in a shared element reference', () => {
@@ -87,5 +95,19 @@ describe('WebDriver BiDi context signals', () => {
     expect(readIntroducedContexts('getTitle', 'Title')).toEqual([])
     expect(readIntroducedContexts('getWindowHandle', undefined)).toEqual([])
     expect(readIntroducedContexts('execute', undefined)).toEqual([])
+  })
+
+  it('treats a plural handle list as enumeration and every other result as addressable', () => {
+    expect(introductionLevel('getWindowHandles')).toBe('enumerated')
+    for (const name of [
+      'url',
+      'newWindow',
+      'frame',
+      'browsingContexts',
+      'browsingContextCreate',
+      'getWindowHandle',
+    ]) {
+      expect(introductionLevel(name), name).toBe('addressable')
+    }
   })
 })

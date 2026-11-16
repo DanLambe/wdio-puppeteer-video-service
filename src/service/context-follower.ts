@@ -1,4 +1,10 @@
-import { classifyCommand, readIntroducedContexts } from './context-signals.js'
+import {
+  type ContextLevel,
+  type ContextSignal,
+  classifyCommand,
+  introductionLevel,
+  readIntroducedContexts,
+} from './context-signals.js'
 import { runInternal } from './internal-operation.js'
 import type { ServiceLogger } from './logging.js'
 import { describeError } from './normalization.js'
@@ -21,8 +27,10 @@ export interface ContextFollowerTarget {
 /** A switch the browser has not accepted yet. */
 interface PendingSwitch {
   readonly contextId: string
-  readonly wasIntroduced: boolean
+  readonly previousLevel: ContextLevel | undefined
 }
+
+type DriveSignal = Extract<ContextSignal, { kind: 'drive' | 'script' }>
 
 interface ContextTreeNode {
   readonly context: string
@@ -48,16 +56,24 @@ export interface ContextFollowerOptions {
  * before the command runs, so the action itself is filmed. Frames count as the
  * tab that contains them.
  *
- * Only contexts the test can address are followed: those a command result has
+ * Only contexts the test knows are followed: those a command result has
  * handed to it, those it names in `switchToWindow`, and WDIO's current window,
  * which browser-level commands use implicitly. WDIO and other services also
  * run commands in the background, for example to install WDIO's scripts in an
- * iframe a page has just created; those must not move the recording.
+ * iframe or window a page has just opened; those must not move the recording.
+ *
+ * Scripts need more than a window handle: `getWindowHandles()` lists a window
+ * WDIO is still setting up, so a script there follows only a context the test
+ * holds or has switched to (`addressable`), WDIO's current window, or the
+ * recorded tab. Other commands on a listed window are the test's own, and
+ * make its tab addressable once followed.
  */
 export class ContextFollower {
   private currentWindow: string | undefined
+  private decisions = 0
   private readonly getBrowser: () => ContextFollowerBrowser | undefined
-  private readonly introduced = new Set<string>()
+  /** How the test came to know each context; only ever raised. */
+  private readonly levels = new Map<string, ContextLevel>()
   private readonly log: ServiceLogger
   private pendingSwitch: PendingSwitch | undefined
   private readonly target: ContextFollowerTarget
@@ -72,7 +88,7 @@ export class ContextFollower {
   reset(): void {
     this.currentWindow = undefined
     this.pendingSwitch = undefined
-    this.introduced.clear()
+    this.levels.clear()
     this.topLevelByContext.clear()
   }
 
@@ -84,48 +100,19 @@ export class ContextFollower {
     if (!signal) {
       return
     }
-    if (signal.kind === 'current') {
-      const current = await this.readCurrentWindow()
-      if (current) {
-        await this.follow(current, 'command')
-      }
-      return
-    }
-    if (signal.kind === 'switch') {
-      // The browser rejects a window it does not know, and the recording stays
-      // where it is. A known window is followed before the switch, so capture
-      // is ready for the next action; a rejection is undone afterwards.
-      if (!(await this.isOpenWindow(signal.contextId))) {
+    switch (signal.kind) {
+      case 'current':
+        await this.followCurrentWindow()
         return
-      }
-      this.pendingSwitch = {
-        contextId: signal.contextId,
-        wasIntroduced: this.introduced.has(signal.contextId),
-      }
-      this.introduced.add(signal.contextId)
-      this.currentWindow = signal.contextId
-      await this.follow(signal.contextId, 'switch-to-window')
-      return
+      case 'switch':
+        await this.beforeSwitch(commandName, signal.contextId)
+        return
+      case 'close':
+        await this.beforeClose(signal.contextId)
+        return
+      default:
+        await this.beforeDrive(commandName, signal)
     }
-    if (!this.isAddressable(signal.contextId)) {
-      return
-    }
-    const topLevel = await this.resolveTopLevel(signal.contextId)
-    if (!topLevel) {
-      return
-    }
-    if (signal.kind === 'close') {
-      // Only a top-level context can be closed; the browser rejects a frame,
-      // which leaves its tab and the recording untouched.
-      if (
-        topLevel === signal.contextId &&
-        topLevel === this.target.recordedContextId
-      ) {
-        await this.target.stopClosingContext(topLevel)
-      }
-      return
-    }
-    await this.follow(topLevel, 'command')
   }
 
   async afterCommand(
@@ -135,9 +122,7 @@ export class ContextFollower {
     error: unknown,
   ): Promise<void> {
     if (error === undefined) {
-      for (const contextId of readIntroducedContexts(commandName, result)) {
-        this.introduced.add(contextId)
-      }
+      this.learnContexts(commandName, result)
     }
     if (commandName === 'switchToWindow') {
       await this.afterSwitch(error)
@@ -146,6 +131,92 @@ export class ContextFollower {
     } else if (commandName === 'closeWindow') {
       await this.afterCloseWindow(error)
     }
+  }
+
+  private learnContexts(commandName: string, result: unknown): void {
+    const level = introductionLevel(commandName)
+    for (const contextId of readIntroducedContexts(commandName, result)) {
+      this.raiseLevel(contextId, level)
+      if (commandName === 'getWindowHandle') {
+        // The singular handle is WDIO's current window.
+        this.currentWindow = contextId
+      }
+    }
+  }
+
+  private raiseLevel(contextId: string, level: ContextLevel): void {
+    if (level === 'addressable' || !this.levels.has(contextId)) {
+      this.levels.set(contextId, level)
+    }
+  }
+
+  private async followCurrentWindow(): Promise<void> {
+    const current = await this.readCurrentWindow()
+    if (current) {
+      await this.follow(current, 'command')
+    }
+  }
+
+  private async beforeSwitch(
+    commandName: string,
+    contextId: string,
+  ): Promise<void> {
+    // The browser rejects a window it does not know, and the recording stays
+    // where it is. A known window is followed before the switch, so capture
+    // is ready for the next action; a rejection is undone afterwards.
+    if (!(await this.isOpenWindow(contextId))) {
+      this.traceDecision(commandName, contextId, 'ignored: not an open window')
+      return
+    }
+    this.traceDecision(commandName, contextId, 'follow (switch-to-window)')
+    this.pendingSwitch = {
+      contextId,
+      previousLevel: this.levels.get(contextId),
+    }
+    this.levels.set(contextId, 'addressable')
+    this.currentWindow = contextId
+    await this.follow(contextId, 'switch-to-window')
+  }
+
+  private async beforeClose(contextId: string): Promise<void> {
+    if (!this.isKnown(contextId)) {
+      return
+    }
+    const topLevel = await this.resolveTopLevel(contextId)
+    // Only a top-level context can be closed; the browser rejects a frame,
+    // which leaves its tab and the recording untouched.
+    if (topLevel === contextId && topLevel === this.target.recordedContextId) {
+      await this.target.stopClosingContext(topLevel)
+    }
+  }
+
+  private async beforeDrive(
+    commandName: string,
+    signal: DriveSignal,
+  ): Promise<void> {
+    const { contextId } = signal
+    const isScript = signal.kind === 'script'
+    const eligible = isScript
+      ? await this.isScriptTarget(contextId)
+      : this.isKnown(contextId)
+    if (!eligible) {
+      const why = isScript
+        ? 'ignored: script on a context the test has not addressed'
+        : 'ignored: unknown context'
+      this.traceDecision(commandName, contextId, why)
+      return
+    }
+    const topLevel = await this.resolveTopLevel(contextId)
+    if (!topLevel) {
+      this.traceDecision(commandName, contextId, 'ignored: not in the tree')
+      return
+    }
+    this.traceDecision(commandName, contextId, `follow ${topLevel} (command)`)
+    if (!isScript) {
+      // The test drove the tab itself, so its later scripts there are too.
+      this.levels.set(topLevel, 'addressable')
+    }
+    await this.follow(topLevel, 'command')
   }
 
   private async afterSwitch(error: unknown): Promise<void> {
@@ -182,16 +253,24 @@ export class ContextFollower {
 
   /**
    * The browser kept its current window, typically because the requested one
-   * had closed. Recording returns to WDIO's current window.
+   * had closed. The window is known as it was before the switch, and
+   * recording returns to WDIO's current window.
    */
   private async recoverFailedSwitch(pending: PendingSwitch): Promise<void> {
     this.topLevelByContext.delete(pending.contextId)
-    if (!pending.wasIntroduced) {
-      this.introduced.delete(pending.contextId)
+    if (pending.previousLevel) {
+      this.levels.set(pending.contextId, pending.previousLevel)
+    } else {
+      this.levels.delete(pending.contextId)
     }
     if (this.currentWindow === pending.contextId) {
       this.currentWindow = undefined
     }
+    this.traceDecision(
+      'switchToWindow',
+      pending.contextId,
+      'rejected: level restored',
+    )
     const current = await this.readCurrentWindow()
     if (current && current !== pending.contextId) {
       await this.follow(current, 'switch-failed')
@@ -210,11 +289,47 @@ export class ContextFollower {
     await this.target.followContext(contextId, reason)
   }
 
-  private isAddressable(contextId: string): boolean {
+  /** Whether a non-script command on the context is the test's own. */
+  private isKnown(contextId: string): boolean {
     return (
-      this.introduced.has(contextId) ||
+      this.levels.has(contextId) ||
       contextId === this.currentWindow ||
       contextId === this.target.recordedContextId
+    )
+  }
+
+  /**
+   * Whether a script in the context is the test's own. Root `execute()` runs
+   * in WDIO's current window, which may only have been listed so far, so an
+   * empty current-window cache is filled before deciding.
+   */
+  private async isScriptTarget(contextId: string): Promise<boolean> {
+    if (
+      this.levels.get(contextId) === 'addressable' ||
+      contextId === this.currentWindow ||
+      contextId === this.target.recordedContextId
+    ) {
+      return true
+    }
+    if (this.currentWindow !== undefined) {
+      return false
+    }
+    return contextId === (await this.readCurrentWindow())
+  }
+
+  /** One line per decision, for diagnosing which command moved recording. */
+  private traceDecision(
+    commandName: string,
+    contextId: string,
+    decision: string,
+  ): void {
+    this.decisions += 1
+    const level = this.levels.get(contextId) ?? 'unknown'
+    const recorded = this.target.recordedContextId ?? 'none'
+    const current = this.currentWindow ?? 'unknown'
+    this.log(
+      'trace',
+      `[WdioPuppeteerVideoService] Tab decision #${this.decisions}: ${commandName} on ${contextId} (${level}), recorded ${recorded}, current ${current}: ${decision}.`,
     )
   }
 
@@ -228,7 +343,7 @@ export class ContextFollower {
     }
     try {
       this.currentWindow = await runInternal(() => browser.getWindowHandle())
-      this.introduced.add(this.currentWindow)
+      this.levels.set(this.currentWindow, 'addressable')
     } catch (error) {
       this.log(
         'debug',

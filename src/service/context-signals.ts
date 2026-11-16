@@ -11,6 +11,8 @@
  */
 export type ContextSignal =
   | Readonly<{ kind: 'drive'; contextId: string }>
+  /** A script run in a context, which WDIO also sends for its own setup. */
+  | Readonly<{ kind: 'script'; contextId: string }>
   | Readonly<{ kind: 'switch'; contextId: string }>
   | Readonly<{ kind: 'close'; contextId: string }>
   /** A Classic command on WDIO's current window, which it does not name. */
@@ -68,7 +70,7 @@ const readRecord = (value: unknown): Readonly<Record<string, unknown>> => {
 }
 
 const signalFor = (
-  kind: 'close' | 'drive' | 'switch',
+  kind: 'close' | 'drive' | 'script' | 'switch',
   contextId: string | undefined,
 ): ContextSignal | undefined => {
   return contextId ? { kind, contextId } : undefined
@@ -81,9 +83,6 @@ const readDrivenContext = (
 ): string | undefined => {
   if (CONTEXT_PARAMETER_COMMANDS.has(commandName)) {
     return readString(readRecord(args[0]).context)
-  }
-  if (SCRIPT_TARGET_COMMANDS.has(commandName)) {
-    return readString(readRecord(readRecord(args[0]).target).context)
   }
   if (
     ELEMENT_COMMAND.test(commandName) &&
@@ -107,6 +106,12 @@ export const classifyCommand = (
   if (CURRENT_WINDOW_COMMANDS.has(commandName)) {
     return { kind: 'current' }
   }
+  if (SCRIPT_TARGET_COMMANDS.has(commandName)) {
+    return signalFor(
+      'script',
+      readString(readRecord(readRecord(args[0]).target).context),
+    )
+  }
   return signalFor('drive', readDrivenContext(commandName, args))
 }
 
@@ -116,12 +121,26 @@ const readContextId = (value: unknown): string | undefined => {
 }
 
 /**
+ * How the test came to know a browsing context. A plural `getWindowHandles()`
+ * lists every window, including one a page has just opened and WDIO is still
+ * setting up, so it only makes a window `enumerated`. A context the test holds
+ * or deliberately names is `addressable`.
+ */
+export type ContextLevel = 'enumerated' | 'addressable'
+
+/** The level at which a command's result introduces its contexts. */
+export const introductionLevel = (commandName: string): ContextLevel => {
+  return commandName === 'getWindowHandles' ? 'enumerated' : 'addressable'
+}
+
+/**
  * Browsing contexts a command's result hands to the test: a context from
  * `url()`, `newWindow()`, `frame()` or `browsingContexts()`, a protocol
  * `browsingContextCreate` result, or window handles. A test can drive only a
  * context it has been given, so WDIO's own setup of contexts the test has not
  * seen, such as the scripts it installs in a page's new iframe, is not mistaken
- * for the test driving them.
+ * for the test driving them. `introductionLevel` says how far the result
+ * vouches for them.
  */
 export const readIntroducedContexts = (
   commandName: string,
