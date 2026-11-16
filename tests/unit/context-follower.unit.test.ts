@@ -340,6 +340,17 @@ describe('ContextFollower', () => {
     expect(target.stopClosingContext).not.toHaveBeenCalled()
   })
 
+  it('ignores a close of a context the test does not know', async () => {
+    const target = createTarget()
+    const browser = createBrowser()
+    const { follower } = createFollower(target, browser)
+
+    await follower.beforeCommand('browsingContextClose', [{ context: 'tab-q' }])
+
+    expect(target.stopClosingContext).not.toHaveBeenCalled()
+    expect(browser.browsingContextGetTree).not.toHaveBeenCalled()
+  })
+
   it('ignores results of failed commands and contexts it cannot place', async () => {
     const target = createTarget()
     const browser = createBrowser()
