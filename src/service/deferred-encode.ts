@@ -15,7 +15,11 @@ import { removeFileWithRetry } from './file-removal.js'
 import type { ScreencastSpool } from './frame-sink.js'
 import type { ServiceLogger } from './logging.js'
 import { describeError } from './normalization.js'
-import { encodeSpool, type SpoolEncodeRunner } from './spool-encode.js'
+import {
+  encodeSpool,
+  type SpoolEncodeResult,
+  type SpoolEncodeRunner,
+} from './spool-encode.js'
 
 /** The limits of a recording's end-of-recording encode step. */
 export interface DeferredEncodeLimits {
@@ -116,6 +120,11 @@ type Attempt =
       readonly outputPath: string | undefined
       readonly retryable: boolean
     }
+
+// What one encode did while it held its slot.
+type SlotWork =
+  | { readonly reserveError: unknown }
+  | { readonly outputPath: string; readonly result: SpoolEncodeResult }
 
 const SPOOL_ENCODE_OPERATION = 'spool encode'
 const FRAMES_EXTENSION = '.frames.mkv'
@@ -235,21 +244,6 @@ export class DeferredEncoder {
     reservedPath: string | undefined,
   ): Promise<Attempt> {
     let outputPath = reservedPath
-    if (outputPath === undefined) {
-      try {
-        // Reserved now, not at capture start, so a discarded recording never
-        // leaves a placeholder behind.
-        outputPath = await this.reserveOutput(held.segment.recordingPath)
-      } catch (error) {
-        return {
-          failure: `its output could not be reserved: ${describeError(error)}`,
-          ok: false,
-          outputBytes: 0,
-          outputPath: undefined,
-          retryable: true,
-        }
-      }
-    }
     let run: FfmpegRunResult | undefined
     const runner: SpoolEncodeRunner = async (process) => {
       await this.ffmpeg.run(process.args, process.operation, {
@@ -267,37 +261,62 @@ export class DeferredEncoder {
       }
       throw new Error(this.describeUnfinishedRun(run, step))
     }
-    const target = outputPath
     const encoded = await this.ffmpeg.withPostProcessSlot(
       SPOOL_ENCODE_OPERATION,
-      async () =>
-        encodeSpool(
-          {
-            ffmpegPath: this.ffmpeg.resolvePath(),
-            outputPath: target,
-            spool: held.spool,
-          },
-          runner,
-        ),
+      async (): Promise<SlotWork> => {
+        if (outputPath === undefined) {
+          try {
+            // Reserved once the encode may run, not at capture start, so a
+            // discarded recording, or one still waiting for a slot, leaves no
+            // placeholder behind.
+            outputPath = await this.reserveOutput(held.segment.recordingPath)
+          } catch (error) {
+            return { reserveError: error }
+          }
+        }
+        return {
+          outputPath,
+          result: await encodeSpool(
+            {
+              ffmpegPath: this.ffmpeg.resolvePath(),
+              outputPath,
+              spool: held.spool,
+            },
+            runner,
+          ),
+        }
+      },
       { signal: step.signal, waitMs: this.slotWaitMs(step) },
     )
-    const outputBytes = await this.sizeOf(target)
     if (encoded === undefined) {
+      const outputBytes =
+        outputPath === undefined ? 0 : await this.sizeOf(outputPath)
       return {
         failure:
           this.describeStoppedStep(step) ??
           'no post-processing capacity was available in time',
         ok: false,
         outputBytes,
-        outputPath: target,
+        outputPath,
         retryable: false,
       }
     }
-    if (encoded.ok && outputBytes > 0 && held.clean) {
+    if ('reserveError' in encoded) {
+      return {
+        failure: `its output could not be reserved: ${describeError(encoded.reserveError)}`,
+        ok: false,
+        outputBytes: 0,
+        outputPath: undefined,
+        retryable: true,
+      }
+    }
+    const target = encoded.outputPath
+    const outputBytes = await this.sizeOf(target)
+    if (encoded.result.ok && outputBytes > 0 && held.clean) {
       return { ok: true, outputPath: target }
     }
     return {
-      failure: describeFailedEncode(encoded, outputBytes, held),
+      failure: describeFailedEncode(encoded.result, outputBytes, held),
       ok: false,
       outputBytes,
       outputPath: target,

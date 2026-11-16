@@ -302,6 +302,17 @@ describe('deferred encoder', () => {
     },
   )
 
+  it('reserves the output only once it holds a slot', async () => {
+    const reserveOutput = vi.fn(async (desiredPath: string) => desiredPath)
+    const refused = createEncoder(createFfmpeg([encodes], 'refuse').port, {
+      reserveOutput,
+    })
+
+    await refused.encoder.encodeAll([await spooled(1)], 2)
+
+    expect(reserveOutput).not.toHaveBeenCalled()
+  })
+
   it('bounds the slot wait by a fast-fail start timeout', async () => {
     const ffmpeg = createFfmpeg()
     const { encoder } = createEncoder(ffmpeg.port, {
