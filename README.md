@@ -169,6 +169,7 @@ Top-level options:
 - `scale` (default `1`) and `speed` (default `1`): positive finite multipliers applied by the recorder's FFmpeg filters. `scale` resizes precisely after capture using a Lanczos filter, so prefer `maxWidth`/`maxHeight` when the goal is cost rather than an exact size.
 - `crop`: optional `{ x, y, width, height }` rectangle. The rectangle must fit inside the viewport active when capture starts or the recording is rejected. Cropping happens before scaling, so an `800x400` crop at `scale: 0.5` produces approximately `400x200` media; final pixel rounding is controlled by FFmpeg. A crop cannot be combined with `maxWidth` or `maxHeight`: Chrome applies a bound against the viewport of each frame, so a crop rectangle fixed when capture starts would select the wrong region as soon as the viewport changes — including the restore that `capture.viewport` performs. The combination is rejected before capture starts, and the `ci` profile's default bound is not applied to a cropped recording. Use `scale` to resize a cropped recording.
 - `framePriming` (default `true`; `false` on the `ci` profile): primes early screencast frames with a viewport warmup: a bounded paint request (up to 500 ms) at a temporary size, then the original viewport is restored and a second bounded paint (up to 500 ms) confirms the restored surface. A low-quality, in-memory viewport snapshot requests each paint; it is discarded, not saved or used to encode the video. If the screencast has still delivered only its first frame, as can happen right after a tab switch, further warmups start for up to 1.5 seconds; if paint requests never complete, priming can take about 3.4 seconds in all. An in-flight viewport operation and restoration are awaited before returning. Priming remains best-effort if the page navigates or closes.
+- `encoding` (`'live' | 'auto' | 'deferred'`, default `'live'`): when a recording is encoded. `'live'` runs an encoder for the whole test, as before. `'deferred'` writes the screencast's frames to a file on disk while the test runs, with no FFmpeg process; when the test ends, a discarded recording's frames are deleted without encoding, and a kept recording's are encoded then, before any transcode or merge. `'auto'` encodes live a recording that is kept whatever the test's outcome (`retain: 'all'`, or a retry under `retain: 'retries'`) and defers the rest. See [Deferred Encoding](#deferred-encoding).
 - `connectionTimeoutMs` (default `10000`): bounds the WDIO `getPuppeteer()` CDP connection. Before the first test, the service connects when a Chromium worker session starts and finds its page, then allows up to 20 seconds for a disposable paint request to confirm that the browser is ready to render. This separate render budget does not include connection or page lookup. Warm-up is best-effort, runs even with `framePriming: false`, and also runs for workers whose tests are filtered out or record only retries. Paint requests use a dedicated CDP session that is detached on completion or timeout, without taking Puppeteer's shared screenshot lock. A connection that fails at warm-up is retried, and reported, at the first recording.
 
 `processing`:
@@ -261,6 +262,74 @@ Unknown integrations are rejected instead of being silently ignored.
   configuration boundary; no retry-state files are written to the artifact
   directory.
 - `scope: 'spec'` records one artifact per spec and uses the aggregate spec result.
+- With `capture.encoding: 'deferred'`, or `'auto'` for a recording that may be
+  discarded, a discarded recording's frames are deleted unencoded, and a kept
+  one is encoded when its test ends. `'auto'` decides when the recording
+  starts: `retain: 'all'` is live, `retain: 'failures'` is deferred, and
+  `retain: 'retries'` is live on a retry and deferred on a first attempt.
+- A recording whose outcome is never known, because the worker ends or the
+  session reloads mid-test, is kept, and a deferred one is encoded then.
+
+## Deferred Encoding
+
+`capture.encoding: 'deferred'` (or `'auto'`) trades the encoder that runs for
+the whole test for disk space and for work when a kept recording ends. While
+the test runs, the recorder writes the stream it would give FFmpeg to
+`<outputDir>/.wdio-video-spool/<runId>/<test>_part<N>.<id>.mkv`. Nothing else
+changes during the test: tab moves still start a new part, and part numbers,
+names, tabs and manifest entries are the same as a live recording's.
+
+**A kept deferred recording is encoded when its test ends.** Its frames are
+encoded with the arguments a live encoder would have used, in part order,
+before any transcode or merge, and each spool is deleted once its file is
+checked. `processing.timing: 'after-worker'` does not move this encode: it
+still runs when the test ends, and only the transcode and merge wait for the
+worker to finish. A discarded recording runs no FFmpeg process at all.
+
+Each encode takes a post-processing slot (`concurrency.maxPostProcessesPerProcess`
+and `maxPostProcessesGlobal`), so several workers failing at once encode no
+more at a time than those limits allow. The recording's slot is released
+before a processing slot is requested, so a limit of one cannot deadlock.
+
+**The deferred-encode budget.** All of a recording's spool encodes share one
+budget: twice the time the recording captured, at least 30 seconds and at most
+5 minutes. It covers waiting for slots, the encodes and any retry, and nothing
+after them; transcodes and merges follow under their usual rules and
+`processing.ffmpeg.timeoutMs`. Within it, one wait for a slot lasts at most 30
+seconds (or `concurrency.postProcessStartTimeoutMs` with
+`postProcessStartMode: 'fast-fail'`, when shorter), and one encode at most
+`processing.ffmpeg.timeoutMs` when that is set. The budget is not a bound on
+the whole end-of-test hook. The encode runs in the service's `afterTest` (or
+`afterScenario`) hook, so where a framework or wrapper bounds that hook with a
+timeout shorter than the budget, the hook can time out while the encode still
+finishes, or keeps its frames as below; the test's own result is unaffected.
+Allow that hook at least the budget if it must wait for long recordings.
+
+**When a recording cannot be encoded** (no slot in time, FFmpeg fails to start
+or exits with an error, a timeout, an output error, the budget running out, or
+shutdown), an encode that produced nothing is retried once unless it was a
+timeout or a cancellation. If it still fails, its frames are kept as
+`<outputDir>/<test>_part<N>.frames.mkv` (with `_run<N>` added rather than
+replacing an existing file), any output FFmpeg did write is kept as unclean
+media, and one warning names the file and the command that converts it:
+
+```bash
+ffmpeg -i "videos/<test>_part1.frames.mkv" -pix_fmt yuv420p "videos/<test>_part1.converted.webm"
+```
+
+The recording is then reported as incomplete (`capture-incomplete`), as other
+capture failures are; with `failurePolicy: 'error'` that is raised after
+cleanup, and the test's own failure is still what the framework reports. A
+frames file is not a video: it is not listed as a manifest segment, attached to
+Allure, or shown in the HTML report. A reset or teardown that finds frames not
+yet encoded keeps them the same way, with a warning, and never encodes them
+later. After a run in which every kept recording was encoded, no spool file
+remains (the empty per-run directory may).
+
+**Disk use.** A spool holds every frame the recording captured, including the
+periodic hold blocks that keep the newest image on disk, so it grows with the
+recording's length and how much the page changes. Each worker has at most its
+own recordings' spools on disk at a time.
 
 ## Tab Following
 
@@ -575,7 +644,8 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Set `capture.framePriming: false` or `recording.windowChanges: 'ignore'` to reduce capture churn when those tradeoffs are acceptable.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
-- Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks.
+- Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks. It does not move a deferred recording's encode, which runs when the test ends.
+- With `recording.retain: 'failures'`, try `capture.encoding: 'auto'`: a recording that is discarded then runs no encoder at all, and only kept recordings are encoded, at the end of their test. It needs disk space for the frames of each recording in progress, and adds an encode to each kept recording's `afterTest` hook ([Deferred Encoding](#deferred-encoding)).
 - Bound frame size with `capture.maxWidth` when the viewport is larger than the video needs to be. Encoding cost scales with pixels, so this is usually the largest single lever on a constrained runner.
 - The `parallel` profile defaults to 24 fps. The `ci` profile additionally bounds capture width at 1280 (except for cropped recordings), transcodes at CRF 28, disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
 

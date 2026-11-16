@@ -292,6 +292,38 @@ failure after cleanup.
   manifest records the failure without segments, so the cause stays visible even
   though no video is kept.
 
+## A deferred recording left a `.frames.mkv` file
+
+With `capture.encoding: 'deferred'` or `'auto'`, a kept recording's frames are
+encoded when its test ends. When that fails, its frames are kept as
+`<outputDir>/<test>_part<N>.frames.mkv` and one warning says why, for example:
+
+- `no post-processing capacity was available in time`: other workers held every
+  post-processing slot (`concurrency.maxPostProcessesPerProcess`,
+  `maxPostProcessesGlobal`) for longer than the wait allowed. Raise the limits,
+  run fewer workers, or use `postProcessStartMode: 'blocking'`.
+- `the deferred-encode budget of …s ran out`: the recording's encodes took
+  longer than twice its length (at least 30 seconds, at most 5 minutes),
+  slot waits included. The host is overloaded; run fewer workers or bound the
+  frame size with `capture.maxWidth`.
+- `the encode reached processing.ffmpeg.timeoutMs`: raise that timeout, or set
+  it to `0` to remove it.
+- `FFmpeg exited with code … while encoding the frame spool: …` or `FFmpeg
+  failed to start: …`: the end of FFmpeg's own message follows. Check free disk
+  space, `processing.ffmpeg.path` and `FFMPEG_PATH`.
+- `the encode was cancelled at shutdown`: the worker ended while encoding.
+
+The warning ends with a command that converts the file, which you can run as is:
+
+```bash
+ffmpeg -i "videos/<test>_part1.frames.mkv" -pix_fmt yuv420p "videos/<test>_part1.converted.webm"
+```
+
+The manifest entry is `failed` with reason `capture-incomplete`; any other
+parts of the recording are still listed and attached. If the warning says the
+frames `could not be moved … and stay at` a path under `.wdio-video-spool`,
+convert that file instead; it is not deleted for you.
+
 ## The static report shows ambiguous-test-outcome or unmatched-test-outcome
 
 The report joins reporter outcomes to manifest captures from the same spec file,

@@ -85,6 +85,24 @@ The manifest stays at version 1, and its new fields are optional:
 The 1.x validator accepts a 2.0 manifest. Code that reads the manifest needs no
 changes unless it wants the tab history.
 
+## `capture.encoding` can defer encoding until a recording is kept
+
+The new `capture.encoding` option defaults to `'live'`, which records as 1.x
+did. With `'deferred'`, or `'auto'` for a recording that may be discarded, the
+frames are written to `<outputDir>/.wdio-video-spool/` during the test and
+encoded only if the recording is kept, when its test ends. Files, names and
+manifest entries are the same. Two things are new:
+
+- A kept recording that cannot be encoded keeps its frames as
+  `<test>_part<N>.frames.mkv` in `outputDir`, logs a warning with an FFmpeg
+  command that converts it, and is reported as `capture-incomplete`. Tooling
+  that lists `outputDir` should not treat `*.frames.mkv` as a video; the
+  manifest never lists it.
+- `processing.timing: 'after-worker'` does not move the encode of a deferred
+  recording; only its transcode and merge wait for the worker to end.
+
+See [Deferred Encoding](README.md#deferred-encoding).
+
 # Migrating from 0.8 to 1.0
 
 Version 1.0 intentionally rejects deprecated flat keys. Configuration errors
