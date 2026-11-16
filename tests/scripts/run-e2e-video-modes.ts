@@ -6,6 +6,7 @@ import { isVideoManifest, type ManifestEntryV1 } from '../../src/manifest.js'
 import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
 import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import { captureEncodingSuffix } from '../utils/capture-encoding.js'
 import {
   decodeColorTimeline,
   type SolidColor,
@@ -271,7 +272,9 @@ const runWdio = async (
     ...(protocol === 'bidi' ? [] : [protocol]),
     ...(browserName === 'chrome' ? [] : [browserName]),
   ].join('-')
-  const resultsDir = path.resolve('tests/results', label)
+  // WDIO_CAPTURE_ENCODING, when set, reaches the configuration unchanged.
+  const encodedLabel = `${label}${captureEncodingSuffix()}`
+  const resultsDir = path.resolve('tests/results', encodedLabel)
   const mergeEnabled = mode === 'multipart' ? '0' : '1'
 
   console.log(`[e2e:modes] Starting ${label} run. Artifacts => ${resultsDir}`)

@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import { captureEncodingSuffix } from '../utils/capture-encoding.js'
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
 import {
@@ -30,6 +31,7 @@ type AdvancedMode =
   | 'retention'
   | 'global-concurrency'
   | 'ffmpeg-failure'
+  | 'failure-burst'
 
 // Each test moves tab twice: part 1 on the first tab, part 2 on the second,
 // part 3 back on the first.
@@ -89,6 +91,90 @@ const assertRetentionEntries = async (resultsDir: string): Promise<void> => {
   }
 }
 
+// Every failing worker's recording is kept whole: three WebM parts with their
+// tabs, recorded, and never left as frames.
+const assertFailureBurstEntries = async (resultsDir: string): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] failure-burst mode produced an invalid manifest',
+    )
+  }
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  if (entries.length !== 3) {
+    throw new Error(
+      `[e2e:advanced] failure-burst mode expected three entries, got ${entries.length.toString()}`,
+    )
+  }
+  for (const entry of entries) {
+    const parts = entry.capture.segments.map(
+      (segment) => /_part(\d+)\.webm$/u.exec(segment.path)?.[1],
+    )
+    if (
+      entry.capture.decision !== 'recorded' ||
+      entry.result !== 'failed' ||
+      parts.join() !== '1,2,3' ||
+      JSON.stringify(toTabSteps(readEntryTabs(entry))) !== RETAINED_TAB_STEPS ||
+      findTabProvenanceProblems(entry).length > 0
+    ) {
+      throw new Error(
+        `[e2e:advanced] failure-burst entry should keep three WebM parts with their tabs, got ${JSON.stringify(entry.capture)}`,
+      )
+    }
+  }
+  if (['auto', 'deferred'].includes(process.env.WDIO_CAPTURE_ENCODING ?? '')) {
+    await assertEncodesOneAtATime(
+      resultsDir,
+      entries.flatMap((entry) =>
+        entry.capture.segments.map(({ path }) => path),
+      ),
+    )
+  }
+}
+
+/**
+ * A spooled part's file is created when its encode reserves it and last
+ * written when FFmpeg finishes, so with one post-processing slot no two of
+ * those spans overlap, across workers. Skipped where the file system keeps no
+ * creation time.
+ */
+const assertEncodesOneAtATime = async (
+  resultsDir: string,
+  paths: readonly string[],
+): Promise<void> => {
+  const spans = (
+    await Promise.all(
+      paths.map(async (segmentPath) => {
+        const stats = await stat(path.join(resultsDir, segmentPath))
+        return {
+          end: stats.mtimeMs,
+          path: segmentPath,
+          start: stats.birthtimeMs,
+        }
+      }),
+    )
+  ).sort((left, right) => left.start - right.start)
+  if (spans.some((span) => span.start <= 0)) {
+    console.log(
+      '[e2e:advanced] failure-burst: no file creation times; encode order not checked.',
+    )
+    return
+  }
+  for (const [index, span] of spans.entries()) {
+    const previous = spans[index - 1]
+    if (previous && span.start < previous.end) {
+      throw new Error(
+        `[e2e:advanced] failure-burst encodes overlapped: ${span.path} was reserved before ${previous.path} was written`,
+      )
+    }
+  }
+  console.log(
+    `[e2e:advanced] failure-burst: ${spans.length.toString()} encodes ran one at a time.`,
+  )
+}
+
 const requestedMode = process.argv[2] || 'all'
 
 const resolveModeOrder = (mode: string): AdvancedMode[] => {
@@ -98,6 +184,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'global-concurrency',
       'ffmpeg-failure',
       'retention',
+      'failure-burst',
     ]
   }
   if (mode === 'all') {
@@ -117,6 +204,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'retention',
       'global-concurrency',
       'ffmpeg-failure',
+      'failure-burst',
     ]
   }
 
@@ -135,7 +223,8 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
     mode === 'exclude-tag' ||
     mode === 'retention' ||
     mode === 'global-concurrency' ||
-    mode === 'ffmpeg-failure'
+    mode === 'ffmpeg-failure' ||
+    mode === 'failure-burst'
   ) {
     return [mode]
   }
@@ -146,7 +235,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, or failure-burst. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
   )
   process.exit(1)
 }
@@ -157,7 +246,10 @@ const runMode = async (
 ): Promise<void> => {
   const nodeCommand = process.execPath
   const wdioCliPath = path.resolve('node_modules/@wdio/cli/bin/wdio.js')
-  const resultsDir = path.resolve('tests/results', `advanced-${mode}`)
+  const resultsDir = path.resolve(
+    'tests/results',
+    `advanced-${mode}${captureEncodingSuffix()}`,
+  )
   const isTagFilterMode = mode === 'include-tag' || mode === 'exclude-tag'
   const configPath = path.resolve(
     isTagFilterMode
@@ -181,20 +273,28 @@ const runMode = async (
     child,
     (code) => `[e2e:advanced] ${mode} run failed with code ${code}`,
     5 * 60_000,
-    mode === 'retention' ? [1] : [0],
+    mode === 'retention' || mode === 'failure-burst' ? [1] : [0],
   )
 
   if (mode === 'retention') {
     await assertRetentionEntries(resultsDir)
   }
-  if (mode === 'retry' || mode === 'deferred-merge' || mode === 'retention') {
+  if (mode === 'failure-burst') {
+    await assertFailureBurstEntries(resultsDir)
+  }
+  if (
+    mode === 'retry' ||
+    mode === 'deferred-merge' ||
+    mode === 'retention' ||
+    mode === 'failure-burst'
+  ) {
     await assertManifestMediaDimensions(
       resultsDir,
       environment.ffmpegDetection.resolvedPath,
     )
   }
 
-  if (mode === 'global-concurrency') {
+  if (mode === 'global-concurrency' || mode === 'failure-burst') {
     // Config onComplete runs before launcher services, so verify final cleanup here.
     const remainingRuns = await readdir(
       path.join(resultsDir, '.global-recording-locks'),

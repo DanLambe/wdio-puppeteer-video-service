@@ -1,6 +1,10 @@
 import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoReporter from '../src/reporter.js'
+import {
+  assertNoSpoolsLeft,
+  readCaptureEncoding,
+} from './utils/capture-encoding.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { videoServiceModulePath } from './utils/service-module.js'
 import { assertVideoArtifacts } from './utils/video-artifact-assertions.js'
@@ -10,6 +14,8 @@ const mergeSegmentsEnabled = ['1', 'true', 'yes'].includes(
 )
 // Merging keeps the original segments beside the merged file.
 const keepMergedSegments = process.env.WDIO_MERGE_KEEP_SEGMENTS === '1'
+// Unset, the service's default; set by the runner to cover each capture mode.
+const captureEncoding = readCaptureEncoding()
 const expectVideos = !['0', 'false', 'no'].includes(
   (process.env.WDIO_EXPECT_VIDEOS ?? '1').toLowerCase(),
 )
@@ -119,6 +125,7 @@ export const config: WebdriverIO.Config = {
         },
         capture: {
           viewport: { width: 1280, height: 720 },
+          ...(captureEncoding ? { encoding: captureEncoding } : {}),
         },
         processing: {
           format: 'mp4',
@@ -166,5 +173,6 @@ export const config: WebdriverIO.Config = {
       expectedCodec: 'h264',
       runLabel: runMode,
     })
+    await assertNoSpoolsLeft(resultsDir)
   },
 }
