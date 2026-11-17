@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import type { ProcessBoundary } from '../../src/service/boundaries.js'
-import type {
-  getFfmpegCandidates,
-  probeDirectMp4Support,
-  readFfmpegVersion,
-  resolveAvailableFfmpegPath,
+import {
+  type FfmpegVersionProbe,
+  type getFfmpegCandidates,
+  type probeDirectMp4Support,
+  type ResolvedFfmpeg,
+  resolveFfmpeg as resolveFirstFfmpeg,
 } from '../../src/service/ffmpeg.js'
 import {
   FfmpegProcessRegistry,
@@ -62,10 +63,10 @@ const createHarness = (
       _environmentPath: string | undefined,
     ) => ['/detected/ffmpeg'],
   )
-  const resolveAvailablePath = vi.fn<typeof resolveAvailableFfmpegPath>(
-    async () => '/detected/ffmpeg',
-  )
-  const readVersion = vi.fn<typeof readFfmpegVersion>(async () => '7.1')
+  const resolveFfmpeg = vi.fn<typeof resolveFirstFfmpeg>(async () => ({
+    path: '/detected/ffmpeg',
+    version: '7.1',
+  }))
   const probeDirectMp4 = vi.fn<typeof probeDirectMp4Support>(async () => true)
   const runFfmpeg = vi.fn<FfmpegRunner>(async () => true)
   const log = vi.fn<ServiceLogger>()
@@ -82,8 +83,7 @@ const createHarness = (
     probeDirectMp4,
     process: processBoundary,
     processRegistry,
-    readVersion,
-    resolveAvailablePath,
+    resolveFfmpeg,
     runFfmpeg,
   })
 
@@ -94,8 +94,7 @@ const createHarness = (
     onVersion,
     probeDirectMp4,
     processRegistry,
-    readVersion,
-    resolveAvailablePath,
+    resolveFfmpeg,
     runFfmpeg,
     runtime,
     scheduler,
@@ -150,7 +149,7 @@ describe('FfmpegRuntime', () => {
       expect(spawnProcess).toHaveBeenCalledTimes(4)
       expect(harness.scheduler.release).toHaveBeenCalledTimes(2)
       expect(harness.processRegistry.size).toBe(0)
-      expect(harness.resolveAvailablePath).toHaveBeenCalledOnce()
+      expect(harness.resolveFfmpeg).toHaveBeenCalledOnce()
       expect(harness.log).toHaveBeenCalledWith(
         'warn',
         expect.stringContaining('Failed to spawn ffmpeg for metadata probe'),
@@ -177,7 +176,7 @@ describe('FfmpegRuntime', () => {
 
   it('warns once per session when metadata is skipped for unavailable FFmpeg', async () => {
     const harness = createHarness()
-    harness.resolveAvailablePath.mockResolvedValue(undefined)
+    harness.resolveFfmpeg.mockResolvedValue(undefined)
     const metadataWarnings = () =>
       harness.log.mock.calls.filter(([, message]) =>
         message.includes('Skipping retained-video metadata'),
@@ -268,7 +267,7 @@ describe('FfmpegRuntime', () => {
 
   it('does not start a metadata probe without FFmpeg or post-processing capacity', async () => {
     const unavailable = createHarness()
-    unavailable.resolveAvailablePath.mockResolvedValue(undefined)
+    unavailable.resolveFfmpeg.mockResolvedValue(undefined)
     await expect(
       unavailable.runtime.readMediaDimensions('/video.webm'),
     ).resolves.toBeUndefined()
@@ -286,11 +285,13 @@ describe('FfmpegRuntime', () => {
 
   it('initializes lazily, deduplicates concurrent discovery, and reports the version', async () => {
     const harness = createHarness()
-    let finishDiscovery: ((path: string | undefined) => void) | undefined
-    harness.resolveAvailablePath.mockReturnValue(
-      new Promise<string | undefined>((resolve) => {
-        finishDiscovery = (path) => {
-          resolve(path)
+    let finishDiscovery:
+      | ((resolved: ResolvedFfmpeg | undefined) => void)
+      | undefined
+    harness.resolveFfmpeg.mockReturnValue(
+      new Promise<ResolvedFfmpeg | undefined>((resolve) => {
+        finishDiscovery = (resolved) => {
+          resolve(resolved)
         }
       }),
     )
@@ -299,11 +300,11 @@ describe('FfmpegRuntime', () => {
     const first = harness.runtime.ensureReady()
     const second = harness.runtime.ensureReady()
     expect(harness.getCandidates).toHaveBeenCalledOnce()
-    expect(harness.resolveAvailablePath).toHaveBeenCalledOnce()
+    expect(harness.resolveFfmpeg).toHaveBeenCalledOnce()
 
-    finishDiscovery?.('/detected/ffmpeg')
+    finishDiscovery?.({ path: '/detected/ffmpeg', version: '7.1' })
     await expect(Promise.all([first, second])).resolves.toEqual([true, true])
-    expect(harness.readVersion).toHaveBeenCalledWith('/detected/ffmpeg')
+    expect(harness.resolveFfmpeg).toHaveBeenCalledWith(['/detected/ffmpeg'])
     expect(harness.onVersion).toHaveBeenCalledWith('7.1')
     expect(harness.log).toHaveBeenCalledWith(
       'info',
@@ -311,26 +312,53 @@ describe('FfmpegRuntime', () => {
     )
 
     await expect(harness.runtime.ensureReady()).resolves.toBe(true)
-    expect(harness.resolveAvailablePath).toHaveBeenCalledOnce()
+    expect(harness.resolveFfmpeg).toHaveBeenCalledOnce()
+  })
+
+  it('probes each candidate it tries once and takes the version from that probe', async () => {
+    const harness = createHarness()
+    harness.getCandidates.mockReturnValue(['/missing/ffmpeg', '/found/ffmpeg'])
+    const probe = vi.fn(
+      async (candidate: string): Promise<FfmpegVersionProbe> =>
+        candidate === '/found/ffmpeg'
+          ? { ran: true, version: '6.1.1' }
+          : { ran: false, version: undefined },
+    )
+    harness.resolveFfmpeg.mockImplementation((candidates) =>
+      resolveFirstFfmpeg(candidates, probe),
+    )
+
+    await expect(harness.runtime.ensureReady()).resolves.toBe(true)
+    await expect(harness.runtime.ensureReady()).resolves.toBe(true)
+
+    expect(probe.mock.calls).toEqual([['/missing/ffmpeg'], ['/found/ffmpeg']])
+    expect(harness.runtime.resolvePath()).toBe('/found/ffmpeg')
+    expect(harness.onVersion).toHaveBeenCalledExactlyOnceWith('6.1.1')
+    expect(harness.runtime.timestampPassthroughArgs).toEqual([
+      '-fps_mode',
+      'passthrough',
+    ])
   })
 
   it('retries discovery after teardown interrupts initialization', async () => {
     const harness = createHarness()
-    let finishDiscovery: ((path: string | undefined) => void) | undefined
-    harness.resolveAvailablePath.mockReturnValueOnce(
-      new Promise<string | undefined>((resolve) => {
+    let finishDiscovery:
+      | ((resolved: ResolvedFfmpeg | undefined) => void)
+      | undefined
+    harness.resolveFfmpeg.mockReturnValueOnce(
+      new Promise<ResolvedFfmpeg | undefined>((resolve) => {
         finishDiscovery = resolve
       }),
     )
 
     const initialization = harness.runtime.ensureReady()
     await harness.runtime.terminateAll()
-    finishDiscovery?.('/detected/ffmpeg')
+    finishDiscovery?.({ path: '/detected/ffmpeg', version: '7.1' })
     await expect(initialization).resolves.toBe(false)
 
     harness.runtime.resumeAfterTeardown()
     await expect(harness.runtime.ensureReady()).resolves.toBe(true)
-    expect(harness.resolveAvailablePath).toHaveBeenCalledTimes(2)
+    expect(harness.resolveFfmpeg).toHaveBeenCalledTimes(2)
   })
 
   it('resolves discovered, configured, environment, and PATH binaries in order', async () => {
@@ -361,11 +389,11 @@ describe('FfmpegRuntime', () => {
       '/also/missing',
       'ffmpeg',
     ])
-    harness.resolveAvailablePath.mockResolvedValue(undefined)
+    harness.resolveFfmpeg.mockResolvedValue(undefined)
 
     await expect(harness.runtime.ensureReady()).resolves.toBe(false)
     await expect(harness.runtime.ensureReady()).resolves.toBe(false)
-    expect(harness.resolveAvailablePath).toHaveBeenCalledOnce()
+    expect(harness.resolveFfmpeg).toHaveBeenCalledOnce()
     expect(harness.log).toHaveBeenCalledWith(
       'warn',
       expect.stringContaining(
@@ -382,7 +410,7 @@ describe('FfmpegRuntime', () => {
   it('handles unavailable default discovery and an absent version', async () => {
     const unavailable = createHarness()
     unavailable.getCandidates.mockReturnValue([])
-    unavailable.resolveAvailablePath.mockResolvedValue(undefined)
+    unavailable.resolveFfmpeg.mockResolvedValue(undefined)
     await unavailable.runtime.ensureReady()
     expect(unavailable.log).toHaveBeenCalledWith(
       'warn',
@@ -392,7 +420,10 @@ describe('FfmpegRuntime', () => {
     )
 
     const unversioned = createHarness()
-    unversioned.readVersion.mockResolvedValue(undefined)
+    unversioned.resolveFfmpeg.mockResolvedValue({
+      path: '/detected/ffmpeg',
+      version: undefined,
+    })
     await unversioned.runtime.ensureReady()
     expect(unversioned.onVersion).not.toHaveBeenCalled()
   })
@@ -406,7 +437,7 @@ describe('FfmpegRuntime', () => {
     harness.runtime.resetForSession()
     await harness.runtime.ensureReady()
 
-    expect(harness.resolveAvailablePath).toHaveBeenCalledTimes(2)
+    expect(harness.resolveFfmpeg).toHaveBeenCalledTimes(2)
     expect(harness.probeDirectMp4).toHaveBeenCalledTimes(2)
     expect(
       harness.log.mock.calls.filter(([, message]) =>

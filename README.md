@@ -633,11 +633,12 @@ byte-identical HTML for reproducible artifacts.
 
 ## FFmpeg Error Handling
 
-If FFmpeg is missing or not executable, the service warns once and disables
-recording for that worker. Failed or timed-out merge/transcode operations retain
-source media and remove partial output. If the capture encoder cannot open or
-write its recording file, its exit code and FFmpeg's own message are reported
-as the reason the recording is incomplete.
+Each Chromium worker session looks for FFmpeg once, before its first test and
+alongside the browser warm-up. If FFmpeg is missing or not executable, the
+service warns once and disables recording for that worker. Failed or timed-out
+merge/transcode operations retain source media and remove partial output. If
+the capture encoder cannot open or write its recording file, its exit code and
+FFmpeg's own message are reported as the reason the recording is incomplete.
 
 Direct MP4 compatibility is probed once per worker in `mp4Mode: 'auto'`. An
 incompatible build falls back to WebM capture plus H.264 transcode.

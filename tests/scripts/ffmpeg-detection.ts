@@ -1,7 +1,4 @@
-import {
-  getFfmpegCandidates,
-  resolveAvailableFfmpegPath,
-} from '../../src/service/ffmpeg.js'
+import { getFfmpegCandidates, resolveFfmpeg } from '../../src/service/ffmpeg.js'
 
 export type FfmpegDetectionResult = {
   available: boolean
@@ -40,7 +37,7 @@ export const detectFfmpeg = async (): Promise<FfmpegDetectionResult> => {
     undefined,
     process.env.FFMPEG_PATH?.trim(),
   )
-  const resolvedPath = await resolveAvailableFfmpegPath(checkedCandidates)
+  const resolvedPath = (await resolveFfmpeg(checkedCandidates))?.path
 
   if (resolvedPath) {
     return {
