@@ -324,6 +324,13 @@ parts of the recording are still listed and attached. If the warning says the
 frames `could not be moved … and stay at` a path under `.wdio-video-spool`,
 convert that file instead; it is not deleted for you.
 
+A `.frames.mkv` file with no test warning of this kind means a worker crashed or
+was killed while it recorded. At the end of the run the launcher recovers the
+frames it left in `.wdio-video-spool` as `.frames.mkv` files and logs one
+warning naming them; the recovered recording stops at its last held image, and
+the same command converts it. A spool the launcher could not move is named in a
+separate warning and stays where it is, with its directory.
+
 ## The static report shows ambiguous-test-outcome or unmatched-test-outcome
 
 The report joins reporter outcomes to manifest captures from the same spec file,

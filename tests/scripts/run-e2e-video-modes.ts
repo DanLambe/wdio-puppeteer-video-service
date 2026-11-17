@@ -6,7 +6,10 @@ import { isVideoManifest, type ManifestEntryV1 } from '../../src/manifest.js'
 import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
 import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
-import { captureEncodingSuffix } from '../utils/capture-encoding.js'
+import {
+  assertSpoolDirectoryRemoved,
+  captureEncodingSuffix,
+} from '../utils/capture-encoding.js'
 import {
   decodeColorTimeline,
   type SolidColor,
@@ -295,6 +298,7 @@ const runWdio = async (
   await waitForChildProcess(child, (code) => {
     return `[e2e:modes] ${label} run failed with code ${code}`
   })
+  await assertSpoolDirectoryRemoved(resultsDir)
   const manifest: unknown = JSON.parse(
     await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
   )

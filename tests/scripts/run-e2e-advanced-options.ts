@@ -3,7 +3,10 @@ import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
-import { captureEncodingSuffix } from '../utils/capture-encoding.js'
+import {
+  assertSpoolDirectoryRemoved,
+  captureEncodingSuffix,
+} from '../utils/capture-encoding.js'
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
 import {
@@ -275,6 +278,7 @@ const runMode = async (
     5 * 60_000,
     mode === 'retention' || mode === 'failure-burst' ? [1] : [0],
   )
+  await assertSpoolDirectoryRemoved(resultsDir)
 
   if (mode === 'retention') {
     await assertRetentionEntries(resultsDir)

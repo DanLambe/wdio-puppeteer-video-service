@@ -323,8 +323,13 @@ cleanup, and the test's own failure is still what the framework reports. A
 frames file is not a video: it is not listed as a manifest segment, attached to
 Allure, or shown in the HTML report. A reset or teardown that finds frames not
 yet encoded keeps them the same way, with a warning, and never encodes them
-later. After a run in which every kept recording was encoded, no spool file
-remains (the empty per-run directory may).
+later. A capture that was already incomplete but encoded without error keeps
+that video as unclean media and no frames file, because the video holds every
+frame the spool had. After a run in which every kept recording was encoded, no
+spool file or spool directory remains. A worker that crashes or is killed
+mid-recording leaves its frames in the run's spool directory; the launcher
+recovers them as `.frames.mkv` files at the end of the run, with one warning
+naming them, and a recovered recording stops at its last held image.
 
 **Disk use.** A spool holds every frame the recording captured, including the
 periodic hold blocks that keep the newest image on disk, so it grows with the
