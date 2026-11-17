@@ -350,6 +350,9 @@ the test drives:
 - A frame is recorded as part of its tab.
 - When the recorded tab closes, recording continues on WebdriverIO's current
   window.
+- A script moves recording only to a tab the test holds, has switched to or is
+  on, not to one it has only listed with `browser.getWindowHandles()`, where
+  WebdriverIO runs its own setup script.
 
 ```typescript
 const page = await browser.url('/checkout')

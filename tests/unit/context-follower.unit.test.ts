@@ -340,6 +340,17 @@ describe('ContextFollower', () => {
     expect(target.stopClosingContext).not.toHaveBeenCalled()
   })
 
+  it('ignores a close of a context the test does not know', async () => {
+    const target = createTarget()
+    const browser = createBrowser()
+    const { follower } = createFollower(target, browser)
+
+    await follower.beforeCommand('browsingContextClose', [{ context: 'tab-q' }])
+
+    expect(target.stopClosingContext).not.toHaveBeenCalled()
+    expect(browser.browsingContextGetTree).not.toHaveBeenCalled()
+  })
+
   it('ignores results of failed commands and contexts it cannot place', async () => {
     const target = createTarget()
     const browser = createBrowser()
@@ -396,6 +407,323 @@ describe('ContextFollower', () => {
     expect(log).toHaveBeenCalledWith(
       'debug',
       expect.stringContaining("WDIO's current window"),
+    )
+  })
+})
+
+const script = (context: string) => [
+  { target: { context }, awaitPromise: false },
+]
+
+const enumerate = (
+  follower: ContextFollower,
+  handles: readonly string[] = ['tab-a', 'tab-b'],
+) => follower.afterCommand('getWindowHandles', [], handles, undefined)
+
+describe('ContextFollower with listed windows and scripts', () => {
+  it.each(['scriptCallFunction', 'scriptEvaluate'])(
+    'ignores %s in a window known only from getWindowHandles',
+    async (command) => {
+      const target = createTarget()
+      const browser = createBrowser('tab-a')
+      const { follower } = createFollower(target, browser)
+
+      await enumerate(follower)
+      await follower.beforeCommand(command, script('tab-b'))
+
+      // No move, so the controller never brings tab-b to the front.
+      expect(target.calls).toEqual([])
+      expect(browser.browsingContextGetTree).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['empty', false],
+    ['filled', true],
+  ])(
+    'ignores the script when the handle list arrives just after its hook starts (current-window cache %s)',
+    async (_label, cached) => {
+      const target = createTarget()
+      const browser = createBrowser('tab-a')
+      const { follower } = createFollower(target, browser)
+      if (cached) {
+        await follower.afterCommand('getWindowHandle', [], 'tab-a', undefined)
+      }
+
+      let listed: Promise<void> | undefined
+      queueMicrotask(() => {
+        listed = enumerate(follower)
+      })
+      await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+      await listed
+      // Nothing reconsiders the ignored script, and a later list changes nothing.
+      await enumerate(follower)
+      await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+
+      expect(target.calls).toEqual([])
+    },
+  )
+
+  it('follows an explicit switch to a listed window before the switch', async () => {
+    const target = createTarget()
+    const { follower } = createFollower(target)
+    await enumerate(follower)
+
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+    expect(target.calls).toEqual(['follow:tab-b:switch-to-window'])
+    await follower.afterCommand('switchToWindow', ['tab-b'], null, undefined)
+
+    // tab-b is now addressable: its scripts follow once recording is elsewhere.
+    await follower.beforeCommand('switchToWindow', ['tab-a'])
+    await follower.afterCommand('switchToWindow', ['tab-a'], null, undefined)
+    await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+
+    expect(target.calls).toEqual([
+      'follow:tab-b:switch-to-window',
+      'follow:tab-a:switch-to-window',
+      'follow:tab-b:command',
+    ])
+  })
+
+  it.each([
+    ['browsingContextNavigate', [{ context: 'tab-b', url: '/next' }]],
+    ['browsingContextLocateNodes', [{ context: 'tab-b' }]],
+    ['inputPerformActions', [{ context: 'tab-b', actions: [] }]],
+    ['elementClick', ['f.tab-b.d.DOC.e.1']],
+  ] as const)(
+    'follows %s on a listed window and then trusts its scripts',
+    async (command, args) => {
+      const target = createTarget()
+      const browser = createBrowser('tab-a')
+      const { follower } = createFollower(target, browser)
+      await enumerate(follower)
+
+      await follower.beforeCommand(command, args)
+      expect(target.calls).toEqual(['follow:tab-b:command'])
+
+      // Recording returns to tab-a; a script on the promoted tab-b follows.
+      await follower.beforeCommand('browsingContextLocateNodes', [
+        { context: 'tab-a' },
+      ])
+      await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+
+      expect(target.calls).toEqual([
+        'follow:tab-b:command',
+        'follow:tab-a:command',
+        'follow:tab-b:command',
+      ])
+    },
+  )
+
+  it.each([
+    ['newWindow', { contextId: 'tab-b' }, 'tab-b', 'tab-b'],
+    ['url', { contextId: 'tab-b' }, 'tab-b', 'tab-b'],
+    ['frame', { contextId: 'frame-a1' }, 'frame-a1', 'tab-a'],
+    [
+      'browsingContexts',
+      [{ contextId: 'tab-a' }, { contextId: 'tab-b' }],
+      'tab-b',
+      'tab-b',
+    ],
+    ['browsingContextCreate', { context: 'tab-b' }, 'tab-b', 'tab-b'],
+  ] as const)(
+    'follows scripts and element commands in a context from %s',
+    async (command, result, context, tab) => {
+      const target = createTarget('tab-z')
+      const { follower } = createFollower(target)
+      await follower.afterCommand(command, [], result, undefined)
+
+      await follower.beforeCommand('scriptCallFunction', script(context))
+      target.recorded = 'tab-z'
+      await follower.beforeCommand('elementClick', [`f.${context}.d.DOC.e.1`])
+
+      expect(target.calls).toEqual([
+        `follow:${tab}:command`,
+        `follow:${tab}:command`,
+      ])
+    },
+  )
+
+  it('does not downgrade a held context that a later handle list contains', async () => {
+    const target = createTarget()
+    const { follower } = createFollower(target)
+    await follower.afterCommand(
+      'newWindow',
+      [],
+      { contextId: 'tab-b' },
+      undefined,
+    )
+
+    await enumerate(follower)
+    await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+
+    expect(target.calls).toEqual(['follow:tab-b:command'])
+  })
+
+  it.each([
+    ['listed', ['tab-a', 'tab-b']],
+    ['never listed', []],
+  ] as const)(
+    'returns root execute to the current window after a held tab (current window %s)',
+    async (_label, handles) => {
+      const target = createTarget()
+      const browser = createBrowser('tab-a')
+      const { follower } = createFollower(target, browser)
+      await enumerate(follower, handles)
+      await follower.afterCommand(
+        'newWindow',
+        [],
+        { contextId: 'tab-b' },
+        undefined,
+      )
+      await follower.beforeCommand('elementClick', ['f.tab-b.d.DOC.e.1'])
+
+      // BiDi `browser.execute()` is a scriptCallFunction on the current window.
+      await follower.beforeCommand('scriptCallFunction', script('tab-a'))
+
+      expect(target.calls).toEqual([
+        'follow:tab-b:command',
+        'follow:tab-a:command',
+      ])
+      expect(browser.getWindowHandle).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('treats a getWindowHandle result as the current, addressable window', async () => {
+    const target = createTarget('tab-b')
+    const browser = createBrowser('tab-a')
+    const { follower } = createFollower(target, browser)
+
+    await follower.afterCommand('getWindowHandle', [], 'tab-a', undefined)
+    await follower.beforeCommand('scriptCallFunction', script('tab-a'))
+    target.recorded = 'tab-b'
+    await follower.beforeCommand('performActions', [[]])
+
+    expect(target.calls).toEqual([
+      'follow:tab-a:command',
+      'follow:tab-a:command',
+    ])
+    // Both decisions used the result; the browser was not asked again.
+    expect(browser.getWindowHandle).not.toHaveBeenCalled()
+  })
+
+  it('restores a listed window, the current window and capture after a rejected switch', async () => {
+    const target = createTarget()
+    const browser = createBrowser('tab-a')
+    const { follower } = createFollower(target, browser)
+    await enumerate(follower)
+
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+    target.capture = false
+    await follower.afterCommand(
+      'switchToWindow',
+      ['tab-b'],
+      undefined,
+      new Error('no such window'),
+    )
+    expect(target.calls).toEqual([
+      'follow:tab-b:switch-to-window',
+      'follow:tab-a:switch-failed',
+    ])
+
+    // tab-b is listed again, not addressable: a script there is ignored.
+    await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+    // The current window is tab-a again, without another read.
+    await follower.beforeCommand('performActions', [[]])
+    expect(browser.getWindowHandle).toHaveBeenCalledOnce()
+    // Still known as listed, so the test's own command on it follows.
+    await follower.beforeCommand('browsingContextLocateNodes', [
+      { context: 'tab-b' },
+    ])
+
+    expect(target.calls).toEqual([
+      'follow:tab-b:switch-to-window',
+      'follow:tab-a:switch-failed',
+      'follow:tab-b:command',
+    ])
+  })
+
+  it.each([
+    ['unknown', undefined, []],
+    ['held', 'newWindow', ['follow:tab-b:command']],
+  ] as const)(
+    'restores an %s window after a rejected switch',
+    async (_label, source, expected) => {
+      const target = createTarget()
+      const { follower } = createFollower(target)
+      if (source) {
+        await follower.afterCommand(
+          source,
+          [],
+          { contextId: 'tab-b' },
+          undefined,
+        )
+      }
+
+      await follower.beforeCommand('switchToWindow', ['tab-b'])
+      await follower.afterCommand(
+        'switchToWindow',
+        ['tab-b'],
+        undefined,
+        new Error('no such window'),
+      )
+      target.calls.length = 0
+      await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+      await follower.beforeCommand('browsingContextLocateNodes', [
+        { context: 'tab-b' },
+      ])
+
+      expect(target.calls).toEqual(expected)
+    },
+  )
+
+  it('logs each decision at trace level', async () => {
+    const target = createTarget()
+    const { follower, log } = createFollower(target, createBrowser('tab-a'))
+    await enumerate(follower)
+
+    await follower.beforeCommand('scriptCallFunction', script('tab-b'))
+    await follower.beforeCommand('browsingContextNavigate', [
+      { context: 'tab-b' },
+    ])
+    await follower.beforeCommand('browsingContextNavigate', [
+      { context: 'tab-q' },
+    ])
+    await follower.beforeCommand('switchToWindow', ['tab-q'])
+
+    const lines = log.mock.calls
+      .filter(([level]) => level === 'trace')
+      .map(([, message]) => message)
+    expect(lines).toEqual([
+      expect.stringContaining(
+        '#1: scriptCallFunction on tab-b (enumerated), recorded tab-a, current tab-a: ignored: script on a context the test has not addressed.',
+      ),
+      expect.stringContaining(
+        '#2: browsingContextNavigate on tab-b (enumerated), recorded tab-a, current tab-a: follow tab-b (command).',
+      ),
+      expect.stringContaining(
+        '#3: browsingContextNavigate on tab-q (unknown), recorded tab-b, current tab-a: ignored: unknown context.',
+      ),
+      expect.stringContaining(
+        '#4: switchToWindow on tab-q (unknown), recorded tab-b, current tab-a: ignored: not an open window.',
+      ),
+    ])
+  })
+
+  it('ignores a known context that is no longer in the tree', async () => {
+    const target = createTarget()
+    const browser = createBrowser('tab-a')
+    const { follower, log } = createFollower(target, browser)
+    await enumerate(follower, ['tab-a', 'tab-gone'])
+
+    await follower.beforeCommand('browsingContextNavigate', [
+      { context: 'tab-gone' },
+    ])
+
+    expect(target.calls).toEqual([])
+    expect(log).toHaveBeenCalledWith(
+      'trace',
+      expect.stringContaining('ignored: not in the tree'),
     )
   })
 })

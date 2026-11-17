@@ -45,6 +45,18 @@ filming a tab the test had left.
 - When the recorded tab closes, recording continues on WebdriverIO's current
   window.
 
+A window handle from `browser.getWindowHandles()` alone does not move recording
+when a script runs there. WebdriverIO installs its own script in every window a
+page opens, before the test switches to it, so a script is followed only in a
+context the test holds (from `url()`, `newWindow()`, `frame()` or
+`browsingContexts()`), a window it has switched to, WebdriverIO's current
+window, or the recorded tab. A raw `browser.scriptCallFunction()` or
+`browser.scriptEvaluate()` naming a tab the test has only listed therefore no
+longer moves recording there. Switch to the tab with
+`browser.switchToWindow(handle)` first, or use a held context, such as one
+from `browser.browsingContexts()`. Other commands on a listed tab, such as
+navigation, element commands and input, still move recording.
+
 Each change of tab starts a new segment, so tests that use several tabs
 produce more segments than under 1.x. The recorded tab is brought to the
 front, because Chrome does not paint tabs in the background. Each segment's

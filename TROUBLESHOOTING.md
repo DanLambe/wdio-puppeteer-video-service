@@ -170,6 +170,18 @@ the same way, such as "Tab 2 · test command" or "Tabs 1 → 2 → 1" for a merg
   a command. One that another service, or a promise the test did not await,
   sends to a tab the test holds moves recording there, even while the test
   works in a different tab. The segment's reason is `command`.
+- **A script on another tab does not move recording.** A
+  `browser.scriptCallFunction()` or `browser.scriptEvaluate()` follows only a
+  context the test holds (from `url()`, `newWindow()`, `frame()` or
+  `browsingContexts()`), a window it has switched to, WebdriverIO's current
+  window, or the recorded tab. A handle known only from
+  `browser.getWindowHandles()` is not enough, because WebdriverIO runs its own
+  setup script in every window a page opens. Call
+  `browser.switchToWindow(handle)` first, or run the script through a held
+  context. Navigation, element commands and input on a listed tab still move
+  recording, and make that tab's later scripts count. With the
+  service's `logLevel: 'trace'` it logs each of these decisions as
+  "Tab decision #n".
 - **The entry is `failed` with `capture-incomplete`.** The test drove a tab
   whose recording could not start. Each tab gets two consecutive attempts; the
   service warns with the tab's id. Segments recorded before and after the gap
