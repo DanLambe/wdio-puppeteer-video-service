@@ -2,7 +2,11 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
+import {
+  type ClockBoundary,
+  nodeFileSystem,
+  systemClock,
+} from '../../src/service/boundaries.js'
 import type { SpooledSegment } from '../../src/service/capture-session.js'
 import {
   DEFERRED_ENCODE_LIMITS,
@@ -20,6 +24,7 @@ import { FfmpegRuntime } from '../../src/service/ffmpeg-runtime.js'
 import type { ServiceLogger } from '../../src/service/logging.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import type { PostProcessSlotScheduler } from '../../src/service/recording-slots.js'
+import { createControlledClock } from '../utils/controlled-clock.js'
 
 const SETTINGS = {
   canvas: { height: 600, width: 800 },
@@ -251,7 +256,7 @@ describe('deferred encoder', () => {
       async (outputPath) => {
         running += 1
         concurrent = Math.max(concurrent, running)
-        await new Promise((resolve) => setTimeout(resolve, 5))
+        await new Promise((resolve) => setImmediate(resolve))
         await fs.writeFile(outputPath, 'vp9')
         running -= 1
         return exited(0)
@@ -562,14 +567,15 @@ describe('deferred encoder', () => {
       maximumSlotWaitMs: 30_000,
       minimumBudgetMs: 150,
     }
-    // Each encode takes 100ms of real time unless it is stopped.
+    const time = createControlledClock()
+    // Each encode takes 100ms of the controlled clock unless it is stopped.
     const slow: RunBehaviour = async (outputPath, options) => {
       const stopped = await new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => {
+        const timer = time.clock.setTimeout(() => {
           resolve(false)
         }, 100)
         options.signal?.addEventListener('abort', () => {
-          clearTimeout(timer)
+          time.clock.clearTimeout(timer)
           resolve(true)
         })
       })
@@ -580,19 +586,31 @@ describe('deferred encoder', () => {
       return exited(0)
     }
     const ffmpeg = createFfmpeg([slow])
-    const { encoder } = createEncoder(ffmpeg.port, { limits })
+    const { encoder } = createEncoder(ffmpeg.port, {
+      clock: time.clock,
+      limits,
+    })
     const segments = [
       await spooled(1),
       await spooled(2),
       await spooled(3),
       await spooled(4),
     ]
-    const started = Date.now()
 
-    const results = await encoder.encodeAll(segments, 0)
+    const finished = encoder.encodeAll(segments, 0)
+    // The first encode takes its 100ms; the second starts at 100ms and the
+    // budget (150ms) runs out 50ms into it.
+    await vi.waitFor(() => {
+      expect(ffmpeg.runs).toHaveLength(1)
+    })
+    time.advance(100)
+    await vi.waitFor(() => {
+      expect(ffmpeg.runs).toHaveLength(2)
+    })
+    time.advance(50)
+    const results = await finished
 
-    const elapsed = Date.now() - started
-    expect(elapsed).toBeLessThan(1_000)
+    expect(time.pendingTimers()).toBe(0)
     expect(results.map(({ outcome }) => outcome.kind)).toEqual([
       'encoded',
       'kept',
@@ -607,10 +625,7 @@ describe('deferred encoder', () => {
         'the deferred-encode budget of 0.15s ran out',
       ),
     })
-    expect(ffmpeg.admissions.map(({ waitMs }) => waitMs <= 150)).toEqual([
-      true,
-      true,
-    ])
+    expect(ffmpeg.admissions.map(({ waitMs }) => waitMs)).toEqual([150, 50])
     for (const part of [2, 3, 4]) {
       expect(
         await exists(
@@ -680,10 +695,14 @@ describe('deferred encoder', () => {
 })
 
 describe('deferred encoder over the real FFmpeg runtime', () => {
-  const createRuntime = (acquire: () => Promise<boolean>) => {
+  const createRuntime = (
+    acquire: () => Promise<boolean>,
+    clock?: ClockBoundary,
+  ) => {
     const release = vi.fn(async () => {})
     const runFfmpeg = vi.fn(async (_options: RunFfmpegOptions) => true)
     const runtime = new FfmpegRuntime({
+      ...(clock ? { clock } : {}),
       createPostProcessSlotScheduler: () =>
         ({ acquire, release }) as unknown as PostProcessSlotScheduler,
       getCandidates: () => ['ffmpeg'],
@@ -706,9 +725,14 @@ describe('deferred encoder over the real FFmpeg runtime', () => {
 
   it('starts no process for a slot granted after the budget ran out, and releases it unused', async () => {
     const grant = Promise.withResolvers<boolean>()
-    const { release, runFfmpeg, runtime } = createRuntime(() => grant.promise)
+    const time = createControlledClock()
+    const { release, runFfmpeg, runtime } = createRuntime(
+      () => grant.promise,
+      time.clock,
+    )
     await runtime.ensureReady()
     const { encoder } = createEncoder(runtime, {
+      clock: time.clock,
       limits: {
         budgetMsPerCapturedSecond: 0,
         maximumBudgetMs: 50,
@@ -718,7 +742,13 @@ describe('deferred encoder over the real FFmpeg runtime', () => {
     })
     const held = await spooled(1)
 
-    const [result] = await encoder.encodeAll([held], 0)
+    const finished = encoder.encodeAll([held], 0)
+    // The budget and the slot wait both end at 50ms, in the same advance.
+    await vi.waitFor(() => {
+      expect(time.pendingTimers()).toBe(2)
+    })
+    time.advance(50)
+    const [result] = await finished
 
     expect(result?.outcome).toMatchObject({
       failure: expect.stringContaining(

@@ -31,6 +31,7 @@ import {
 } from '../../src/service/worker-recording-coordinator.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
+import { createControlledClock } from '../utils/controlled-clock.js'
 
 const METADATA: SlugMetadata = {
   fileToken: 'deferred_spec',
@@ -81,7 +82,7 @@ const listTree = async (): Promise<string[]> =>
 
 interface HarnessOptions {
   readonly encoder?: Partial<
-    Pick<DeferredEncoderOptions, 'limits' | 'linkFile'>
+    Pick<DeferredEncoderOptions, 'clock' | 'limits' | 'linkFile'>
   >
   readonly service?: WdioPuppeteerVideoServiceOptions
   readonly spoolStorage?: boolean
@@ -849,8 +850,10 @@ describe('resetting or ending a worker with spools', () => {
   })
 
   it('does not encode again on teardown after the budget ran out', async () => {
+    const time = createControlledClock()
     const harness = createHarness({
       encoder: {
+        clock: time.clock,
         limits: {
           budgetMsPerCapturedSecond: 0,
           maximumBudgetMs: 50,
@@ -871,7 +874,12 @@ describe('resetting or ending a worker with spools', () => {
       return { kind: 'stopped', reason: 'cancelled' }
     }
 
-    const finalized = await harness.controller.finalizeMedia(false, true)
+    const finishing = harness.controller.finalizeMedia(false, true)
+    await vi.waitFor(() => {
+      expect(harness.encodeFfmpeg.run).toHaveBeenCalledOnce()
+    })
+    time.advance(50)
+    const finalized = await finishing
     expect(finalized.captureFailure).toContain(
       'the deferred-encode budget of 0.05s ran out',
     )
