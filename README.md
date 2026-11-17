@@ -396,6 +396,13 @@ that moves recording to another tab took this much longer than unrecorded:
 - with 4 workers sharing those 2 CPUs: about 2.1 s, and 3.5 s;
 - on a desktop Chrome or Edge: about 0.3 s.
 
+Ending a segment first waits up to 125 ms for a frame Chrome is still
+capturing, so a change the test made just before the move, or just before the
+test ends, is the segment's last frame. The wait ends when that frame arrives;
+on a page that has not changed, each move and each kept stop takes the whole
+125 ms. A recording that retention has already decided to discard does not
+wait.
+
 A command that stays on its tab adds a few milliseconds. Tests that alternate
 between tabs run slower while recorded. A move does not process the segment it
 ends: a kept recording's segments are transcoded and merged when the test ends

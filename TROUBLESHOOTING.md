@@ -127,6 +127,16 @@ a positive duration and at least two frames. That is a test contract rather than
 proof that the file is corrupt — the recording really is that short. Keep the
 window under test open longer if a clip of usable length is expected.
 
+## A video ends just before the test's last change
+
+Chrome captures a frame a little after the page paints it. When a recording or
+a segment ends, the service waits up to 125 ms for a frame that is still on its
+way, which covered the slowest case measured: about 100 ms on a two-CPU
+container whose CPUs were saturated. On a host busier than that, the last change
+before a tab move or the end of a test can still miss its segment; after a tab
+move it shows once recording returns to that tab. Reduce the load per CPU, for
+example with fewer workers, if that last frame matters.
+
 ## The first recording on a fresh runner is late or empty
 
 A browser's first launch on a fresh machine can take seconds to draw anything:
