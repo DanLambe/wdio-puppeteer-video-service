@@ -27,6 +27,10 @@ import type {
   ScreencastQueueStats,
   ScreencastRecorder,
 } from '../../src/service/screencast-recorder.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  SpoolBudget,
+} from '../../src/service/spool-budget.js'
 
 interface FakeRecorder {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
@@ -1316,6 +1320,7 @@ describe('Puppeteer capture engine, deferred capture', () => {
   const startSpooled = async (
     harness: ReturnType<typeof createHarness>,
     tempDir: string,
+    budget?: SpoolBudget,
   ) => {
     const plannedPath = path.join(tempDir, 'checkout_part1.webm')
     const spoolPath = spoolPathIn(tempDir)
@@ -1334,6 +1339,7 @@ describe('Puppeteer capture engine, deferred capture', () => {
       }),
       ffmpegPath: 'ffmpeg.exe',
       spoolPath,
+      ...(budget ? { budget } : {}),
       transcodeOptions: { deleteOriginal: true },
     })
     return { plannedPath, result, spoolPath }
@@ -1353,6 +1359,21 @@ describe('Puppeteer capture engine, deferred capture', () => {
     expect(options).not.toHaveProperty('outputPath')
     await expect(fs.stat(path.dirname(spoolPath))).resolves.toBeDefined()
     await expect(fs.access(plannedPath)).rejects.toThrow()
+  })
+
+  it("starts a spooled capture under the recording's budget, and a live one without", async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const budget = new SpoolBudget(DEFAULT_SPOOL_LIMITS, {
+      freeBytes: async () => 0,
+    })
+    await startSpooled(harness, tempDir, budget)
+
+    expect(harness.startScreencast.mock.calls[0]?.[1]).toMatchObject({ budget })
+
+    const live = createHarness()
+    await startCapture(live, path.join(tempDir, 'capture.webm'))
+    expect(live.startScreencast.mock.calls[0]?.[1]).not.toHaveProperty('budget')
   })
 
   it('returns a stopped spool without reading an encoder result', async () => {

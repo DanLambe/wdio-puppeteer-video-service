@@ -174,6 +174,7 @@ export class SpoolSink implements FrameSink {
   private readonly failedState = Promise.withResolvers<Error>()
   private error: Error | undefined
   private aborting: Promise<void> | undefined
+  private accepted = 0
   private opened = false
   private closedState = false
 
@@ -227,6 +228,14 @@ export class SpoolSink implements FrameSink {
     return this.closedState
   }
 
+  /**
+   * Bytes `write` has taken: those the file system has written and those it
+   * has not yet. This is what the spool will hold once it is flushed.
+   */
+  get bytesAccepted(): number {
+    return this.accepted
+  }
+
   /** Bytes accepted by `write` that the file system has not yet taken. */
   get bytesBuffered(): number {
     return this.stream.writableLength
@@ -244,6 +253,7 @@ export class SpoolSink implements FrameSink {
     if (!this.stream.writable) {
       return false
     }
+    this.accepted += chunk.length
     return this.stream.write(chunk)
   }
 

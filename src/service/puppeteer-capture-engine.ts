@@ -36,6 +36,7 @@ import {
   type SessionProtocol,
 } from './protocol.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
+import type { SpoolBudget } from './spool-budget.js'
 
 export interface CaptureSegmentOutput {
   readonly outputFormat: OutputFormat
@@ -64,6 +65,8 @@ export interface CaptureStartOptions {
    * directory is created; a start that fails removes the file.
    */
   readonly spoolPath?: string
+  /** The recording's spool budget, for a spooled segment. */
+  readonly budget?: SpoolBudget
   readonly target?: CaptureTarget
   readonly transcodeOptions: ResolvedTranscodeOptions
 }
@@ -413,6 +416,7 @@ export class PuppeteerCaptureEngine {
         spoolPath === undefined
           ? { outputPath: path.resolve(output.recordingPath) }
           : {
+              ...(options.budget ? { budget: options.budget } : {}),
               onSpoolCleanupFailure: (message: string) => {
                 this.log('warn', message)
               },

@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
+import path from 'node:path'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
@@ -18,6 +19,7 @@ import {
   createFfmpegArguments,
 } from './screencast-arguments.js'
 import type { FfmpegResult } from './screencast-encoder.js'
+import type { SegmentBudget, SpoolBudget } from './spool-budget.js'
 
 export type { FfmpegResult } from './screencast-encoder.js'
 
@@ -41,6 +43,11 @@ const HOLD_INTERVAL_MS = 1_000
 const HOLD_LAG_SECONDS = 0.5
 // Consecutive writes the encoder accepted before yielding to the event loop.
 const WRITE_BATCH = 32
+// What a block adds to its image: the largest cluster header and block header.
+const BLOCK_OVERHEAD_BYTES = 32
+// Blocks a spooling segment must always have room for: one more hold, and the
+// fill and two end markers that stopping writes.
+const RESERVED_BLOCKS = 4
 
 export interface ScreencastCaptureOptions {
   readonly crop?: Readonly<CaptureCrop>
@@ -65,6 +72,8 @@ export interface ScreencastEncodeTarget {
 export interface ScreencastSpoolTarget {
   /** A new file for the stream a live encoder would be given. */
   readonly spoolPath: string
+  /** The recording's spool budget; without it the spool is unbounded. */
+  readonly budget?: SpoolBudget
   /**
    * Told why a spool that a failed startup created could not be removed.
    * Startup removes only a file its own exclusive open created.
@@ -191,6 +200,14 @@ interface PendingBlock {
   readonly position: number
 }
 
+// What one block of this frame adds to the stream. A frame not yet decoded is
+// estimated from its base64 length, rounded up.
+const blockCost = (frame: ReceivedFrame): number => {
+  const image =
+    frame.encoded?.length ?? Math.ceil(((frame.data?.length ?? 0) * 3) / 4)
+  return image + BLOCK_OVERHEAD_BYTES
+}
+
 // Base64 is ASCII, which V8 stores at one byte per character; a decoded frame
 // costs its length. A frame is counted once however many blocks reference it.
 const frameCost = (frame: ReceivedFrame): number => {
@@ -214,6 +231,8 @@ interface PixelDimensions {
 }
 
 export interface ScreencastRecorderInit {
+  /** Bounds a spool sink's growth and tells the recorder when to stop. */
+  readonly budget?: SegmentBudget
   /** The frame size FFmpeg is told to expect. */
   readonly canvas: CaptureCanvas
   readonly clock?: ClockBoundary
@@ -252,6 +271,7 @@ export interface ScreencastRecorderInit {
 export class ScreencastRecorder {
   // Not readonly: a later phase replaces a spool with a live encoder.
   private sink: ScreencastSink
+  private readonly budget: SegmentBudget | undefined
   private readonly fps: number
   // Output frames per second: capture positions are spaced `1 / fps` apart
   // in capture time and `1 / playbackRate` apart in the video.
@@ -279,6 +299,8 @@ export class ScreencastRecorder {
   private latest: ReceivedFrame | undefined
   private latestEmitted = false
   private previousBlockPosition = -1
+  // Bytes the pending blocks will add to the sink.
+  private queuedBlockBytes = 0
   private draining = false
   private idle: PromiseWithResolvers<void> | undefined
   private received = 0
@@ -290,12 +312,14 @@ export class ScreencastRecorder {
   static create(init: ScreencastRecorderInit): ScreencastRecorder {
     const recorder = new ScreencastRecorder(init)
     recorder.watchSink(init.sink)
+    recorder.watchBudget()
     return recorder
   }
 
   private constructor(init: ScreencastRecorderInit) {
     this.session = init.session
     this.sink = init.sink
+    this.budget = init.budget
     this.fps = init.fps
     this.playbackRate = init.fps * (init.speed ?? 1)
     this.monotonicNow = init.monotonicNow
@@ -408,6 +432,38 @@ export class ScreencastRecorder {
     })
   }
 
+  // The budget decides when a spool has taken all the disk it may; the
+  // recorder only acts on it. Promotion is a later step: until a segment can
+  // continue live, the hard cap and the free-space floor are what bound it.
+  private watchBudget(): void {
+    this.budget?.attach({
+      isSpooling: () => this.sink.kind === 'spool',
+      promote: () => undefined,
+      stop: (detail) => {
+        this.limitReached(detail)
+      },
+    })
+    this.budget?.begin()
+  }
+
+  // Why a spooling segment may not commit more bytes now, if it may not. The
+  // budget is told what is queued and what stopping will still write.
+  private budgetLimitFor(frame: ReceivedFrame): string | undefined {
+    return this.budget?.check(
+      this.queuedBlockBytes + RESERVED_BLOCKS * blockCost(frame),
+    )
+  }
+
+  private limitReached(detail: string): void {
+    if (this.stopped || this.incomplete) {
+      return
+    }
+    const seconds = this.emitted / this.fps
+    this.incomplete = `${detail}; capture stopped after ${seconds.toFixed(1)}s to bound disk use.`
+    this.stopCapturing()
+    void this.session.send('Page.stopScreencast').catch(() => undefined)
+  }
+
   private onSinkClosed(): void {
     this.noteSinkFailure()
     if (this.stopping !== undefined || this.aborting !== undefined) {
@@ -475,6 +531,12 @@ export class ScreencastRecorder {
       // The previous frame already has its span; this one would start where
       // the recording now ends.
       this.overload(overload)
+      return
+    }
+    const limit = this.budgetLimitFor(frame)
+    if (limit) {
+      // As for an overload: the previous frame has its span.
+      this.limitReached(limit)
       return
     }
     this.latest = frame
@@ -556,6 +618,11 @@ export class ScreencastRecorder {
     if (this.stopped || !latest) {
       return
     }
+    const limit = this.budgetLimitFor(latest)
+    if (limit) {
+      this.limitReached(limit)
+      return
+    }
     this.fillTo(latest, this.heldPosition(latest, HOLD_LAG_SECONDS))
   }
 
@@ -612,6 +679,7 @@ export class ScreencastRecorder {
       return
     }
     frameBytes(frame)
+    this.queuedBlockBytes += blockCost(frame)
     this.pending.push({ frame, position })
     this.pendingFrames.set(frame, (this.pendingFrames.get(frame) ?? 0) + 1)
     this.previousBlockPosition = this.lastBlockPosition
@@ -676,6 +744,7 @@ export class ScreencastRecorder {
   private releasePending(): void {
     this.pending.length = 0
     this.pendingFrames.clear()
+    this.queuedBlockBytes = 0
     this.latest = undefined
   }
 
@@ -733,6 +802,10 @@ export class ScreencastRecorder {
   }
 
   private releaseBlock(block: PendingBlock): void {
+    this.queuedBlockBytes = Math.max(
+      0,
+      this.queuedBlockBytes - blockCost(block.frame),
+    )
     const references = (this.pendingFrames.get(block.frame) ?? 1) - 1
     if (references > 0) {
       this.pendingFrames.set(block.frame, references)
@@ -776,6 +849,7 @@ export const recordScreencast = async (
     ? toDevicePixelCrop(options.crop, dimensions)
     : undefined
   const sink = openSink(options, canvas, crop, dependencies)
+  const budget = registerSpool(sink, options)
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
   let abandoned = false
@@ -838,6 +912,7 @@ export const recordScreencast = async (
     ])
     checkStartup()
     recorder = ScreencastRecorder.create({
+      ...(budget ? { budget } : {}),
       canvas,
       clock,
       fps: options.fps,
@@ -870,6 +945,8 @@ export const recordScreencast = async (
     return recorder
   } catch (error) {
     abandoned = true
+    // Whatever the spool holds, it is not this recording's to keep.
+    budget?.release()
     if (recorder) {
       await recorder.abort()
     } else {
@@ -926,6 +1003,20 @@ const disposeFailedSpool = async (
   } else {
     void disposal.catch(() => undefined)
   }
+}
+
+// A spool counts against its recording's budget from its first byte.
+const registerSpool = (
+  sink: ScreencastSink,
+  options: ScreencastRecorderOptions,
+): SegmentBudget | undefined => {
+  if (sink.kind !== 'spool' || !('budget' in options)) {
+    return undefined
+  }
+  return options.budget?.beginSegment(
+    path.dirname(sink.spool.path),
+    () => sink.bytesAccepted,
+  )
 }
 
 // Encoding now spawns FFmpeg on the segment file; spooling opens a new file
