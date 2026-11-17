@@ -26,6 +26,7 @@ import {
 import { recoverOrphanedSpools } from '../../src/service/spool-recovery.js'
 import type { WorkerRecordingCoordinatorPort } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
+import { spoolName } from '../utils/spool-fixtures.js'
 
 const tempDirs: string[] = []
 
@@ -194,11 +195,11 @@ describe('WdioPuppeteerVideoLauncher', () => {
       await fs.mkdir(runDirectory, { recursive: true })
       const stream = spoolStream()
       await fs.writeFile(
-        path.join(runDirectory, 'checkout_part1.4f1b.mkv'),
+        path.join(runDirectory, spoolName('checkout', 1)),
         stream,
       )
       await fs.writeFile(
-        path.join(runDirectory, 'checkout_part2.9a3c.mkv'),
+        path.join(runDirectory, spoolName('checkout', 2)),
         createMatroskaHeader(track),
       )
       await fs.mkdir(path.join(spoolRoot, 'other-run'))
@@ -382,7 +383,7 @@ describe('WdioPuppeteerVideoLauncher', () => {
     it('refuses a run directory that is a link and leaves its target alone', async () => {
       const outputDir = await createTempDir()
       const elsewhere = await createTempDir()
-      const victim = path.join(elsewhere, 'a_part1.u.mkv')
+      const victim = path.join(elsewhere, spoolName('a', 1))
       await fs.writeFile(victim, spoolStream())
       const { launcher, writeLog } = await prepare(outputDir)
       await fs.mkdir(path.join(outputDir, '.wdio-video-spool'))
@@ -398,6 +399,38 @@ describe('WdioPuppeteerVideoLauncher', () => {
       expect(warnings(writeLog)).toEqual([
         expect.stringContaining('not a plain directory'),
       ])
+    })
+
+    it('refuses a spool root that is a link and leaves the run behind it alone', async () => {
+      const outputDir = await createTempDir()
+      const elsewhere = await createTempDir()
+      await fs.mkdir(path.join(elsewhere, 'current-run'))
+      const frameless = path.join(elsewhere, 'current-run', spoolName('a', 1))
+      const victim = path.join(elsewhere, 'current-run', spoolName('b', 1))
+      await fs.writeFile(frameless, createMatroskaHeader(track))
+      await fs.writeFile(victim, spoolStream())
+      const { launcher, writeLog } = await prepare(outputDir)
+      const spoolRoot = path.join(outputDir, '.wdio-video-spool')
+      await fs.symlink(elsewhere, spoolRoot, 'junction')
+
+      try {
+        await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+        expect(await fs.readFile(frameless)).toEqual(
+          createMatroskaHeader(track),
+        )
+        expect(await fs.readFile(victim)).toEqual(spoolStream())
+        expect(
+          (await fs.readdir(outputDir)).filter((name) =>
+            name.endsWith('.frames.mkv'),
+          ),
+        ).toEqual([])
+        expect(warnings(writeLog)).toEqual([
+          expect.stringContaining('not a plain directory'),
+        ])
+      } finally {
+        await fs.unlink(spoolRoot).catch(() => undefined)
+      }
     })
   })
 

@@ -40,6 +40,7 @@ import {
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 import { createControlledClock } from '../utils/controlled-clock.js'
+import { spoolName, testSpoolUuid } from '../utils/spool-fixtures.js'
 
 const METADATA: SlugMetadata = {
   fileToken: 'deferred_spec',
@@ -343,7 +344,7 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
               : {}),
             uuid: () => {
               uuidIndex += 1
-              return `uuid-${uuidIndex.toString()}`
+              return testSpoolUuid(uuidIndex)
             },
           },
         }),
@@ -355,10 +356,7 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
     await controller.followContext('tab-a', 'switch-to-window')
   }
   const spoolOf = (part: number): string =>
-    path.join(
-      spoolDirectory,
-      `${session.currentTestSlug}_part${part.toString()}.uuid-${part.toString()}.mkv`,
-    )
+    path.join(spoolDirectory, spoolName(session.currentTestSlug, part, part))
   return {
     controller,
     discardSpool,
