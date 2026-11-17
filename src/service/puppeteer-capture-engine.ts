@@ -680,7 +680,8 @@ export class PuppeteerCaptureEngine {
     recordingPath: string | undefined,
   ): Promise<void> {
     if (recorder) {
-      await this.stopRecorder(recorder)
+      // The media is removed below: no frame on its way is worth waiting for.
+      await this.stopRecorder(recorder, { tailFrame: false })
       // A promotion that finished before the start failed wrote elsewhere.
       const { output } = recorder
       if (output.kind === 'encoded' && output.outputPath !== undefined) {
@@ -705,7 +706,10 @@ export class PuppeteerCaptureEngine {
     await this.removeRecordingFile(spool.path)
   }
 
-  private async stopRecorder(recorder: ScreencastRecorder): Promise<boolean> {
+  private async stopRecorder(
+    recorder: ScreencastRecorder,
+    options: Readonly<{ tailFrame?: boolean }> = {},
+  ): Promise<boolean> {
     const { promise: timeoutTask, reject: rejectTimeout } =
       Promise.withResolvers<never>()
     const timeout = this.clock.setTimeout(() => {
@@ -717,7 +721,7 @@ export class PuppeteerCaptureEngine {
     }, RECORDER_STOP_TIMEOUT_MS)
     timeout.unref()
     try {
-      await Promise.race([recorder.stop(), timeoutTask])
+      await Promise.race([recorder.stop(options), timeoutTask])
       return true
     } catch (error) {
       // An expected deadline, not a crash: a stack trace only adds noise.

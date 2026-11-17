@@ -17,6 +17,7 @@ import {
   type PromotionPlan,
   SpoolPromotion,
 } from '../../src/service/spool-promotion.js'
+import { createControlledDelays } from '../utils/controlled-delays.js'
 import {
   createFakeFfmpegProcess,
   type FakeFfmpegProcess,
@@ -119,6 +120,8 @@ const LIMITS: SpoolLimits = {
 }
 
 interface RigOptions {
+  /** How the recorder's delays end; at once by default. */
+  readonly delay?: ClockBoundary['delay']
   /** Free space the budget reads, as the spool volume reports it. */
   readonly freeBytes?: number
   readonly limits?: Partial<SpoolLimits>
@@ -135,7 +138,10 @@ const plannedPath = (): string => path.join(directory, 'segment.webm')
 
 const createRig = async (options: RigOptions = {}) => {
   const session = createSession()
-  const clock = createHoldClock()
+  const clock = {
+    ...createHoldClock(),
+    ...(options.delay ? { delay: options.delay } : {}),
+  }
   let monotonic = 0
   const processes: FakeFfmpegProcess[] = []
   const warnings: string[] = []
@@ -409,6 +415,33 @@ describe('a recorder across a promotion', () => {
     // More than the cap's worth of stream went to the encoder, uncapped.
     expect(rig.processes[0]?.bytes().length).toBeGreaterThan(450)
     expect(rig.recorder.incompleteReason).toBeUndefined()
+  })
+})
+
+describe('a promoted recorder at stop', () => {
+  it('waits for a frame on its way and gives it to the encoder that took over', async () => {
+    const delays = createControlledDelays()
+    const rig = await createRig({
+      delay: delays.delay,
+      limits: { promoteBytes: 400 },
+    })
+    await play(rig, FRAMES.slice(0, 20))
+    await switched(rig.recorder)
+    rig.advance(1_000)
+    const stopping = rig.recorder.stop()
+    await settle()
+    expect(rig.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested).toHaveLength(1)
+
+    // Painted after the last scripted frame, delivered during the wait.
+    rig.session.emitFrame('tail', 102.5)
+    await stopping
+
+    expect(rig.recorder.output.kind).toBe('encoded')
+    expect(labels(rig.processes[0]?.bytes() ?? Buffer.alloc(0)).at(-1)).toBe(
+      'tail',
+    )
+    expect(rig.processes[0]?.inputEnded()).toBe(true)
   })
 })
 

@@ -405,6 +405,8 @@ describe('Puppeteer capture engine', () => {
     expect(stopped.streamOk).toBe(true)
     expect(stopped.segment?.recordingPath).toBe(outputPath)
     expect(harness.session.hasCapture).toBe(false)
+    // A kept segment waits for a frame still on its way.
+    expect(harness.recorder.stop).toHaveBeenCalledWith({})
     await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe(
       'recorded-bytes',
     )
@@ -941,6 +943,8 @@ describe('Puppeteer capture engine', () => {
 
     expect(harness.session.isRecordingActive).toBe(false)
     expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    // Its media is removed, so no frame on its way is waited for.
+    expect(harness.recorder.stop).toHaveBeenCalledWith({ tailFrame: false })
     await expect(fs.stat(outputPath)).rejects.toThrow()
   })
 

@@ -56,6 +56,13 @@ const PROMOTION_ABORT_TIMEOUT_MS = 3_000
 // Blocks a spooling segment must always have room for: one more hold, and the
 // fill and two end markers that stopping writes.
 const RESERVED_BLOCKS = 4
+// Chrome captures a screencast frame after the paint: it reads the drawn
+// surface back and encodes it before sending it. A paint just before a stop
+// is still on its way when the stop is requested, so a stop that keeps the
+// recording waits this long for one more frame first. From paint to frame
+// took under 30 ms on quiet hosts and about 100 ms (p95) on a saturated
+// two-CPU container; a page that does not change pays the whole wait.
+export const TAIL_FRAME_WAIT_MS = 125
 
 export interface ScreencastCaptureOptions {
   readonly crop?: Readonly<CaptureCrop>
@@ -330,6 +337,8 @@ export class ScreencastRecorder {
   private received = 0
   private stopping: Promise<void> | undefined
   private stopped = false
+  // Settled by the next frame while a stop waits for a frame on its way.
+  private tailFrame: PromiseWithResolvers<void> | undefined
   private resolveFirstFrame: (() => void) | undefined
 
   /** Starts a recorder on an already opened sink and attached session. */
@@ -416,8 +425,13 @@ export class ScreencastRecorder {
     }
   }
 
-  async stop(): Promise<void> {
-    this.stopping ??= this.finish()
+  /**
+   * Ends the recording. By default it first waits a bounded time for a frame
+   * Chrome is still capturing; `tailFrame: false` skips that for a recording
+   * whose media is thrown away.
+   */
+  async stop(options: Readonly<{ tailFrame?: boolean }> = {}): Promise<void> {
+    this.stopping ??= this.finish(options.tailFrame ?? true)
     await this.stopping
   }
 
@@ -476,6 +490,8 @@ export class ScreencastRecorder {
     this.stopped = true
     this.stopHolding()
     this.session.off('Page.screencastFrame', this.onFrame)
+    // No frame can follow: a stop waiting for one goes on at once.
+    this.tailFrame?.resolve()
   }
 
   // A sink that closes early, an encoder that exits or a spool that cannot be
@@ -560,6 +576,8 @@ export class ScreencastRecorder {
 
   private onSinkClosed(): void {
     this.noteSinkFailure()
+    // A stop waiting for one more frame has nowhere to put it.
+    this.tailFrame?.resolve()
     if (this.stopping !== undefined || this.aborting !== undefined) {
       return
     }
@@ -582,6 +600,12 @@ export class ScreencastRecorder {
     void this.session
       .send('Page.screencastFrameAck', { sessionId: event.sessionId })
       .catch(() => undefined)
+    this.receiveFrame(event)
+    // Whatever became of it, a frame ends a stop's wait for one.
+    this.tailFrame?.resolve()
+  }
+
+  private receiveFrame(event: ScreencastFrameEvent): void {
     const timestamp = event.metadata.timestamp
     if (
       this.stopped ||
@@ -638,10 +662,13 @@ export class ScreencastRecorder {
     this.recordHighWater()
   }
 
-  private async finish(): Promise<void> {
+  private async finish(tailFrame: boolean): Promise<void> {
     // A replay still running is cancelled in this turn, so it cannot switch
     // while the recording ends; the spool is complete and is kept.
     const promotion = this.promotion?.cancel()
+    if (tailFrame) {
+      await this.awaitTailFrame()
+    }
     // Stopping the screencast flushes frames already in flight.
     await Promise.race([
       this.session.send('Page.stopScreencast').catch(() => undefined),
@@ -688,6 +715,29 @@ export class ScreencastRecorder {
     // A spool that could not flush what it was given is incomplete too.
     this.noteSinkFailure()
     await Promise.race([this.detachSession(), this.cancelled.promise])
+  }
+
+  // Until the next frame arrives, at most TAIL_FRAME_WAIT_MS. That frame goes
+  // through `onFrame` like any other, placed by its own timestamp. Capture
+  // that has stopped, or a sink that has closed, has no use for a frame, and
+  // an abort ends the wait at once.
+  private async awaitTailFrame(): Promise<void> {
+    if (this.stopped) {
+      return
+    }
+    const arrived = Promise.withResolvers<void>()
+    const expiry = new AbortController()
+    this.tailFrame = arrived
+    try {
+      await Promise.race([
+        arrived.promise,
+        this.clock.delay(TAIL_FRAME_WAIT_MS, expiry.signal),
+        this.cancelled.promise,
+      ])
+    } finally {
+      expiry.abort()
+      this.tailFrame = undefined
+    }
   }
 
   // Awaited between steps, so TypeScript would otherwise keep `aborting`

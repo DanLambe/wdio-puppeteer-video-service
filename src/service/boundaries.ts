@@ -6,7 +6,8 @@ import { isProcessAlive } from './retry-state.js'
 export interface ClockBoundary {
   clearInterval(timer: NodeJS.Timeout): void
   clearTimeout(timer: NodeJS.Timeout): void
-  delay(milliseconds: number): Promise<void>
+  /** Resolves after `milliseconds`, or early, quietly, once `signal` aborts. */
+  delay(milliseconds: number, signal?: AbortSignal): Promise<void>
   now(): number
   queueMicrotask(callback: () => void): void
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout
@@ -49,8 +50,10 @@ export const systemClock: ClockBoundary = {
   clearTimeout(timer): void {
     clearTimeout(timer)
   },
-  async delay(milliseconds): Promise<void> {
-    await delay(milliseconds)
+  async delay(milliseconds, signal): Promise<void> {
+    // Node rejects the wait only when it is aborted, which ends it early by
+    // design rather than failing it.
+    await delay(milliseconds, undefined, { signal }).catch(() => undefined)
   },
   now(): number {
     return Date.now()
