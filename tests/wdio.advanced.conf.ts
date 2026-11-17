@@ -245,6 +245,13 @@ const createServiceOptions = (overrides: ServiceOptions): ServiceOptions => {
   }
 }
 
+// Modes whose retained videos are the encoder's own WebM, not an H.264 MP4.
+const VP9_MODES: ReadonlySet<AdvancedMode> = new Set<AdvancedMode>([
+  'failure-burst',
+  'ffmpeg-failure',
+  'retry',
+])
+
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
@@ -647,8 +654,9 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos: modeExpectsNoVideos,
       mergeSegmentsEnabled: mergedArtifactsExpected,
       fileNameStyle,
-      expectedCodec:
-        mode === 'ffmpeg-failure' || mode === 'failure-burst' ? 'vp9' : 'h264',
+      // These modes keep the encoder's WebM (no transcode); `retry` does so
+      // for the offline report's playback check.
+      expectedCodec: VP9_MODES.has(mode) ? 'vp9' : 'h264',
       runLabel: `advanced-${mode}`,
     })
     await assertNoSpoolsLeft(resultsDir)
