@@ -305,6 +305,80 @@ describe('WdioPuppeteerVideoLauncher', () => {
       expect(cleanupGlobalSlotRunDirectory).toHaveBeenCalledOnce()
     })
 
+    it('throws the manifest error, not the later recovery error, and logs both', async () => {
+      const outputDir = await createTempDir()
+      const manifestFailure = new Error('aggregation failed')
+      const cleanupGlobalSlotRunDirectory = vi.fn(async () => undefined)
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          aggregateManifestRun: async () => {
+            throw manifestFailure
+          },
+          cleanupGlobalSlotRunDirectory,
+          recoverOrphanedSpools: async () => {
+            throw new Error('disk on fire')
+          },
+        },
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).rejects.toBe(manifestFailure)
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining(
+          'Failed to aggregate manifest journals: aggregation failed',
+        ),
+        expect.stringContaining(
+          'Failed to recover orphaned frame spools: disk on fire',
+        ),
+      ])
+      expect(cleanupGlobalSlotRunDirectory).toHaveBeenCalledOnce()
+    })
+
+    it('throws the recovery error when nothing failed before it', async () => {
+      const outputDir = await createTempDir()
+      const recoveryFailure = new Error('disk on fire')
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          recoverOrphanedSpools: async () => {
+            throw recoveryFailure
+          },
+        },
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).rejects.toBe(recoveryFailure)
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('Failed to recover orphaned frame spools'),
+      ])
+    })
+
+    it('throws nothing under failurePolicy warn and logs every failure', async () => {
+      const outputDir = await createTempDir()
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          aggregateManifestRun: async () => {
+            throw new Error('aggregation failed')
+          },
+          recoverOrphanedSpools: async () => {
+            throw new Error('disk on fire')
+          },
+        },
+        { failurePolicy: 'warn' },
+      )
+
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('Failed to aggregate manifest journals'),
+        expect.stringContaining('Failed to recover orphaned frame spools'),
+      ])
+    })
+
     it('refuses a run directory that is a link and leaves its target alone', async () => {
       const outputDir = await createTempDir()
       const elsewhere = await createTempDir()
