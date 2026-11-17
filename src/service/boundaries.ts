@@ -13,6 +13,12 @@ export interface ClockBoundary {
   setTimeout(callback: () => void, milliseconds: number): NodeJS.Timeout
 }
 
+/** Free space on the volume that holds a directory. */
+export interface DiskSpaceBoundary {
+  /** Bytes available to this process; rejects when they cannot be read. */
+  freeBytes(directory: string): Promise<number>
+}
+
 export interface FileStatsBoundary {
   birthtimeMs?: number
   dev?: number
@@ -75,6 +81,13 @@ export const nodeFileSystem: FileSystemBoundary = {
   },
   async unlink(filePath): Promise<void> {
     await fs.unlink(filePath)
+  },
+}
+
+export const nodeDiskSpace: DiskSpaceBoundary = {
+  async freeBytes(directory): Promise<number> {
+    const stats = await fs.statfs(directory)
+    return Number(stats.bavail) * Number(stats.bsize)
   },
 }
 

@@ -8,6 +8,10 @@ const spooling = ['auto', 'deferred'].includes(
   process.env.WDIO_CAPTURE_ENCODING ?? '',
 )
 
+// With a tiny promote limit (WDIO_SPOOL_PROMOTE_BYTES) a segment continues as
+// live encoding, so a part is a spool or an encoder's WebM, never a mix-up.
+const promoting = Boolean(process.env.WDIO_SPOOL_PROMOTE_BYTES)
+
 const listSpools = async (): Promise<string[]> =>
   (
     await readdir(path.join(resultsDir, '.wdio-video-spool'), {
@@ -23,10 +27,14 @@ const expectUnprocessedSegments = async (stoppedSegments: number) => {
     /_part\d+\.(mp4|webm)$/u.test(name),
   )
   expect(parts.filter((name) => name.endsWith('.mp4'))).toEqual([])
-  expect(parts.filter((name) => name.endsWith('.webm'))).toHaveLength(
-    spooling ? 0 : stoppedSegments + 1,
-  )
-  expect(await listSpools()).toHaveLength(spooling ? stoppedSegments + 1 : 0)
+  const webm = parts.filter((name) => name.endsWith('.webm'))
+  const spools = await listSpools()
+  if (promoting) {
+    expect(webm.length + spools.length).toBe(stoppedSegments + 1)
+    return
+  }
+  expect(webm).toHaveLength(spooling ? 0 : stoppedSegments + 1)
+  expect(spools).toHaveLength(spooling ? stoppedSegments + 1 : 0)
 }
 
 describe('Advanced E2E - Retention', () => {

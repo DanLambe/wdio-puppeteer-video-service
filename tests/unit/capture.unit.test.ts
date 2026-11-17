@@ -15,6 +15,10 @@ import type {
   ScreencastRecorder,
   ScreencastRecorderOptions,
 } from '../../src/service/screencast-recorder.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  SpoolBudget,
+} from '../../src/service/spool-budget.js'
 
 const createRecorder = (): ScreencastRecorder => {
   return { id: 'recorder' } as unknown as ScreencastRecorder
@@ -127,6 +131,31 @@ describe('Puppeteer screencast capture controls', () => {
       speed: capture.speed,
       spoolPath: 'segment.spool.mkv',
     })
+  })
+
+  it("hands the recording's spool budget to the recorder", async () => {
+    const recorder = createRecorder()
+    const record = vi.fn(
+      async (_page: Page, _options: ScreencastRecorderOptions) => recorder,
+    )
+    const capture = resolveServiceConfiguration({}).options.capture
+    const budget = new SpoolBudget(DEFAULT_SPOOL_LIMITS, {
+      freeBytes: async () => 0,
+    })
+
+    await startScreencast(
+      { viewport: () => null } as unknown as Page,
+      {
+        budget,
+        capture,
+        format: 'webm',
+        ffmpegPath: 'ffmpeg',
+        spoolPath: 'segment.spool.mkv',
+      },
+      record,
+    )
+
+    expect(record.mock.calls[0]?.[1]).toMatchObject({ budget })
   })
 
   it('restores native viewport mode when screencast initialization fails', async () => {

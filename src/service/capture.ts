@@ -115,6 +115,8 @@ export const createScreencastOptions = (
   return {
     ...settings,
     spoolPath: options.spoolPath,
+    ...(options.budget ? { budget: options.budget } : {}),
+    ...(options.promotion ? { promotion: options.promotion } : {}),
     ...(options.onSpoolCleanupFailure
       ? { onSpoolCleanupFailure: options.onSpoolCleanupFailure }
       : {}),

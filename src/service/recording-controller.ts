@@ -8,6 +8,7 @@ import {
   type SlugMetadata,
 } from '../video-name-utils.js'
 import { reserveArtifactPath } from './artifact-integrity.js'
+import { type DiskSpaceBoundary, nodeDiskSpace } from './boundaries.js'
 import {
   type CaptureSession,
   type HeldSegment,
@@ -34,6 +35,11 @@ import { RecordingLifecycle } from './recording-lifecycle.js'
 import type { RecordingMediaCoordinator } from './recording-media-coordinator.js'
 import { selectCaptureMode } from './recording-policy.js'
 import type { RecordingSlotScheduler } from './recording-slots.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  SpoolBudget,
+  type SpoolLimits,
+} from './spool-budget.js'
 import type { RecordingMediaFinalization } from './worker-recording-coordinator.js'
 
 // A tab that fails to start recording is retried on later commands, a few
@@ -68,7 +74,11 @@ type RecordingSlotPort = Pick<
 export interface SpoolStorage {
   /** This run's spool directory, `<outputDir>/.wdio-video-spool/<runId>`. */
   readonly directory: string
+  /** Reads the spool volume's free space; the system's by default. */
+  readonly diskSpace?: DiskSpaceBoundary
   readonly encoder: Pick<DeferredEncoder, 'encodeAll' | 'preserveFrames'>
+  /** What one recording may spool; `DEFAULT_SPOOL_LIMITS` by default. */
+  readonly limits?: SpoolLimits
   readonly uuid: () => string
 }
 
@@ -106,6 +116,7 @@ export class RecordingController implements ContextFollowerTarget {
   private recordingRetryCount = 0
   private recordingTask: Promise<void> = Promise.resolve()
   private readonly recordingSlotScheduler: RecordingSlotPort
+  private spoolBudget: SpoolBudget | undefined
   private sessionFullToken = ''
   private sessionToken = ''
   private readonly slugUsageCount = new Map<string, number>()
@@ -370,6 +381,7 @@ export class RecordingController implements ContextFollowerTarget {
     this.failedStarts.clear()
     this.unconfirmedGap = undefined
     this.recordingRetryCount = retryCount
+    this.spoolBudget = this.createSpoolBudget()
     return this.startRecording()
   }
 
@@ -765,6 +777,9 @@ export class RecordingController implements ContextFollowerTarget {
             ? this.reserveRecordingOutput(this.createRecordingOutput())
             : this.createRecordingOutput(),
         ffmpegPath: this.ffmpegRuntime.resolvePath(),
+        ...(spoolPath === undefined || !this.spoolBudget
+          ? {}
+          : { budget: this.spoolBudget }),
         ...(spoolPath === undefined ? {} : { spoolPath }),
         ...(target ? { target } : {}),
         transcodeOptions: this.options.processing.transcode,
@@ -826,13 +841,26 @@ export class RecordingController implements ContextFollowerTarget {
       retain: this.options.recording.retain,
       retryCount: this.recordingRetryCount,
     })
-    if (mode === 'live') {
+    // A recording that has used its spool allowance, or the volume's free
+    // space, continues as live encoding: later segments start live.
+    if (mode === 'live' || this.spoolBudget?.promoted) {
       return undefined
     }
     const part = this.captureSession.currentSegment.toString()
     return path.join(
       storage.directory,
       `${this.captureSession.currentTestSlug}_part${part}.${storage.uuid()}.mkv`,
+    )
+  }
+
+  private createSpoolBudget(): SpoolBudget | undefined {
+    const storage = this.spoolStorage
+    if (!storage) {
+      return undefined
+    }
+    return new SpoolBudget(
+      storage.limits ?? DEFAULT_SPOOL_LIMITS,
+      storage.diskSpace ?? nodeDiskSpace,
     )
   }
 

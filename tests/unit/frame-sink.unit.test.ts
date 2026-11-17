@@ -246,6 +246,7 @@ describe('spool sink', () => {
     sink.write(Buffer.from('header'))
     sink.write(Buffer.from('-block'))
     expect(sink.bytesWritten + sink.bytesBuffered).toBe(12)
+    expect(sink.bytesAccepted).toBe(12)
 
     await sink.end()
 

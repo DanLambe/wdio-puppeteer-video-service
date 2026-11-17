@@ -716,8 +716,7 @@ describe('deferred encoder over the real FFmpeg runtime', () => {
         platform: 'linux',
       },
       processRegistry: new FfmpegProcessRegistry(),
-      readVersion: async () => '7.1',
-      resolveAvailablePath: async () => 'ffmpeg',
+      resolveFfmpeg: async () => ({ path: 'ffmpeg', version: '7.1' }),
       runFfmpeg,
     })
     return { release, runFfmpeg, runtime }

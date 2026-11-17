@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  nodeDiskSpace,
   nodeFileSystem,
   nodeProcess,
   systemClock,
@@ -54,6 +55,18 @@ describe('service runtime boundaries', () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('reads the free space of the volume holding a directory', async () => {
+    const free = await nodeDiskSpace.freeBytes(os.tmpdir())
+
+    expect(Number.isFinite(free)).toBe(true)
+    expect(free).toBeGreaterThanOrEqual(0)
+    await expect(
+      nodeDiskSpace.freeBytes(
+        path.join(os.tmpdir(), 'wdio-no-such-directory-1'),
+      ),
+    ).rejects.toThrow()
   })
 
   it('exposes process properties and environment lookup', () => {

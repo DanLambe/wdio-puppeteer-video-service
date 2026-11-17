@@ -20,6 +20,10 @@ import {
   type ScreencastRecorderOptions,
 } from '../../src/service/screencast-recorder.js'
 import {
+  SpoolBudget,
+  type SpoolLimits,
+} from '../../src/service/spool-budget.js'
+import {
   type GridFrame,
   gridFrames,
   parseMatroskaStream,
@@ -2041,7 +2045,9 @@ const startedOnFirstFrame = (timestamp: number) =>
 
 // `startRecorder`, spooling to a fake file instead of spawning FFmpeg.
 const startSpoolRecorder = async (
-  recorderOptions: Partial<ScreencastCaptureOptions> = {},
+  recorderOptions: Partial<ScreencastCaptureOptions> & {
+    budget?: SpoolBudget
+  } = {},
   spool = createFakeSpool(),
   clock: ClockBoundary = createClock(),
   queueLimits?: { maxPendingBytes?: number; maxPendingBlocks?: number },
@@ -2463,5 +2469,265 @@ describe('screencast recorder deferred startup', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+const BUDGET_LIMITS: SpoolLimits = {
+  promoteBytes: 1_000_000,
+  hardCapBytes: 1_000_000,
+  promoteFreeBytes: 0,
+  stopFreeBytes: 0,
+  freeCheckIntervalBytes: 1_000_000,
+}
+
+const createBudget = (
+  limits: Partial<SpoolLimits> = {},
+  freeBytes: () => Promise<number> = async () => Number.MAX_SAFE_INTEGER,
+): SpoolBudget =>
+  new SpoolBudget({ ...BUDGET_LIMITS, ...limits }, { freeBytes })
+
+const LIMIT_REASON =
+  /^The recording's frame spools reached the disk limit of \d+ bytes; capture stopped after \d+\.\ds to bound disk use\.$/u
+
+// The labels shown, in order, once a recording has stopped.
+const shownLabels = (frames: GridFrame[]): string[] => {
+  return [...new Set(shown(frames))]
+}
+
+describe('screencast recorder spool budget', () => {
+  it('stops at the hard cap with every earlier span intact and writes nothing past it', async () => {
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const cap = header + 400
+    const run = await startSpoolRecorder({
+      budget: createBudget({ hardCapBytes: cap }),
+      fps: 10,
+    })
+    const labels = ['start']
+    for (
+      let step = 1;
+      step <= 60 && !run.recorder.incompleteReason;
+      step += 1
+    ) {
+      const label = `f${step.toString().padStart(2, '0')}`
+      run.frame(label, 100 + step / 10)
+      await settle()
+      if (!run.recorder.incompleteReason) {
+        labels.push(label)
+      }
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(labels.length).toBeGreaterThan(3)
+    expect(labels.length).toBeLessThan(40)
+
+    await run.recorder.stop()
+
+    expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    // Every frame accepted before the cap still has its own span, in order.
+    expect(shownLabels(run.frames(10))).toEqual(labels)
+    expect(run.recorder.output.kind).toBe('spool')
+  })
+
+  it('stops a static page whose holds would pass the cap, and still ends the video', async () => {
+    const clock = createHoldClock()
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const cap = header + 350
+    const run = await startSpoolRecorder(
+      { budget: createBudget({ hardCapBytes: cap }), fps: 10 },
+      undefined,
+      clock,
+    )
+    for (
+      let hold = 0;
+      hold < 100 && !run.recorder.incompleteReason;
+      hold += 1
+    ) {
+      run.advance(1_000)
+      clock.tick()
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    expect(clock.cleared()).toBe(true)
+
+    run.advance(2_000)
+    await run.recorder.stop()
+
+    expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    expect(shownLabels(run.frames(10))).toEqual(['start'])
+  })
+
+  it('never lets what stopping writes carry the spool past the cap', async () => {
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    for (const room of [140, 150, 200, 260]) {
+      const cap = header + room
+      const run = await startSpoolRecorder({
+        budget: createBudget({ hardCapBytes: cap }),
+        fps: 10,
+      })
+      for (let step = 1; step <= 30; step += 1) {
+        run.frame(`f${step.toString()}`, 100 + step / 10)
+        await settle()
+      }
+      run.advance(5_000)
+      await run.recorder.stop()
+      expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    }
+  })
+
+  it('asks for promotion at the promote threshold and promotes later segments', async () => {
+    const budget = createBudget({ promoteBytes: 400 })
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    expect(budget.promoted).toBe(false)
+    for (let step = 1; step <= 40; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    expect(header).toBeLessThan(400)
+    expect(budget.promoted).toBe(true)
+    // Until a segment can continue live, it keeps spooling.
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(run.recorder.output.kind).toBe('spool')
+    await run.recorder.stop()
+  })
+
+  it('counts the sealed spools of the recording, so small segments reach the limit together', async () => {
+    const budget = createBudget({ hardCapBytes: 1_200 })
+    const sealedSizes: number[] = []
+    for (let segment = 0; segment < 3; segment += 1) {
+      const run = await startSpoolRecorder({ budget, fps: 10 })
+      run.frame('a', 101)
+      await settle()
+      await run.recorder.stop()
+      sealedSizes.push(run.bytes().length)
+      expect(run.recorder.incompleteReason).toBeUndefined()
+    }
+    const sealed = sealedSizes.reduce((total, size) => total + size, 0)
+    expect(budget.bytes).toBe(sealed)
+    expect(sealed).toBeLessThan(1_200)
+
+    // The fourth segment alone is nowhere near the cap; the recording is.
+    const last = await startSpoolRecorder({ budget, fps: 10 })
+    for (
+      let step = 1;
+      step <= 40 && !last.recorder.incompleteReason;
+      step += 1
+    ) {
+      last.frame(`g${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+    expect(last.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    await last.recorder.stop()
+    expect(budget.bytes).toBeLessThanOrEqual(1_200)
+    expect(last.bytes().length).toBeLessThan(1_200 - sealed + 1)
+  })
+
+  it('stops a spooling segment below the lower free-space floor', async () => {
+    const budget = createBudget(
+      { promoteFreeBytes: 2_000, stopFreeBytes: 500 },
+      async () => 100,
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await vi.waitFor(() => {
+      expect(run.recorder.incompleteReason).toBe(
+        'Free disk space for the frame spool fell to 100 bytes, below the floor of 500 bytes; capture stopped after 0.0s to bound disk use.',
+      )
+    })
+
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(budget.promoted).toBe(true)
+    await run.recorder.stop()
+    expect(shownLabels(run.frames(10))).toEqual(['start'])
+  })
+
+  it('keeps recording when the free space is low but above the lower floor', async () => {
+    const freeBytes = vi.fn(async () => 1_000)
+    const budget = new SpoolBudget(
+      { ...BUDGET_LIMITS, promoteFreeBytes: 2_000, stopFreeBytes: 500 },
+      { freeBytes },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await settle()
+
+    expect(freeBytes).toHaveBeenCalledOnce()
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(budget.promoted).toBe(true)
+    await run.recorder.stop()
+  })
+
+  it('keeps recording when the free space cannot be read', async () => {
+    const budget = createBudget(
+      {
+        freeCheckIntervalBytes: 50,
+        promoteFreeBytes: 2_000,
+        stopFreeBytes: 500,
+      },
+      async () => {
+        throw new Error('statfs failed')
+      },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    for (let step = 1; step <= 20; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(budget.promoted).toBe(false)
+    await run.recorder.stop()
+  })
+
+  it('checks the free space again after each further interval written', async () => {
+    const freeBytes = vi.fn(async () => Number.MAX_SAFE_INTEGER)
+    const budget = new SpoolBudget(
+      { ...BUDGET_LIMITS, freeCheckIntervalBytes: 100 },
+      { freeBytes },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await settle()
+    expect(freeBytes).toHaveBeenCalledOnce()
+    for (let step = 1; step <= 30; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    const written = run.bytes().length
+    expect(freeBytes.mock.calls.length).toBeGreaterThan(1)
+    expect(freeBytes.mock.calls.length).toBeLessThanOrEqual(
+      1 + Math.floor(written / 100),
+    )
+    await run.recorder.stop()
+  })
+
+  it('leaves the budget when the segment fails to start', async () => {
+    const budget = createBudget()
+    const spool = createFakeSpool()
+    const session = createFakeSession()
+    vi.mocked(session.send).mockRejectedValueOnce(new Error('Target closed'))
+
+    await expect(
+      recordScreencast(
+        createPage(session),
+        { ...spoolOptions, budget },
+        { openSpoolFile: spool.open },
+      ),
+    ).rejects.toThrow('Target closed')
+
+    // The header was written before the failure; the spool is not kept.
+    expect(budget.bytes).toBe(0)
+  })
+
+  it('does not bound an encoder sink', async () => {
+    const budget = createBudget({ hardCapBytes: 1 })
+    const run = await startRecorder({ fps: 10 })
+    run.frame('a', 101)
+    await settle()
+
+    expect(budget.bytes).toBe(0)
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    await run.recorder.stop()
   })
 })

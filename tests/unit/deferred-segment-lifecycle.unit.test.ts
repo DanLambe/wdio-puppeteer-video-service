@@ -3,7 +3,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
-import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
+import {
+  type DiskSpaceBoundary,
+  nodeFileSystem,
+  systemClock,
+} from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import {
   DeferredEncoder,
@@ -24,6 +28,10 @@ import {
 } from '../../src/service/recording-controller.js'
 import { RecordingMediaCoordinator } from '../../src/service/recording-media-coordinator.js'
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  type SpoolLimits,
+} from '../../src/service/spool-budget.js'
 import {
   type RecordingAllurePort,
   type RecordingManifestPort,
@@ -85,6 +93,8 @@ interface HarnessOptions {
     Pick<DeferredEncoderOptions, 'clock' | 'limits' | 'linkFile'>
   >
   readonly service?: WdioPuppeteerVideoServiceOptions
+  readonly spoolDiskSpace?: DiskSpaceBoundary
+  readonly spoolLimits?: SpoolLimits
   readonly spoolStorage?: boolean
 }
 
@@ -324,7 +334,13 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
       : {
           spoolStorage: {
             directory: spoolDirectory,
+            ...(harnessOptions.spoolDiskSpace
+              ? { diskSpace: harnessOptions.spoolDiskSpace }
+              : {}),
             encoder,
+            ...(harnessOptions.spoolLimits
+              ? { limits: harnessOptions.spoolLimits }
+              : {}),
             uuid: () => {
               uuidIndex += 1
               return `uuid-${uuidIndex.toString()}`
@@ -368,6 +384,92 @@ const spoolPathsOf = (
   harness: ReturnType<typeof createHarness>,
 ): (string | undefined)[] =>
   harness.startCapture.mock.calls.map(([start]) => start.spoolPath)
+
+describe('the spool budget of a recording', () => {
+  const budgetsOf = (harness: ReturnType<typeof createHarness>) =>
+    harness.startCapture.mock.calls.map(([start]) => start.budget)
+
+  it('gives every spooled part the same budget, built from the storage limits and disk', async () => {
+    const limits = { ...DEFAULT_SPOOL_LIMITS, promoteBytes: 1_234 }
+    const diskSpace = { freeBytes: vi.fn(async () => 5) }
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+      spoolDiskSpace: diskSpace,
+      spoolLimits: limits,
+    })
+
+    await harness.recordThreeTabs()
+
+    const [first, second, third] = budgetsOf(harness)
+    expect(first).toBeDefined()
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+    expect(first?.limits).toBe(limits)
+    await expect(first?.readFreeBytes('/spool')).resolves.toBe(5)
+    expect(diskSpace.freeBytes).toHaveBeenCalledWith('/spool')
+  })
+
+  it('defaults to the default limits', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+    })
+
+    await harness.recordThreeTabs()
+
+    expect(budgetsOf(harness)[0]?.limits).toBe(DEFAULT_SPOOL_LIMITS)
+  })
+
+  it('starts a new recording with a new, empty budget', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+    })
+    await harness.controller.startForMetadata(METADATA, 0)
+    const first = budgetsOf(harness)[0]
+    first?.markPromoted()
+    await harness.controller.finalizeMedia(true, false)
+    await harness.controller.reset()
+
+    await harness.controller.startForMetadata(METADATA, 0)
+
+    const second = budgetsOf(harness)[1]
+    expect(second).toBeDefined()
+    expect(second).not.toBe(first)
+    expect(second?.promoted).toBe(false)
+    // The new recording spools again.
+    expect(spoolPathsOf(harness)[1]).toBeDefined()
+  })
+
+  it('starts the later parts live once the recording has used its spool allowance', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+    })
+    await harness.controller.startForMetadata(METADATA, 0)
+    // What a segment's budget does when the recording's spools reach the
+    // promote threshold, wherever their bytes are.
+    budgetsOf(harness)[0]?.markPromoted()
+    await harness.controller.followContext('tab-b', 'command')
+    await harness.controller.followContext('tab-a', 'switch-to-window')
+
+    expect(spoolPathsOf(harness)).toEqual([
+      harness.spoolOf(1),
+      undefined,
+      undefined,
+    ])
+    expect(budgetsOf(harness)[1]).toBeUndefined()
+    // The earlier spool stays until the recording's end.
+    expect(
+      harness.session.heldSegments.map((held) => held.spool?.path),
+    ).toEqual([harness.spoolOf(1), undefined])
+  })
+
+  it('gives a live recording no budget', async () => {
+    const harness = createHarness()
+
+    await harness.recordThreeTabs()
+
+    expect(budgetsOf(harness)).toEqual([undefined, undefined, undefined])
+  })
+})
 
 describe('deferred segment capture', () => {
   it.each([

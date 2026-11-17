@@ -219,6 +219,8 @@ export class WdioPuppeteerVideoWorkerRuntime
                   this._log(level, message, details)
                 },
               }),
+              diskSpace: composition.diskSpace,
+              limits: composition.spoolLimits,
               uuid: composition.uuid,
             },
           }

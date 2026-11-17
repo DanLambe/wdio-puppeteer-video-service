@@ -2,6 +2,7 @@ import path from 'node:path'
 import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
+import { reserveArtifactPath } from './artifact-integrity.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import {
   BROWSER_RENDER_TIMEOUT_MS,
@@ -36,6 +37,8 @@ import {
   type SessionProtocol,
 } from './protocol.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
+import type { SpoolBudget } from './spool-budget.js'
+import type { PromotionPlan } from './spool-promotion.js'
 
 export interface CaptureSegmentOutput {
   readonly outputFormat: OutputFormat
@@ -64,6 +67,8 @@ export interface CaptureStartOptions {
    * directory is created; a start that fails removes the file.
    */
   readonly spoolPath?: string
+  /** The recording's spool budget, for a spooled segment. */
+  readonly budget?: SpoolBudget
   readonly target?: CaptureTarget
   readonly transcodeOptions: ResolvedTranscodeOptions
 }
@@ -118,6 +123,11 @@ export interface PuppeteerCaptureEngineOptions {
   readonly log: ServiceLogger
   readonly onConnectionFailure: (reason: string) => void
   readonly onProtocolChanged: (protocol: SessionProtocol) => void
+  /**
+   * Reserves a promoted segment's output, as a live segment's is reserved at
+   * its start; `reserveArtifactPath` by default.
+   */
+  readonly reserveOutput?: (plannedPath: string) => Promise<string>
   readonly session: CaptureSession
   readonly startScreencast: (
     page: Page,
@@ -135,6 +145,7 @@ export class PuppeteerCaptureEngine {
   private readonly log: ServiceLogger
   private readonly onConnectionFailure: (reason: string) => void
   private readonly onProtocolChanged: (protocol: SessionProtocol) => void
+  private readonly reserveOutput: (plannedPath: string) => Promise<string>
   private activePage: Page | undefined
   private captureStartedAt: number | undefined
   private markerCounter = 0
@@ -151,6 +162,7 @@ export class PuppeteerCaptureEngine {
     this.log = options.log
     this.onConnectionFailure = options.onConnectionFailure
     this.onProtocolChanged = options.onProtocolChanged
+    this.reserveOutput = options.reserveOutput ?? reserveArtifactPath
     this.session = options.session
     this.startScreencast = options.startScreencast
     this.uuid = options.uuid
@@ -413,9 +425,14 @@ export class PuppeteerCaptureEngine {
         spoolPath === undefined
           ? { outputPath: path.resolve(output.recordingPath) }
           : {
+              ...(options.budget ? { budget: options.budget } : {}),
               onSpoolCleanupFailure: (message: string) => {
                 this.log('warn', message)
               },
+              promotion: this.createPromotionPlan(
+                options.ffmpegPath,
+                output.recordingPath,
+              ),
               spoolPath: path.resolve(spoolPath),
             }
       const recorder = await this.startScreencast(page, {
@@ -463,6 +480,45 @@ export class PuppeteerCaptureEngine {
     }
   }
 
+  // What a promotion needs from the layer that owns files: it reserves the
+  // segment's planned output like a live start, and removes what it made.
+  private createPromotionPlan(
+    ffmpegPath: string,
+    plannedPath: string,
+  ): PromotionPlan {
+    return {
+      ffmpegPath,
+      plannedPath,
+      remove: async (filePath, description) => {
+        await removeFileWithRetry(
+          { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
+          filePath,
+          description,
+        )
+      },
+      reserveOutput: (planned) => this.reserveOutput(planned),
+      warn: (message) => {
+        this.log('warn', message)
+      },
+    }
+  }
+
+  // A promoted segment is live in every respect, at the path its promotion
+  // reserved: that may differ from the planned one by a collision suffix.
+  private adoptPromotedOutput(
+    recorder: ScreencastRecorder,
+    segment: ActiveSegment,
+  ): void {
+    const { output } = recorder
+    if (output.kind !== 'encoded' || output.outputPath === undefined) {
+      return
+    }
+    segment.recordingPath = output.outputPath
+    segment.outputPath = segment.transcode
+      ? replaceFileExtension(output.outputPath, segment.outputFormat)
+      : output.outputPath
+  }
+
   async stopCapture(
     options: Readonly<{ discard?: boolean }> = {},
   ): Promise<CaptureStopResult> {
@@ -471,6 +527,7 @@ export class PuppeteerCaptureEngine {
     if (!recorder) {
       return { capturedSeconds, segment: undefined, streamOk: false }
     }
+    this.adoptPromotedOutput(recorder, segment)
     // Read first: a spool has no encoder, and so no encoder result to check.
     const { output } = recorder
     const spool = output.kind === 'spool' ? output.spool : undefined
@@ -520,6 +577,9 @@ export class PuppeteerCaptureEngine {
   async resetRecording(): Promise<CaptureResetResult> {
     const { recorder, segment } = this.session.detachCapture()
     this.endCaptureClock()
+    if (recorder) {
+      this.adoptPromotedOutput(recorder, segment)
+    }
     const output = recorder?.output
     if (recorder && output?.kind === 'spool') {
       await this.stopRecorder(recorder)
@@ -621,6 +681,11 @@ export class PuppeteerCaptureEngine {
   ): Promise<void> {
     if (recorder) {
       await this.stopRecorder(recorder)
+      // A promotion that finished before the start failed wrote elsewhere.
+      const { output } = recorder
+      if (output.kind === 'encoded' && output.outputPath !== undefined) {
+        await this.removeRecordingFile(output.outputPath)
+      }
     }
     if (recordingPath) {
       await this.removeRecordingFile(recordingPath)
@@ -778,6 +843,14 @@ export class PuppeteerCaptureEngine {
   async currentWindowHandle(): Promise<string | undefined> {
     return this.session.browser?.getWindowHandle().catch(() => undefined)
   }
+}
+
+const replaceFileExtension = (
+  filePath: string,
+  format: OutputFormat,
+): string => {
+  const parsed = path.parse(filePath)
+  return path.join(parsed.dir, `${parsed.name}.${format}`)
 }
 
 const createActiveSegment = (

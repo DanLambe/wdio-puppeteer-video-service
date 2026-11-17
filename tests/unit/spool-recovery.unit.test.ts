@@ -19,7 +19,7 @@ import {
 } from '../../src/service/spool-recovery.js'
 
 const RUN_ID = 'current-run'
-const TRACK = { codec: 'jpeg', fps: 25, height: 600, width: 800 } as const
+const TRACK = { codec: 'png', fps: 25, height: 600, width: 800 } as const
 
 let outputDir = ''
 let logs: Array<{ level: string; message: string }> = []
