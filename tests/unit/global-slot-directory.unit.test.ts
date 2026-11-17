@@ -4,6 +4,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   cleanupGlobalSlotRunDirectory,
+  isDirectChildDirectory,
   resolveGlobalSlotRunDirectories,
 } from '../../src/service/global-slot-directory.js'
 
@@ -74,5 +75,26 @@ describe('global slot run directories', () => {
     } finally {
       await fs.rm(lockDir, { force: true, recursive: true })
     }
+  })
+})
+
+describe('direct child directories', () => {
+  const root = path.join(os.tmpdir(), 'slot-root')
+
+  it('accepts a direct child, however the paths are spelled', () => {
+    expect(isDirectChildDirectory(root, path.join(root, 'run-1'))).toBe(true)
+    expect(isDirectChildDirectory(root, path.join(root, '.', 'run-1'))).toBe(
+      true,
+    )
+  })
+
+  it.each([
+    ['the root itself', root],
+    ['a sibling of the root', path.join(root, '..', 'sibling')],
+    ['a parent of the root', path.dirname(root)],
+    ['a grandchild', path.join(root, 'run-1', 'nested')],
+    ['a path that climbs out', path.join(root, 'run-1', '..', '..', 'x')],
+  ])('refuses %s', (_name, directory) => {
+    expect(isDirectChildDirectory(root, directory)).toBe(false)
   })
 })

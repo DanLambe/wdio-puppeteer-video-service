@@ -34,6 +34,7 @@ import {
   RecordingSlotScheduler,
 } from './recording-slots.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
+import { recoverOrphanedSpools } from './spool-recovery.js'
 import {
   createWorkerRecordingCoordinator,
   type RecordingCoordinatorFactory,
@@ -185,6 +186,7 @@ export interface LauncherCompositionOverrides {
   readonly cleanupGlobalSlotRunDirectory?: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext?: typeof createManifestRunContext
   readonly generateVideoReportForRun?: typeof generateVideoReportForRun
+  readonly recoverOrphanedSpools?: typeof recoverOrphanedSpools
   readonly uuid?: UuidFactory
   readonly writeLog?: typeof writeLog
 }
@@ -194,6 +196,7 @@ export interface LauncherCompositionRoot {
   readonly cleanupGlobalSlotRunDirectory: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext: typeof createManifestRunContext
   readonly generateVideoReportForRun: typeof generateVideoReportForRun
+  readonly recoverOrphanedSpools: typeof recoverOrphanedSpools
   readonly uuid: UuidFactory
   readonly writeLog: typeof writeLog
 }
@@ -210,6 +213,8 @@ export const createLauncherCompositionRoot = (
       overrides.createManifestRunContext ?? createManifestRunContext,
     generateVideoReportForRun:
       overrides.generateVideoReportForRun ?? generateVideoReportForRun,
+    recoverOrphanedSpools:
+      overrides.recoverOrphanedSpools ?? recoverOrphanedSpools,
     uuid: overrides.uuid ?? randomUUID,
     writeLog: overrides.writeLog ?? writeLog,
   })

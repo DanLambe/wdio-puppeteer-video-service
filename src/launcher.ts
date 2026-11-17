@@ -142,9 +142,25 @@ export default class WdioPuppeteerVideoLauncher
       this._manifestRunContext = undefined
       this._runId = undefined
       if (runId) {
-        await this._cleanupGlobalSlots(runId)
+        try {
+          await this._recoverSpools(runId)
+        } finally {
+          await this._cleanupGlobalSlots(runId)
+        }
       }
     }
+  }
+
+  private async _recoverSpools(runId: string): Promise<void> {
+    await this._runManifestTask('recover orphaned frame spools', () =>
+      this._composition.recoverOrphanedSpools({
+        log: (level, message, details) => {
+          this._log(level, message, details)
+        },
+        outputDir: this._options.outputDir,
+        runId,
+      }),
+    )
   }
 
   private async _cleanupGlobalSlots(runId: string): Promise<void> {

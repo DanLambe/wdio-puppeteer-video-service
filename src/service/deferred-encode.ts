@@ -1,11 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { ResolvedConcurrencyOptions } from '../types.js'
-import {
-  ARTIFACT_PATH_CANDIDATE_LIMIT,
-  getCollisionPath,
-  reserveArtifactPath,
-} from './artifact-integrity.js'
+import { reserveArtifactPath } from './artifact-integrity.js'
 import type { ClockBoundary, FileSystemBoundary } from './boundaries.js'
 import type { SegmentTab, SpooledSegment } from './capture-session.js'
 import type { ActiveSegment, OutputFormat } from './constants.js'
@@ -13,6 +9,12 @@ import type { FfmpegRunResult } from './ffmpeg-runner.js'
 import type { FfmpegRuntime } from './ffmpeg-runtime.js'
 import { removeFileWithRetry } from './file-removal.js'
 import type { ScreencastSpool } from './frame-sink.js'
+import {
+  describeConversion,
+  type FramesFileMove,
+  type LinkFile,
+  moveSpoolToFramesFile,
+} from './frames-file.js'
 import type { ServiceLogger } from './logging.js'
 import { describeError } from './normalization.js'
 import {
@@ -99,7 +101,7 @@ export interface DeferredEncoderOptions {
   readonly fileSystem: Pick<FileSystemBoundary, 'stat' | 'unlink'>
   readonly limits?: DeferredEncodeLimits
   /** Creates a second name for a file; fails with `EEXIST` if it is taken. */
-  readonly linkFile?: (existingPath: string, newPath: string) => Promise<void>
+  readonly linkFile?: LinkFile
   readonly log: ServiceLogger
   readonly reserveOutput?: (desiredPath: string) => Promise<string>
 }
@@ -132,7 +134,6 @@ type SlotWork =
   | { readonly outputPath: string; readonly result: SpoolEncodeResult }
 
 const SPOOL_ENCODE_OPERATION = 'spool encode'
-const FRAMES_EXTENSION = '.frames.mkv'
 const MAX_ATTEMPTS = 2
 
 /**
@@ -201,10 +202,11 @@ export class DeferredEncoder {
    */
   async preserveFrames(spool: UnencodedSpool): Promise<string> {
     const moved = await this.moveToFramesFile(spool)
-    const framesPath = moved.framesPath ?? spool.spool.path
-    const where = moved.framesPath
-      ? `Its frames are kept at ${framesPath}`
-      : `Its frames could not be moved (${describeError(moved.error)}) and stay at ${framesPath}`
+    const framesPath = 'error' in moved ? spool.spool.path : moved.framesPath
+    const where =
+      'error' in moved
+        ? `Its frames could not be moved (${describeError(moved.error)}) and stay at ${framesPath}`
+        : `Its frames are kept at ${framesPath}`
     return `${where}; convert them with: ${describeConversion(framesPath, spool.plannedPath)}`
   }
 
@@ -401,42 +403,18 @@ export class DeferredEncoder {
     return { failure, kind: 'kept', ...(partial ? { partial } : {}) }
   }
 
-  private async moveToFramesFile(
-    spool: UnencodedSpool,
-  ): Promise<{ framesPath?: string; error?: unknown }> {
-    for (
-      let collisionIndex = 1;
-      collisionIndex <= ARTIFACT_PATH_CANDIDATE_LIMIT;
-      collisionIndex += 1
-    ) {
-      const candidate = getCollisionPath(spool.plannedPath, collisionIndex)
-      const parsed = path.parse(candidate)
-      const framesPath = path.join(
-        parsed.dir,
-        `${parsed.name}${FRAMES_EXTENSION}`,
-      )
-      try {
-        // A second name in the same directory tree: nothing is copied, and an
-        // existing file is never replaced.
-        await this.linkFile(spool.spool.path, framesPath)
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-          continue
-        }
-        return { error }
-      }
-      await removeFileWithRetry(
-        { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
-        spool.spool.path,
-        'moved frame spool',
-      )
-      return { framesPath }
-    }
-    return {
-      error: new Error(
-        `every candidate name for ${spool.plannedPath} is taken`,
-      ),
-    }
+  private moveToFramesFile(spool: UnencodedSpool): Promise<FramesFileMove> {
+    return moveSpoolToFramesFile({
+      linkFile: this.linkFile,
+      plannedPath: spool.plannedPath,
+      removeSpool: (spoolPath) =>
+        removeFileWithRetry(
+          { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
+          spoolPath,
+          'moved frame spool',
+        ),
+      spoolPath: spool.spool.path,
+    })
   }
 
   /** Why no more work may start, once the budget is spent or work stopped. */
@@ -518,15 +496,6 @@ const replaceFileExtension = (
 ): string => {
   const parsed = path.parse(filePath)
   return path.join(parsed.dir, `${parsed.name}.${format}`)
-}
-
-const describeConversion = (
-  framesPath: string,
-  plannedPath: string,
-): string => {
-  const parsed = path.parse(plannedPath)
-  const target = path.join(parsed.dir, `${parsed.name}.converted.webm`)
-  return `ffmpeg -i "${framesPath}" -pix_fmt yuv420p "${target}"`
 }
 
 const formatSeconds = (milliseconds: number): string =>

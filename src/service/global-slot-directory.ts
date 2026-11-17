@@ -22,6 +22,12 @@ export const isSafeGlobalSlotRunId = (runId: string): boolean => {
   return RUN_ID_PATTERN.test(runId)
 }
 
+/** Whether `directory` is, once resolved, a direct child of `root`. */
+export const isDirectChildDirectory = (
+  root: string,
+  directory: string,
+): boolean => path.dirname(path.resolve(directory)) === path.resolve(root)
+
 export const resolveGlobalSlotRunDirectories = (
   options: GlobalSlotRunDirectoryOptions,
 ): GlobalSlotRunDirectories => {
@@ -45,12 +51,10 @@ export const cleanupGlobalSlotRunDirectory = async (
   options: GlobalSlotRunDirectoryOptions,
 ): Promise<void> => {
   const directories = resolveGlobalSlotRunDirectories(options)
-  const resolvedRoot = path.resolve(directories.root)
-  const resolvedRun = path.resolve(directories.run)
-  if (path.dirname(resolvedRun) !== resolvedRoot) {
+  if (!isDirectChildDirectory(directories.root, directories.run)) {
     throw new TypeError(
       '[WdioPuppeteerVideoService] Refusing to clean a global-slot path outside its configured root.',
     )
   }
-  await fs.rm(resolvedRun, { force: true, recursive: true })
+  await fs.rm(path.resolve(directories.run), { force: true, recursive: true })
 }
