@@ -1149,6 +1149,8 @@ describe('recorded frame timeline when the encoder exits early', () => {
     const output = await reserveOutput('early-exit', 'webm')
     const source = createFrameSource({ at: 0, color: 'red' })
     const exited = Promise.withResolvers<void>()
+    let forwardedWrites = 0
+    let endInput = (): void => {}
     const recorder = await recordScreencast(
       source.page,
       {
@@ -1172,6 +1174,48 @@ describe('recorded frame timeline when the encoder exits early', () => {
             ...['-t', '0.1'],
             ...args.slice(-1),
           ])
+          const input = child.stdin
+          if (input) {
+            // FFmpeg 7 waits for the end of its input after -t, while 6.x
+            // exits at once. The product gets a proxy it can keep writing to;
+            // the test ends the real input once its frames are sent, so every
+            // version exits successfully before the recording is stopped.
+            input.on('error', () => {})
+            let inputEnded = false
+            const proxy = new Writable({
+              write(chunk: Buffer, _encoding, callback) {
+                if (inputEnded) {
+                  callback()
+                } else {
+                  forwardedWrites += 1
+                  if (input.write(chunk)) {
+                    callback()
+                  } else {
+                    // Whichever comes first; the other is removed so the
+                    // callback runs once.
+                    const resume = () => {
+                      input.off('drain', resume)
+                      input.off('close', resume)
+                      callback()
+                    }
+                    input.once('drain', resume)
+                    input.once('close', resume)
+                  }
+                }
+              },
+              final(callback) {
+                callback()
+              },
+            })
+            endInput = () => {
+              inputEnded = true
+              input.end()
+            }
+            Object.defineProperty(child, 'stdin', {
+              configurable: true,
+              value: proxy,
+            })
+          }
           child.once('close', () => exited.resolve())
           return child
         },
@@ -1180,6 +1224,14 @@ describe('recorded frame timeline when the encoder exits early', () => {
     for (let frame = 1; frame <= 30; frame += 1) {
       source.emit({ at: frame / 10, color: 'red' })
     }
+    // The recorder writes frames in the background: wait until it has written
+    // and gone quiet, then end FFmpeg's input.
+    let seenWrites = -1
+    while (forwardedWrites === 0 || seenWrites !== forwardedWrites) {
+      seenWrites = forwardedWrites
+      await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    }
+    endInput()
     await exited.promise
 
     // Exit code 0, three seconds of frames captured, but FFmpeg never saw the
