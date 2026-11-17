@@ -78,6 +78,12 @@ export class ContextFollower {
   private pendingSwitch: PendingSwitch | undefined
   private readonly target: ContextFollowerTarget
   private readonly topLevelByContext = new Map<string, string>()
+  /**
+   * Advanced by every change to the current window the follower is told
+   * about. A read of the current window that started before such a change
+   * answered for an older state, so its answer is not used.
+   */
+  private windowGeneration = 0
 
   constructor(options: ContextFollowerOptions) {
     this.getBrowser = options.getBrowser
@@ -86,7 +92,7 @@ export class ContextFollower {
   }
 
   reset(): void {
-    this.currentWindow = undefined
+    this.setCurrentWindow(undefined)
     this.pendingSwitch = undefined
     this.levels.clear()
     this.topLevelByContext.clear()
@@ -139,7 +145,7 @@ export class ContextFollower {
       this.raiseLevel(contextId, level)
       if (commandName === 'getWindowHandle') {
         // The singular handle is WDIO's current window.
-        this.currentWindow = contextId
+        this.setCurrentWindow(contextId)
       }
     }
   }
@@ -174,7 +180,7 @@ export class ContextFollower {
       previousLevel: this.levels.get(contextId),
     }
     this.levels.set(contextId, 'addressable')
-    this.currentWindow = contextId
+    this.setCurrentWindow(contextId)
     await this.follow(contextId, 'switch-to-window')
   }
 
@@ -222,9 +228,15 @@ export class ContextFollower {
   private async afterSwitch(error: unknown): Promise<void> {
     const pending = this.pendingSwitch
     this.pendingSwitch = undefined
-    if (error !== undefined && pending) {
-      await this.recoverFailedSwitch(pending)
+    if (!pending) {
+      return
     }
+    if (error === undefined) {
+      // The browser is on the window now, whatever a read started earlier saw.
+      this.setCurrentWindow(pending.contextId)
+      return
+    }
+    await this.recoverFailedSwitch(pending)
   }
 
   private async afterContextClose(
@@ -237,7 +249,7 @@ export class ContextFollower {
       return
     }
     if (signal?.kind === 'close' && signal.contextId === this.currentWindow) {
-      this.currentWindow = undefined
+      this.setCurrentWindow(undefined)
     }
     await this.target.resumeAfterClose()
   }
@@ -246,7 +258,7 @@ export class ContextFollower {
     // A Classic close of the current window leaves no current window until
     // WDIO switches to another, which the next switchToWindow reports.
     if (error === undefined) {
-      this.currentWindow = undefined
+      this.setCurrentWindow(undefined)
     }
     await this.target.resumeAfterClose()
   }
@@ -263,9 +275,10 @@ export class ContextFollower {
     } else {
       this.levels.delete(pending.contextId)
     }
-    if (this.currentWindow === pending.contextId) {
-      this.currentWindow = undefined
-    }
+    // A read that started before the rollback saw the requested window.
+    this.setCurrentWindow(
+      this.currentWindow === pending.contextId ? undefined : this.currentWindow,
+    )
     this.traceDecision(
       'switchToWindow',
       pending.contextId,
@@ -333,6 +346,16 @@ export class ContextFollower {
     )
   }
 
+  private setCurrentWindow(contextId: string | undefined): void {
+    this.currentWindow = contextId
+    this.windowGeneration += 1
+  }
+
+  /**
+   * The cached current window, or the browser's answer when there is none. An
+   * answer that arrives after a switch, close, rollback or reset is dropped,
+   * and the window as it now stands is returned instead.
+   */
   private async readCurrentWindow(): Promise<string | undefined> {
     if (this.currentWindow) {
       return this.currentWindow
@@ -341,9 +364,18 @@ export class ContextFollower {
     if (!browser) {
       return undefined
     }
+    const generation = this.windowGeneration
     try {
-      this.currentWindow = await runInternal(() => browser.getWindowHandle())
-      this.levels.set(this.currentWindow, 'addressable')
+      const handle = await runInternal(() => browser.getWindowHandle())
+      if (generation === this.windowGeneration) {
+        this.currentWindow = handle
+        this.levels.set(handle, 'addressable')
+      } else {
+        this.log(
+          'trace',
+          `[WdioPuppeteerVideoService] Ignored WDIO's current window ${handle}: the window changed while it was read.`,
+        )
+      }
     } catch (error) {
       this.log(
         'debug',
