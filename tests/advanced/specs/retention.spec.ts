@@ -31,6 +31,12 @@ const expectUnprocessedSegments = async (stoppedSegments: number) => {
   const spools = await listSpools()
   if (promoting) {
     expect(webm.length + spools.length).toBe(stoppedSegments + 1)
+    // The second part recorded for at least 900 ms before it stopped, far
+    // longer than starting an encoder and replaying a small spool: proof
+    // that a browser recording really continued as live encoding.
+    if (stoppedSegments >= 2) {
+      expect(webm.length).toBeGreaterThanOrEqual(1)
+    }
     return
   }
   expect(webm).toHaveLength(spooling ? 0 : stoppedSegments + 1)
