@@ -713,7 +713,7 @@ describe('kept deferred recordings', () => {
     ])
   })
 
-  it('keeps an unclean spool as unclean media and its frames', async () => {
+  it('keeps an unclean spool as unclean media and deletes its spool', async () => {
     const harness = createHarness({
       service: { capture: DEFERRED, processing: MP4 },
     })
@@ -729,9 +729,8 @@ describe('kept deferred recordings', () => {
     ])
     expect(finalized.captureFailure).toContain('did not finish cleanly')
     expect(harness.transcode).toHaveBeenCalledTimes(2)
-    expect(
-      (await listTree()).filter((file) => file.endsWith('.frames.mkv')),
-    ).toEqual([expect.stringMatching(/_part1\.frames\.mkv$/u)])
+    expect(await framesFiles()).toEqual([])
+    expect(await spoolFiles()).toEqual([])
   })
 
   it('encodes a recording whose outcome is never known when the worker ends', async () => {

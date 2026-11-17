@@ -468,7 +468,7 @@ describe('deferred encoder', () => {
     })
   })
 
-  it('encodes an incomplete capture as unclean media and keeps its frames', async () => {
+  it('encodes an incomplete capture as unclean media and deletes its spool', async () => {
     const ffmpeg = createFfmpeg()
     const { encoder } = createEncoder(ffmpeg.port)
     const held = await spooled(1, {
@@ -486,6 +486,43 @@ describe('deferred encoder', () => {
       kind: 'kept',
       partial: { recordingPath: held.segment.recordingPath, transcode: false },
     })
+    expect(
+      (result?.outcome as { failure: string } | undefined)?.failure,
+    ).not.toContain('frames')
+    await expect(fs.readFile(held.segment.recordingPath, 'utf8')).resolves.toBe(
+      'vp9',
+    )
+    expect(await exists(held.spool.path)).toBe(false)
+    expect(
+      await exists(path.join(outputDir, 'checkout_part1.frames.mkv')),
+    ).toBe(false)
+  })
+
+  it('keeps the frames of an incomplete capture whose encode failed with partial output', async () => {
+    const ffmpeg = createFfmpeg([
+      async (outputPath) => {
+        await fs.writeFile(outputPath, 'half a video')
+        return exited(1, 'No space left on device')
+      },
+    ])
+    const { encoder } = createEncoder(ffmpeg.port)
+    const held = await spooled(1, {
+      clean: false,
+      incompleteReason: 'The frame spool could not be written: ENOSPC',
+    })
+
+    const [result] = await encoder.encodeAll([held], 2)
+
+    expect(ffmpeg.runs).toHaveLength(1)
+    expect(result?.outcome).toMatchObject({
+      failure: expect.stringContaining('No space left on device'),
+      kind: 'kept',
+      partial: { recordingPath: held.segment.recordingPath, transcode: false },
+    })
+    expect(
+      (result?.outcome as { failure: string } | undefined)?.failure,
+    ).toContain('Its frames are kept at')
+    expect(await exists(held.spool.path)).toBe(false)
     expect(
       await exists(path.join(outputDir, 'checkout_part1.frames.mkv')),
     ).toBe(true)

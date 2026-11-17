@@ -115,6 +115,11 @@ type Attempt =
   | {
       readonly ok: false
       readonly failure: string
+      /**
+       * FFmpeg exited 0 and wrote output: only the capture was incomplete, so
+       * the output holds every frame the spool does.
+       */
+      readonly encoded: boolean
       /** Bytes FFmpeg left at the reserved output, if one was reserved. */
       readonly outputBytes: number
       readonly outputPath: string | undefined
@@ -213,6 +218,7 @@ export class DeferredEncoder {
       const stopped = this.describeStoppedStep(step)
       if (stopped) {
         last = {
+          encoded: false,
           failure: stopped,
           ok: false,
           outputBytes: last?.outputBytes ?? 0,
@@ -292,6 +298,7 @@ export class DeferredEncoder {
       const outputBytes =
         outputPath === undefined ? 0 : await this.sizeOf(outputPath)
       return {
+        encoded: false,
         failure:
           this.describeStoppedStep(step) ??
           'no post-processing capacity was available in time',
@@ -303,6 +310,7 @@ export class DeferredEncoder {
     }
     if ('reserveError' in encoded) {
       return {
+        encoded: false,
         failure: `its output could not be reserved: ${describeError(encoded.reserveError)}`,
         ok: false,
         outputBytes: 0,
@@ -316,6 +324,7 @@ export class DeferredEncoder {
       return { ok: true, outputPath: target }
     }
     return {
+      encoded: encoded.result.ok && outputBytes > 0,
       failure: describeFailedEncode(encoded.result, outputBytes, held),
       ok: false,
       outputBytes,
@@ -333,15 +342,19 @@ export class DeferredEncoder {
     held: SpooledSegment,
     recordingPath: string,
   ): Promise<DeferredEncodeOutcome> {
+    await this.removeEncodedSpool(held)
+    return {
+      kind: 'encoded',
+      segment: withRecordingPath(held.segment, recordingPath),
+    }
+  }
+
+  private async removeEncodedSpool(held: SpooledSegment): Promise<void> {
     await removeFileWithRetry(
       { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
       held.spool.path,
       'encoded frame spool',
     )
-    return {
-      kind: 'encoded',
-      segment: withRecordingPath(held.segment, recordingPath),
-    }
   }
 
   private async keepFrames(
@@ -368,6 +381,16 @@ export class DeferredEncoder {
       )
     }
     const tab = held.tab ? ` (tab ${held.tab.ordinal.toString()})` : ''
+    if (failed?.encoded && partial) {
+      // The encode itself worked and its output holds every frame the spool
+      // does, so a second copy of them would only take disk space.
+      await this.removeEncodedSpool(held)
+      return {
+        failure: `Segment ${held.part.toString()}${tab} was encoded, but ${failed.failure}. The encoded video is kept.`,
+        kind: 'kept',
+        partial,
+      }
+    }
     const frames = await this.preserveFrames({
       part: held.part,
       plannedPath: held.segment.recordingPath,
