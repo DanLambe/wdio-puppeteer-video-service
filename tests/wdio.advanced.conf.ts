@@ -567,7 +567,10 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos: modeExpectsNoVideos,
       mergeSegmentsEnabled: mergedArtifactsExpected,
       fileNameStyle,
-      expectedCodec: mode === 'ffmpeg-failure' ? 'vp9' : 'h264',
+      // `retry` keeps the encoder's WebM (no transcode) for the offline
+      // report's playback check.
+      expectedCodec:
+        mode === 'ffmpeg-failure' || mode === 'retry' ? 'vp9' : 'h264',
       runLabel: `advanced-${mode}`,
     })
 
