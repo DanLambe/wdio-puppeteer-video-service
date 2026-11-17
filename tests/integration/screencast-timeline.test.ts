@@ -433,8 +433,15 @@ describe('recorded frame timeline when the encoder exits early', () => {
                   if (input.write(chunk)) {
                     callback()
                   } else {
-                    input.once('drain', () => callback())
-                    input.once('close', () => callback())
+                    // Whichever comes first; the other is removed so the
+                    // callback runs once.
+                    const resume = () => {
+                      input.off('drain', resume)
+                      input.off('close', resume)
+                      callback()
+                    }
+                    input.once('drain', resume)
+                    input.once('close', resume)
                   }
                 }
               },
@@ -464,10 +471,10 @@ describe('recorded frame timeline when the encoder exits early', () => {
       now = frame * 100
       emit()
     }
-    // The recorder writes frames in the background: wait for it to go quiet,
-    // then end FFmpeg's input.
+    // The recorder writes frames in the background: wait until it has written
+    // and gone quiet, then end FFmpeg's input.
     let seenWrites = -1
-    while (seenWrites !== forwardedWrites) {
+    while (forwardedWrites === 0 || seenWrites !== forwardedWrites) {
       seenWrites = forwardedWrites
       await new Promise<void>((resolve) => setTimeout(resolve, 50))
     }
