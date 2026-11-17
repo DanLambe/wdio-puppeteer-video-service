@@ -349,7 +349,10 @@ was killed while it recorded. At the end of the run the launcher recovers the
 frames it left in `.wdio-video-spool` as `.frames.mkv` files and logs one
 warning naming them; the recovered recording stops at its last held image, and
 the same command converts it. A spool the launcher could not move is named in a
-separate warning and stays where it is, with its directory.
+separate warning and stays where it is, with its directory. Files in the spool
+directory that a worker did not name are never moved or deleted, and a spool
+directory that is a link or junction is not recovered at all: the launcher
+warns that it is not a plain directory.
 
 ## The static report shows ambiguous-test-outcome or unmatched-test-outcome
 
