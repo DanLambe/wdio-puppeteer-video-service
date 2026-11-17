@@ -140,7 +140,7 @@ describe('WdioPuppeteerVideoLauncher', () => {
   })
 
   describe('orphaned spool recovery', () => {
-    const track = { codec: 'jpeg', fps: 25, height: 600, width: 800 } as const
+    const track = { codec: 'png', fps: 25, height: 600, width: 800 } as const
 
     const spoolStream = (): Buffer =>
       Buffer.concat([

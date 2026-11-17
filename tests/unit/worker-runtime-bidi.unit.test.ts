@@ -2,6 +2,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nodeFileSystem } from '../../src/service/boundaries.js'
 import { ContextFollower } from '../../src/service/context-follower.js'
+import { FfmpegRuntime } from '../../src/service/ffmpeg-runtime.js'
 import { runInternal } from '../../src/service/internal-operation.js'
 import { assignLauncherWorkerContext } from '../../src/service/launcher-context.js'
 import {
@@ -25,6 +26,9 @@ const createWorker = async (
   } = {},
 ) => {
   vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp').mockResolvedValue()
+  const ensureReady = vi
+    .spyOn(FfmpegRuntime.prototype, 'ensureReady')
+    .mockResolvedValue(true)
   const follower = {
     after: vi
       .spyOn(ContextFollower.prototype, 'afterCommand')
@@ -95,7 +99,15 @@ const createWorker = async (
   }
   await worker.beforeSession(config, capabilities, ['tabs.spec.ts'], '0-0')
   await worker.before(capabilities, ['tabs.spec.ts'], browser as WorkerBrowser)
-  return { available, browser, follower, windows, worker, writeLog }
+  return {
+    available,
+    browser,
+    ensureReady,
+    follower,
+    windows,
+    worker,
+    writeLog,
+  }
 }
 
 const warnedAbout = (writeLog: ReturnType<typeof vi.fn>, text: string) =>
@@ -158,10 +170,12 @@ describe('worker runtime in WebDriver BiDi sessions', () => {
   })
 
   it('declines to record when parallel mode will run', async () => {
-    const { available, follower, worker, writeLog } = await createWorker({
-      capabilities: { 'wdio:experimentalBiDiCommands': true },
-      config: { mochaOpts: { parallelMode: 'contexts' } },
-    })
+    const { available, ensureReady, follower, worker, writeLog } =
+      await createWorker({
+        capabilities: { 'wdio:experimentalBiDiCommands': true },
+        config: { mochaOpts: { parallelMode: 'contexts' } },
+      })
+    expect(ensureReady).not.toHaveBeenCalled()
 
     await worker.beforeCommand('browsingContextNavigate', [{ context: 'a' }])
     await worker.beforeTest({ title: 't', parent: 's' } as never, undefined)

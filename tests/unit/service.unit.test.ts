@@ -5,6 +5,7 @@ import type { Frameworks } from '@wdio/types'
 import { describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { nodeFileSystem } from '../../src/service/boundaries.js'
+import { FfmpegRuntime } from '../../src/service/ffmpeg-runtime.js'
 import { WorkerRecordingCoordinator } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
 
@@ -119,7 +120,10 @@ describe('WdioPuppeteerVideoService worker adapter', () => {
     ).toThrow('processing.format')
   })
 
-  it('does not probe FFmpeg during worker initialization', async () => {
+  it('looks for FFmpeg before the first test without running media work', async () => {
+    const ensureReady = vi
+      .spyOn(FfmpegRuntime.prototype, 'ensureReady')
+      .mockResolvedValue(true)
     const runFfmpeg = vi.fn(async () => true)
     const service = new WdioPuppeteerVideoService({}, undefined, undefined, {
       runFfmpeg,
@@ -130,9 +134,14 @@ describe('WdioPuppeteerVideoService worker adapter', () => {
       capabilities: { browserName: 'chrome' },
     } as Parameters<WdioPuppeteerVideoService['before']>[2]
 
-    await service.before({}, ['tests/specs/e2e.test.ts'], browser)
+    try {
+      await service.before({}, ['tests/specs/e2e.test.ts'], browser)
 
-    expect(runFfmpeg).not.toHaveBeenCalled()
+      expect(ensureReady).toHaveBeenCalledOnce()
+      expect(runFfmpeg).not.toHaveBeenCalled()
+    } finally {
+      ensureReady.mockRestore()
+    }
   })
 
   it('skips workers it can never record before WDIO constructs them', () => {

@@ -369,11 +369,28 @@ export class WdioPuppeteerVideoWorkerRuntime
       return
     }
     // Wait here, outside every test's timeout, for a just-launched browser to
-    // render.
-    await this._captureEngine.warmUp().catch((error: unknown) => {
+    // render, and look for FFmpeg meanwhile so the first recording finds it
+    // ready.
+    await Promise.all([
+      this._captureEngine.warmUp().catch((error: unknown) => {
+        this._log(
+          'debug',
+          `[WdioPuppeteerVideoService] Browser warm-up skipped: ${normalization.describeError(error)}`,
+        )
+      }),
+      this._prepareFfmpeg(),
+    ])
+  }
+
+  /**
+   * Missing FFmpeg is reported once by the runtime, and each recording start
+   * then finds it unavailable; nothing else changes here.
+   */
+  private async _prepareFfmpeg(): Promise<void> {
+    await this._ffmpegRuntime.ensureReady().catch((error: unknown) => {
       this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Browser warm-up skipped: ${normalization.describeError(error)}`,
+        'warn',
+        `[WdioPuppeteerVideoService] FFmpeg readiness check failed: ${normalization.describeError(error)}`,
       )
     })
   }
