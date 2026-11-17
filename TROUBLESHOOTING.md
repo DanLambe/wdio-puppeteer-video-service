@@ -287,6 +287,26 @@ failure after cleanup.
   `processing.ffmpeg.path`, `FFMPEG_PATH` or wrapper script for options that
   stop FFmpeg early. `SIGKILL` usually means the operating system reclaimed
   memory.
+- `The recording's frame spools reached the disk limit of 1.0 GiB; capture
+  stopped after …s to bound disk use.` A deferred recording spooled the most it
+  may (`capture.encoding: 'deferred'`, [Deferred Encoding](README.md#deferred-encoding))
+  and could not continue as live encoding, usually because FFmpeg could not
+  start or kept exiting (a warning before this one says why). The video covers
+  the time up to that point.
+- `Free disk space for the frame spool fell to … MiB, below the floor of 512.0
+  MiB; capture stopped after …s to bound disk use.` The volume holding
+  `<outputDir>/.wdio-video-spool` ran low while a segment was still spooling.
+  Free space on that volume or point `outputDir` at a larger one. Below 2 GiB a
+  segment normally continues as live encoding first, so this means that could
+  not happen. A video is still written up to that point.
+- `The frame spool could not be written: ENOSPC …`: the disk filled before
+  either limit above was reached, for example because other workers share it.
+  The same fixes apply.
+- `Could not continue the recording of … as live encoding: …`: a spool that
+  grew large could not start an encoder, or the encoder exited while the spool
+  was replayed into it. The recording keeps spooling and is encoded when its
+  test ends; this is a warning, not a failure, unless the disk limits above
+  follow.
 - `Discarded recording was incomplete (…)`: retention discarded a passing test's
   video, but its capture had already failed for one of the reasons above. The
   manifest records the failure without segments, so the cause stays visible even

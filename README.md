@@ -333,8 +333,37 @@ naming them, and a recovered recording stops at its last held image.
 
 **Disk use.** A spool holds every frame the recording captured, including the
 periodic hold blocks that keep the newest image on disk, so it grows with the
-recording's length and how much the page changes. Each worker has at most its
-own recordings' spools on disk at a time.
+recording's length and how much the page changes. The limits below are fixed
+and are not options.
+
+- **A recording that grows past 256 MiB continues as live encoding.** The
+  limit counts every spool of the recording still on disk, so many tab moves
+  that each stay small reach it together. The segment being recorded starts an
+  encoder, replays what it has spooled into it while new frames keep going to
+  the spool, and switches to the encoder once it has caught up; the spool is
+  then deleted. The video is the one a live recording of the same frames would
+  have produced. The recording's later segments start live. The encoder
+  runs under the recording slot the capture already holds; promotion takes no
+  slot of its own. If the test ends while the
+  replay is still catching up, the promotion is cancelled and the segment stays
+  a spool, encoded at the end of the test like any other. If the encoder cannot
+  start, or exits during the replay, one warning is logged and the segment
+  keeps spooling; it is not promoted again.
+- **A recording never spools more than 1 GiB.** At that size capture stops,
+  with the video up to that point, and the recording is reported as incomplete
+  (see [Troubleshooting](TROUBLESHOOTING.md)). In the worst case a worker holds
+  one recording's limit, so the most a run can have spooled at once is that
+  limit multiplied by the number of workers (`maxInstances`) recording
+  deferred at the same time.
+- **Low free disk space is watched, not reserved.** The free space of the
+  spool's volume is read when a segment starts and after each further 16 MiB
+  it spools. Below 2 GiB the segment continues as live encoding and the
+  recording's later segments start live; below 512 MiB a segment that is still
+  spooling stops capture and the recording is reported as incomplete. A reading
+  that fails is ignored. This is a sample, not a reservation: workers can each
+  spend the same free space, and a segment that continues as live encoding
+  still writes its video to the same disk. An output that cannot be written
+  (`ENOSPC`) is reported as incomplete too.
 
 ## Tab Following
 
