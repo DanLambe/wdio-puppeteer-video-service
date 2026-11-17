@@ -36,6 +36,25 @@ describe('service runtime boundaries', () => {
     }
   })
 
+  it('ends a delay early and quietly when its signal aborts', async () => {
+    vi.useFakeTimers()
+    try {
+      const expiry = new AbortController()
+      const settled = vi.fn()
+      const delayTask = systemClock.delay(10_000, expiry.signal).then(settled)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).not.toHaveBeenCalled()
+      expiry.abort()
+      await delayTask
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('performs filesystem operations through the injected contract', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wdio-boundary-'))
     const nestedDir = path.join(tempDir, 'nested')

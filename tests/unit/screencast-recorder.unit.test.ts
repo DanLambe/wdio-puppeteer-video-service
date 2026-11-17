@@ -7,6 +7,7 @@ import {
   type ClockBoundary,
   systemClock,
 } from '../../src/service/boundaries.js'
+import { RECORDER_STOP_TIMEOUT_MS } from '../../src/service/constants.js'
 import {
   EncoderSink,
   type SpoolFileStream,
@@ -18,11 +19,14 @@ import {
   type ScreencastCaptureOptions,
   ScreencastRecorder,
   type ScreencastRecorderOptions,
+  TAIL_FRAME_QUIET_MS,
+  TAIL_FRAME_WAIT_MS,
 } from '../../src/service/screencast-recorder.js'
 import {
   SpoolBudget,
   type SpoolLimits,
 } from '../../src/service/spool-budget.js'
+import { createControlledDelays } from '../utils/controlled-delays.js'
 import {
   type GridFrame,
   gridFrames,
@@ -2729,5 +2733,290 @@ describe('screencast recorder spool budget', () => {
     expect(budget.bytes).toBe(0)
     expect(run.recorder.incompleteReason).toBeUndefined()
     await run.recorder.stop()
+  })
+})
+
+// A hold clock whose delays the test ends: the stop's wait for a frame on its
+// way never depends on wall time.
+const createTailClock = () => {
+  const delays = createControlledDelays()
+  const clock = { ...createHoldClock(), delay: delays.delay }
+  return { clock, delays }
+}
+
+describe('screencast recorder tail frame at stop', () => {
+  it('waits a quiet gap after a lone frame on its way, placed by its own timestamp', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    // The page is static for a second, then the test stops right after a
+    // paint whose frame Chrome is still capturing.
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested.map((delay) => delay.milliseconds)).toEqual([
+      TAIL_FRAME_WAIT_MS,
+    ])
+
+    // Painted at 0.9 s, delivered 150 ms later, during the wait. Another
+    // frame may follow it, so the wait goes on for a quiet gap.
+    run.advance(50)
+    run.session.emitFrame('tail', 100.9)
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested.map((delay) => delay.milliseconds)).toEqual([
+      TAIL_FRAME_WAIT_MS,
+      TAIL_FRAME_QUIET_MS,
+    ])
+
+    run.advance(TAIL_FRAME_QUIET_MS)
+    delays.requested[1]?.resolve()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    // Shown from 0.9 s, where it was painted, and held to the stop at 1.15 s.
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'tail',
+      'tail',
+      'tail',
+    ])
+    // The bound's timer is released rather than left to run out.
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+  })
+
+  it('waits for a second frame in flight behind an older paint', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // The pointer moved over the button at 0.9 s; the click's paint at 1 s is
+    // right behind it. Neither delay is expired: two frames end the wait.
+    run.advance(20)
+    run.session.emitFrame('pointer', 100.9)
+    run.advance(16)
+    run.session.emitFrame('paint', 101)
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'pointer',
+      'paint',
+    ])
+    // Every timer of the wait is released.
+    expect(delays.requested.map((delay) => delay.signal?.aborted)).toEqual([
+      true,
+      true,
+    ])
+  })
+
+  it('stops at the second frame without waiting for a third', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(500)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // An animating page: two frames end the wait, and the screencast is
+    // stopped before the next frame Chrome would send.
+    run.frame('first', 100.52)
+    run.frame('second', 100.62)
+    await settle()
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    await stopping
+    run.frame('third', 100.72)
+
+    expect(delays.requested).toHaveLength(2)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'first', 'second'])
+    expect(run.recorder.frameCount).toBe(3)
+  })
+
+  it('ends at the bound however slowly frames trickle in', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // A frame late in the wait starts a quiet gap that would outlast the
+    // bound; the bound ends the wait first.
+    run.advance(100)
+    run.session.emitFrame('slow', 100.95)
+    await settle()
+    run.advance(TAIL_FRAME_WAIT_MS - 100)
+    delays.requested[0]?.resolve()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(delays.requested[1]?.signal?.aborted).toBe(true)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'slow'])
+  })
+
+  it('waits the whole bound on a page that does not change, then stops', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopped = vi.fn()
+    const stopping = run.recorder.stop().then(stopped)
+    await settle()
+    expect(stopped).not.toHaveBeenCalled()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+
+    run.advance(TAIL_FRAME_WAIT_MS)
+    delays.expire()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    // The final frame is held to where the stop ended, the wait included.
+    expect(spanCounts(run.frames(10))).toEqual({ start: 11 })
+  })
+
+  it('does not wait once overload has stopped capture', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createFakeFfmpeg(),
+      clock,
+      { maxPendingBytes: 20 },
+    )
+    run.frame('next', 101)
+    run.frame('y'.repeat(30), 101.04)
+    expect(run.recorder.incompleteReason).toContain('exceeds 20 bytes')
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+  })
+
+  it('does not wait once the spool budget has stopped capture', async () => {
+    const { clock, delays } = createTailClock()
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const run = await startSpoolRecorder(
+      { budget: createBudget({ hardCapBytes: header + 400 }), fps: 10 },
+      undefined,
+      clock,
+    )
+    for (
+      let step = 1;
+      step <= 60 && !run.recorder.incompleteReason;
+      step += 1
+    ) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+  })
+
+  it('does not wait once the encoder has exited', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createStalledFfmpeg(),
+      clock,
+    )
+    run.frame('a', 101)
+    Object.assign(run.child, { exitCode: 1 })
+    run.child.stdin?.destroy()
+    run.child.emit('exit', 1)
+    run.child.emit('close', 1)
+    await settle()
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+    expect(run.recorder.incompleteReason).toContain('FFmpeg exited with code 1')
+  })
+
+  it('ends the wait when the encoder exits during it', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createStalledFfmpeg(),
+      clock,
+    )
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    // Never expired: a closed encoder has nowhere to put another frame.
+    Object.assign(run.child, { exitCode: 1 })
+    run.child.stdin?.destroy()
+    run.child.emit('exit', 1)
+    run.child.emit('close', 1)
+    await stopping
+
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+    expect(run.recorder.incompleteReason).toContain('FFmpeg exited with code 1')
+  })
+
+  it('lets an abort during the wait win at once', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    // Never expired: the abort alone ends the wait and the stop.
+    await run.recorder.abort()
+    await stopping
+
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+    expect(run.kill).toHaveBeenCalled()
+    expect(run.frames(10)).toEqual([])
+  })
+
+  it.each([
+    ['an abort', (recorder: ScreencastRecorder) => recorder.abort()],
+    [
+      'a stop whose media is thrown away',
+      (recorder: ScreencastRecorder) => recorder.stop({ tailFrame: false }),
+    ],
+  ])('does not wait for %s', async (_name, end) => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+
+    await end(run.recorder)
+
+    expect(delays.requested).toEqual([])
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('gives a spool the frame that arrives during the wait', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startSpoolRecorder({ fps: 10 }, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    run.advance(50)
+    run.session.emitFrame('tail', 100.9)
+    await settle()
+    // No frame follows within the quiet gap.
+    delays.requested[1]?.resolve()
+    await stopping
+
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'tail',
+      'tail',
+    ])
+    expect(run.recorder.output.kind).toBe('spool')
+  })
+
+  it('stays far inside the engine stop timeout', () => {
+    expect(RECORDER_STOP_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      20 * TAIL_FRAME_WAIT_MS,
+    )
   })
 })

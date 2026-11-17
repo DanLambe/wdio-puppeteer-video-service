@@ -56,6 +56,21 @@ const PROMOTION_ABORT_TIMEOUT_MS = 3_000
 // Blocks a spooling segment must always have room for: one more hold, and the
 // fill and two end markers that stopping writes.
 const RESERVED_BLOCKS = 4
+// Chrome captures a screencast frame after the paint: it reads the drawn
+// surface back and encodes it before sending it. A paint just before a stop
+// is still on its way when the stop is requested, so a stop that keeps the
+// recording waits up to this long for it first. From paint to frame took
+// under 30 ms on quiet hosts and about 100 ms (p95) on a saturated two-CPU
+// container; a page that does not change pays the whole wait.
+export const TAIL_FRAME_WAIT_MS = 125
+// Chrome has been seen to keep two frames in flight, so the first frame after
+// the stop request can be an older paint, such as a pointer move, with the
+// last paint right behind it. The wait ends once this many frames arrive.
+export const TAIL_FRAMES = 2
+// Or once no further frame follows the latest within this gap. Two frames in
+// flight arrived at most 18 ms apart on quiet hosts, but up to about 100 ms
+// apart (p95 92-97 ms) on a saturated two-CPU container.
+export const TAIL_FRAME_QUIET_MS = 100
 
 export interface ScreencastCaptureOptions {
   readonly crop?: Readonly<CaptureCrop>
@@ -212,6 +227,14 @@ interface ReceivedFrame {
   readonly timestamp: number
 }
 
+interface TailFrameWait {
+  readonly done: PromiseWithResolvers<void>
+  /** Frames that arrived since the stop request. */
+  frames: number
+  /** Aborts the running quiet gap, if one runs. */
+  quiet: AbortController | undefined
+}
+
 interface PendingBlock {
   readonly frame: ReceivedFrame
   readonly position: number
@@ -330,6 +353,8 @@ export class ScreencastRecorder {
   private received = 0
   private stopping: Promise<void> | undefined
   private stopped = false
+  // While a stop waits for frames on their way: settled when the wait ends.
+  private tailWait: TailFrameWait | undefined
   private resolveFirstFrame: (() => void) | undefined
 
   /** Starts a recorder on an already opened sink and attached session. */
@@ -416,8 +441,13 @@ export class ScreencastRecorder {
     }
   }
 
-  async stop(): Promise<void> {
-    this.stopping ??= this.finish()
+  /**
+   * Ends the recording. By default it first waits a bounded time for a frame
+   * Chrome is still capturing; `tailFrame: false` skips that for a recording
+   * whose media is thrown away.
+   */
+  async stop(options: Readonly<{ tailFrame?: boolean }> = {}): Promise<void> {
+    this.stopping ??= this.finish(options.tailFrame ?? true)
     await this.stopping
   }
 
@@ -476,6 +506,8 @@ export class ScreencastRecorder {
     this.stopped = true
     this.stopHolding()
     this.session.off('Page.screencastFrame', this.onFrame)
+    // No frame can follow: a stop waiting for one goes on at once.
+    this.tailWait?.done.resolve()
   }
 
   // A sink that closes early, an encoder that exits or a spool that cannot be
@@ -560,6 +592,8 @@ export class ScreencastRecorder {
 
   private onSinkClosed(): void {
     this.noteSinkFailure()
+    // A stop waiting for one more frame has nowhere to put it.
+    this.tailWait?.done.resolve()
     if (this.stopping !== undefined || this.aborting !== undefined) {
       return
     }
@@ -582,6 +616,12 @@ export class ScreencastRecorder {
     void this.session
       .send('Page.screencastFrameAck', { sessionId: event.sessionId })
       .catch(() => undefined)
+    this.receiveFrame(event)
+    // Whatever became of it, a frame counts toward a stop's wait.
+    this.onTailFrame()
+  }
+
+  private receiveFrame(event: ScreencastFrameEvent): void {
     const timestamp = event.metadata.timestamp
     if (
       this.stopped ||
@@ -638,10 +678,13 @@ export class ScreencastRecorder {
     this.recordHighWater()
   }
 
-  private async finish(): Promise<void> {
+  private async finish(tailFrame: boolean): Promise<void> {
     // A replay still running is cancelled in this turn, so it cannot switch
     // while the recording ends; the spool is complete and is kept.
     const promotion = this.promotion?.cancel()
+    if (tailFrame) {
+      await this.awaitTailFrame()
+    }
     // Stopping the screencast flushes frames already in flight.
     await Promise.race([
       this.session.send('Page.stopScreencast').catch(() => undefined),
@@ -688,6 +731,57 @@ export class ScreencastRecorder {
     // A spool that could not flush what it was given is incomplete too.
     this.noteSinkFailure()
     await Promise.race([this.detachSession(), this.cancelled.promise])
+  }
+
+  // At most TAIL_FRAME_WAIT_MS, until TAIL_FRAMES frames arrive or none
+  // follows the latest within TAIL_FRAME_QUIET_MS. Those frames go through
+  // `onFrame` like any other, placed by their own timestamps. Capture that
+  // has stopped, or a sink that has closed, has no use for a frame, and an
+  // abort ends the wait at once.
+  private async awaitTailFrame(): Promise<void> {
+    if (this.stopped) {
+      return
+    }
+    const wait: TailFrameWait = {
+      done: Promise.withResolvers<void>(),
+      frames: 0,
+      quiet: undefined,
+    }
+    const expiry = new AbortController()
+    this.tailWait = wait
+    try {
+      await Promise.race([
+        wait.done.promise,
+        this.clock.delay(TAIL_FRAME_WAIT_MS, expiry.signal),
+        this.cancelled.promise,
+      ])
+    } finally {
+      expiry.abort()
+      wait.quiet?.abort()
+      this.tailWait = undefined
+    }
+  }
+
+  // Counts a frame toward the stop's wait, and restarts its quiet gap.
+  private onTailFrame(): void {
+    const wait = this.tailWait
+    if (!wait) {
+      return
+    }
+    wait.frames += 1
+    wait.quiet?.abort()
+    if (wait.frames >= TAIL_FRAMES) {
+      wait.done.resolve()
+      return
+    }
+    const quiet = new AbortController()
+    wait.quiet = quiet
+    void this.clock.delay(TAIL_FRAME_QUIET_MS, quiet.signal).then(() => {
+      // An aborted delay also resolves: only a gap that ran out ends the wait.
+      if (!quiet.signal.aborted) {
+        wait.done.resolve()
+      }
+    })
   }
 
   // Awaited between steps, so TypeScript would otherwise keep `aborting`

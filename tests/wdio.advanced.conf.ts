@@ -30,6 +30,7 @@ type AdvancedMode =
   | 'global-concurrency'
   | 'ffmpeg-failure'
   | 'failure-burst'
+  | 'tail-frame'
 
 const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
@@ -71,6 +72,9 @@ const toMode = (value: string | undefined): AdvancedMode => {
   }
   if (normalized === 'failure-burst') {
     return 'failure-burst'
+  }
+  if (normalized === 'tail-frame') {
+    return 'tail-frame'
   }
   return 'retry'
 }
@@ -145,6 +149,7 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
     path.resolve('tests/advanced/specs/failure-burst-b.spec.ts'),
     path.resolve('tests/advanced/specs/failure-burst-c.spec.ts'),
   ],
+  'tail-frame': [path.resolve('tests/advanced/specs/tail-frame.spec.ts')],
 }
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
@@ -179,6 +184,10 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
     (worker) =>
       `should keep every part when worker ${worker} fails with the others`,
   ),
+  'tail-frame': [
+    'should film the last paint before a kept test ends',
+    'should film the last paint before recording moves to another tab',
+  ],
 }
 
 const fileStyleTitleToken =
@@ -250,6 +259,7 @@ const VP9_MODES: ReadonlySet<AdvancedMode> = new Set<AdvancedMode>([
   'failure-burst',
   'ffmpeg-failure',
   'retry',
+  'tail-frame',
 ])
 
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
@@ -328,6 +338,10 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
       maxPostProcessesGlobal: 1,
       lockDir: globalRecordingLockDir,
     },
+    processing: { format: 'webm', transcode: { enabled: false } },
+  }),
+  // The runner decodes each part's last frames; the encoder's WebM will do.
+  'tail-frame': createServiceOptions({
     processing: { format: 'webm', transcode: { enabled: false } },
   }),
 }
@@ -554,6 +568,8 @@ const modeAssertions: Record<
   'global-concurrency': assertGlobalConcurrencyMode,
   'ffmpeg-failure': assertFfmpegFailureMode,
   'failure-burst': assertFailureBurstMode,
+  // The runner checks the parts' colors from the manifest.
+  'tail-frame': () => {},
 }
 
 const assertAdvancedModeExpectations = async (
