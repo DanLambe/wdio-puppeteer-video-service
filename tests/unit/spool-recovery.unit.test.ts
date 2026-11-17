@@ -17,6 +17,13 @@ import {
   recoverOrphanedSpools,
   type SpoolRecoveryOptions,
 } from '../../src/service/spool-recovery.js'
+import {
+  blockGroupStream,
+  clusterOpening,
+  ebmlElement,
+  spoolName,
+  testSpoolUuid,
+} from '../utils/spool-fixtures.js'
 
 const RUN_ID = 'current-run'
 const TRACK = { codec: 'png', fps: 25, height: 600, width: 800 } as const
@@ -117,21 +124,131 @@ describe('classifySpoolPrefix', () => {
     expect(classifySpoolPrefix(header.subarray(0, 1), true)).toBe('no-frames')
   })
 
+  it('finds no frame in a cluster cut off before its first block has any image', () => {
+    const block = Buffer.concat(
+      new MatroskaBlockWriter().frame(Buffer.alloc(8), 0).slice(3),
+    )
+    const opened = Buffer.concat([headerOnly(), clusterOpening()])
+    // The block's id alone, then its id and the start of a two-byte size.
+    expect(
+      classifySpoolPrefix(Buffer.concat([opened, block.subarray(0, 1)]), true),
+    ).toBe('no-frames')
+    expect(
+      classifySpoolPrefix(
+        Buffer.concat([opened, Buffer.from([0xa3, 0x40])]),
+        true,
+      ),
+    ).toBe('no-frames')
+    // A cluster cut off inside its own id or its timestamp.
+    expect(
+      classifySpoolPrefix(
+        Buffer.concat([headerOnly(), clusterOpening().subarray(0, 2)]),
+        true,
+      ),
+    ).toBe('no-frames')
+    expect(
+      classifySpoolPrefix(
+        Buffer.concat([headerOnly(), clusterOpening().subarray(0, 13)]),
+        true,
+      ),
+    ).toBe('no-frames')
+  })
+
   it('does not decide when the prefix ends before an answer and the file goes on', () => {
     const header = headerOnly()
-    expect(classifySpoolPrefix(header, false)).toBe('frames')
-    expect(classifySpoolPrefix(header.subarray(0, 30), false)).toBe('frames')
-    expect(classifySpoolPrefix(header.subarray(0, 3), false)).toBe('frames')
+    expect(classifySpoolPrefix(header, false)).toBe('unrecognized')
+    expect(classifySpoolPrefix(header.subarray(0, 30), false)).toBe(
+      'unrecognized',
+    )
+    expect(classifySpoolPrefix(header.subarray(0, 3), false)).toBe(
+      'unrecognized',
+    )
   })
 
   it('keeps what it cannot read as a Matroska stream', () => {
     // No valid element id, then an element of unknown size that is not a
     // container the writer produces.
     expect(classifySpoolPrefix(Buffer.from([0x00, 0x00, 0x00]), true)).toBe(
-      'frames',
+      'unrecognized',
     )
-    expect(classifySpoolPrefix(Buffer.from([0xec, 0xff]), true)).toBe('frames')
-    expect(classifySpoolPrefix(Buffer.from([0xec, 0x00]), true)).toBe('frames')
+    expect(classifySpoolPrefix(Buffer.from([0xec, 0xff]), true)).toBe(
+      'unrecognized',
+    )
+    expect(classifySpoolPrefix(Buffer.from([0xec, 0x00]), true)).toBe(
+      'unrecognized',
+    )
+  })
+
+  it('does not call an image in a BlockGroup frameless', () => {
+    const stream = blockGroupStream(Buffer.alloc(64, 7), TRACK)
+    expect(classifySpoolPrefix(stream, true)).toBe('unrecognized')
+    // Cut off right after the BlockGroup's id: still not the writer's shape.
+    const groupStart = headerOnly().length + clusterOpening().length
+    expect(classifySpoolPrefix(stream.subarray(0, groupStart + 1), true)).toBe(
+      'unrecognized',
+    )
+  })
+
+  it('does not skip an element the writer does not write', () => {
+    // A finite-sized Void after the header, and one inside the cluster.
+    const voidElement = ebmlElement(0xec, Buffer.alloc(4))
+    expect(
+      classifySpoolPrefix(Buffer.concat([headerOnly(), voidElement]), true),
+    ).toBe('unrecognized')
+    expect(
+      classifySpoolPrefix(
+        Buffer.concat([headerOnly(), clusterOpening(), voidElement]),
+        true,
+      ),
+    ).toBe('unrecognized')
+  })
+
+  it('does not accept a Segment or Cluster with a size the writer never gives it', () => {
+    const header = headerOnly()
+    // EBML id (4 bytes), a one-byte size, then the EBML header's body.
+    const ebmlLength = 5 + ((header[4] ?? 0) & 0x7f)
+    const segmentBody = header.subarray(ebmlLength + 12)
+    const finiteSegment = Buffer.concat([
+      header.subarray(0, ebmlLength + 4),
+      Buffer.from([
+        0x40 | (segmentBody.length >> 8),
+        segmentBody.length & 0xff,
+      ]),
+      segmentBody,
+    ])
+    expect(classifySpoolPrefix(finiteSegment, true)).toBe('unrecognized')
+    const finiteCluster = Buffer.concat([
+      header,
+      Buffer.from([0x1f, 0x43, 0xb6, 0x75, 0x83]),
+      Buffer.from([0xe7, 0x81, 0x00]),
+    ])
+    expect(classifySpoolPrefix(finiteCluster, true)).toBe('unrecognized')
+  })
+
+  it('does not skip a header element larger than any the writer writes', () => {
+    const header = headerOnly()
+    // The EBML header claims 5 KiB: skipping it could skip a frame.
+    const oversized = Buffer.concat([
+      header.subarray(0, 4),
+      Buffer.from([0x40 | (5_120 >> 8), 5_120 & 0xff]),
+      Buffer.alloc(5_120),
+    ])
+    expect(classifySpoolPrefix(oversized, true)).toBe('unrecognized')
+    expect(classifySpoolPrefix(oversized.subarray(0, 64), true)).toBe(
+      'unrecognized',
+    )
+  })
+
+  it('does not accept the writer elements out of order', () => {
+    const header = headerOnly()
+    // A second EBML header where the Segment belongs.
+    const ebmlLength = 5 + ((header[4] ?? 0) & 0x7f)
+    expect(
+      classifySpoolPrefix(
+        Buffer.concat([header.subarray(0, ebmlLength), header]),
+        true,
+      ),
+    ).toBe('unrecognized')
   })
 })
 
@@ -143,7 +260,7 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('does not touch a spool root that holds only other runs', async () => {
-    const other = await writeSpool('a_part1.u.mkv', withFrames(), 'other-run')
+    const other = await writeSpool(spoolName('a', 1), withFrames(), 'other-run')
 
     await expect(recover()).resolves.toBeUndefined()
 
@@ -168,7 +285,7 @@ describe('recoverOrphanedSpools', () => {
 
   it('keeps the spool root while another run still has a directory', async () => {
     await fs.mkdir(runDirectory(), { recursive: true })
-    const other = await writeSpool('a_part1.u.mkv', withFrames(), 'other-run')
+    const other = await writeSpool(spoolName('a', 1), withFrames(), 'other-run')
 
     const result = await recover()
 
@@ -180,8 +297,13 @@ describe('recoverOrphanedSpools', () => {
   it.each([
     ['an empty file', () => ''],
     ['a header only', headerOnly],
+    [
+      'a header and a cluster with no block',
+      () => Buffer.concat([headerOnly(), clusterOpening()]),
+    ],
+    ['a header cut off inside an element', () => headerOnly().subarray(0, 30)],
   ])('deletes a spool that holds no frame: %s', async (_name, content) => {
-    const spoolPath = await writeSpool('checkout_part1.u-1.mkv', content())
+    const spoolPath = await writeSpool(spoolName('checkout', 1), content())
 
     const result = await recover()
 
@@ -196,8 +318,8 @@ describe('recoverOrphanedSpools', () => {
 
   it('moves a spool with frames to its frames file and warns', async () => {
     const stream = withFrames()
-    await writeSpool('checkout_part2.6f1c9a.mkv', stream)
-    await writeSpool('checkout_part3.77aa01.mkv', withFrames(32, 3))
+    await writeSpool(spoolName('checkout', 2), stream)
+    await writeSpool(spoolName('checkout', 3), withFrames(32, 3))
 
     const result = await recover()
 
@@ -226,8 +348,91 @@ describe('recoverOrphanedSpools', () => {
     )
   })
 
+  it('keeps a spool whose frames are in a structure the writer does not produce', async () => {
+    const stream = blockGroupStream(Buffer.alloc(64, 7), TRACK)
+    const spoolPath = await writeSpool(spoolName('kept', 1), stream)
+
+    const result = await recover()
+
+    const framesPath = path.join(outputDir, 'kept_part1.frames.mkv')
+    expect(result).toMatchObject({
+      deleted: [],
+      directoryRemoved: true,
+      left: [],
+      recovered: [framesPath],
+    })
+    expect(await fs.readFile(framesPath)).toEqual(stream)
+    expect(await exists(spoolPath)).toBe(false)
+    expect(warnings()).toEqual([
+      expect.stringContaining('kept_part1.frames.mkv'),
+    ])
+    expect(
+      logs.some(
+        ({ level, message }) =>
+          level === 'debug' &&
+          message.includes(spoolPath) &&
+          message.includes('not one the writer produces'),
+      ),
+    ).toBe(true)
+  })
+
+  it('leaves files it did not name under their own names, with the directory', async () => {
+    const unrelated = {
+      'checkout_part1.mkv': withFrames(),
+      'checkout_part1.not-a-uuid.mkv': headerOnly(),
+      'notes.mkv': headerOnly(),
+      'video.mkv': withFrames(),
+      [`Checkout_part1.${testSpoolUuid()}.mkv`]: headerOnly(),
+      [`checkout_part1.${testSpoolUuid()}.frames.mkv`]: headerOnly(),
+      [spoolName('checkout', 0)]: headerOnly(),
+    }
+    for (const [name, content] of Object.entries(unrelated)) {
+      await writeSpool(name, content)
+    }
+
+    const result = await recover()
+
+    expect(result).toEqual({
+      deleted: [],
+      directoryRemoved: false,
+      left: [],
+      recovered: [],
+    })
+    for (const [name, content] of Object.entries(unrelated)) {
+      expect(await fs.readFile(path.join(runDirectory(), name))).toEqual(
+        content,
+      )
+    }
+    expect(await fs.readdir(outputDir)).toEqual([SPOOL_DIR_NAME])
+    expect(warnings()).toEqual([])
+  })
+
+  it('leaves one frames file when a second recovery finds the spool an earlier one linked', async () => {
+    const stream = withFrames()
+    const spoolPath = await writeSpool(spoolName('retry', 1), stream)
+    const unlink = vi.fn(async () => {
+      throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+    })
+
+    const first = await recover({ clock: noDelay, fileSystem: { unlink } })
+    const second = await recover()
+
+    const framesPath = path.join(outputDir, 'retry_part1.frames.mkv')
+    expect(first?.left).toEqual([
+      { path: spoolPath, reason: expect.stringContaining(framesPath) },
+    ])
+    expect(second).toMatchObject({
+      deleted: [],
+      directoryRemoved: true,
+      left: [],
+      recovered: [framesPath],
+    })
+    expect(await fs.readdir(outputDir)).toEqual(['retry_part1.frames.mkv'])
+    expect(await fs.readFile(framesPath)).toEqual(stream)
+  })
+
   it('names one recovered recording in the singular', async () => {
-    await writeSpool('checkout_part1.u.mkv', withFrames())
+    await writeSpool(spoolName('checkout', 1), withFrames())
 
     await recover()
 
@@ -236,7 +441,7 @@ describe('recoverOrphanedSpools', () => {
 
   it('recovers a spool whose first image is far larger than the prefix it reads', async () => {
     const stream = withFrames(300_000, 1)
-    await writeSpool('big_part1.u.mkv', stream)
+    await writeSpool(spoolName('big', 1), stream)
     const requested: number[] = []
     const realOpen = fs.open.bind(fs)
     vi.spyOn(fs, 'open').mockImplementation(
@@ -277,7 +482,7 @@ describe('recoverOrphanedSpools', () => {
     await fs.writeFile(existing, 'an earlier recording')
     await fs.writeFile(existingRun2, 'another earlier recording')
     const stream = withFrames()
-    await writeSpool('checkout_part1.u.mkv', stream)
+    await writeSpool(spoolName('checkout', 1), stream)
 
     const result = await recover()
 
@@ -292,7 +497,7 @@ describe('recoverOrphanedSpools', () => {
 
   it('leaves a spool that cannot be moved, warns, and keeps the directory', async () => {
     const stream = withFrames()
-    const spoolPath = await writeSpool('checkout_part1.u.mkv', stream)
+    const spoolPath = await writeSpool(spoolName('checkout', 1), stream)
     const linkFile = vi.fn(async () => {
       throw Object.assign(new Error('cross-device link not permitted'), {
         code: 'EXDEV',
@@ -317,8 +522,8 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('moves what it can and leaves only the spool that failed', async () => {
-    const good = await writeSpool('a_part1.u.mkv', withFrames())
-    const bad = await writeSpool('b_part1.u.mkv', withFrames())
+    const good = await writeSpool(spoolName('a', 1), withFrames())
+    const bad = await writeSpool(spoolName('b', 1), withFrames())
     const linkFile = vi.fn(async (existing: string, target: string) => {
       if (existing === bad) {
         throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' })
@@ -338,7 +543,7 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('reports a spool whose frames were linked but whose own name stayed', async () => {
-    const spoolPath = await writeSpool('a_part1.u.mkv', withFrames())
+    const spoolPath = await writeSpool(spoolName('a', 1), withFrames())
     const unlink = vi.fn(async () => {
       throw Object.assign(new Error('locked'), { code: 'ENOSPC' })
     })
@@ -357,7 +562,7 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('leaves a frameless spool it cannot delete', async () => {
-    const spoolPath = await writeSpool('a_part1.u.mkv', headerOnly())
+    const spoolPath = await writeSpool(spoolName('a', 1), headerOnly())
     const unlink = vi.fn(async () => {
       throw Object.assign(new Error('read-only'), { code: 'EROFS' })
     })
@@ -376,7 +581,7 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('leaves a spool it cannot read', async () => {
-    const spoolPath = await writeSpool('a_part1.u.mkv', withFrames())
+    const spoolPath = await writeSpool(spoolName('a', 1), withFrames())
     vi.spyOn(fs, 'open').mockRejectedValueOnce(new Error('EMFILE: too many'))
 
     const result = await recover()
@@ -392,11 +597,11 @@ describe('recoverOrphanedSpools', () => {
     const note = await writeSpool('notes.txt', 'keep me')
     const nested = path.join(runDirectory(), 'nested')
     await fs.mkdir(nested)
-    const nestedSpool = path.join(nested, 'inner_part1.u.mkv')
+    const nestedSpool = path.join(nested, spoolName('inner', 1))
     await fs.writeFile(nestedSpool, withFrames())
-    await writeSpool('a_part1.u.mkv', withFrames())
+    await writeSpool(spoolName('a', 1), withFrames())
     // A directory named like a spool is not a regular file either.
-    await fs.mkdir(path.join(runDirectory(), 'dir_part1.u.mkv'))
+    await fs.mkdir(path.join(runDirectory(), spoolName('dir', 1)))
 
     const result = await recover()
 
@@ -406,7 +611,7 @@ describe('recoverOrphanedSpools', () => {
     ])
     expect(await fs.readFile(note, 'utf8')).toBe('keep me')
     expect(await exists(nestedSpool)).toBe(true)
-    expect(await exists(path.join(runDirectory(), 'dir_part1.u.mkv'))).toBe(
+    expect(await exists(path.join(runDirectory(), spoolName('dir', 1)))).toBe(
       true,
     )
     expect(
@@ -418,7 +623,7 @@ describe('recoverOrphanedSpools', () => {
   })
 
   it('rethrows an unexpected failure to remove the directory after reporting the frames', async () => {
-    await writeSpool('a_part1.u.mkv', withFrames())
+    await writeSpool(spoolName('a', 1), withFrames())
     const removeDirectory = vi.fn(async () => {
       throw Object.assign(new Error('EPERM: operation not permitted'), {
         code: 'EPERM',
@@ -444,7 +649,7 @@ describe('recoverOrphanedSpools', () => {
   it.each(['', '.', '..', '../sibling', 'a/b', 'a\\b', 'C:\\root'])(
     'refuses the unsafe run ID %j and touches nothing',
     async (runId) => {
-      const spoolPath = await writeSpool('a_part1.u.mkv', withFrames())
+      const spoolPath = await writeSpool(spoolName('a', 1), withFrames())
 
       await expect(recover({ runId })).rejects.toThrow('unsafe')
 
@@ -458,7 +663,7 @@ describe('recoverOrphanedSpools', () => {
       path.join(os.tmpdir(), 'wdio-spool-elsewhere-'),
     )
     try {
-      const victim = path.join(elsewhere, 'a_part1.u.mkv')
+      const victim = path.join(elsewhere, spoolName('a', 1))
       await fs.writeFile(victim, withFrames())
       await fs.mkdir(spoolRoot(), { recursive: true })
       await fs.symlink(elsewhere, runDirectory(), 'junction')
@@ -470,6 +675,42 @@ describe('recoverOrphanedSpools', () => {
     } finally {
       await fs.rm(elsewhere, { force: true, recursive: true })
     }
+  })
+
+  it('refuses a spool root that is a link and touches nothing behind it', async () => {
+    // Node creates a junction on Windows and a plain symbolic link elsewhere;
+    // lstat reports both as a link, not a directory.
+    const elsewhere = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'wdio-spool-elsewhere-'),
+    )
+    try {
+      const linkedRun = path.join(elsewhere, RUN_ID)
+      await fs.mkdir(linkedRun)
+      const frameless = path.join(linkedRun, spoolName('a', 1))
+      const withImages = path.join(linkedRun, spoolName('b', 1))
+      await fs.writeFile(frameless, headerOnly())
+      await fs.writeFile(withImages, withFrames())
+      await fs.symlink(elsewhere, spoolRoot(), 'junction')
+      expect((await fs.lstat(spoolRoot())).isSymbolicLink()).toBe(true)
+
+      await expect(recover()).rejects.toThrow('not a plain directory')
+
+      expect(await fs.readFile(frameless)).toEqual(headerOnly())
+      expect(await fs.readFile(withImages)).toEqual(withFrames())
+      expect(await fs.readdir(outputDir)).toEqual([SPOOL_DIR_NAME])
+      expect(await fs.readdir(elsewhere)).toEqual([RUN_ID])
+    } finally {
+      await fs.unlink(spoolRoot()).catch(() => undefined)
+      await fs.rm(elsewhere, { force: true, recursive: true })
+    }
+  })
+
+  it('refuses a spool root that is a file', async () => {
+    await fs.writeFile(spoolRoot(), 'not a directory')
+
+    await expect(recover()).rejects.toThrow('not a plain directory')
+
+    expect(await fs.readFile(spoolRoot(), 'utf8')).toBe('not a directory')
   })
 
   it('refuses a run directory that is a file', async () => {

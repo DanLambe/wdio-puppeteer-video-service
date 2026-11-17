@@ -40,6 +40,7 @@ import {
   SpoolBudget,
   type SpoolLimits,
 } from './spool-budget.js'
+import { formatSpoolFileName } from './spool-name.js'
 import type { RecordingMediaFinalization } from './worker-recording-coordinator.js'
 
 // A tab that fails to start recording is retried on later commands, a few
@@ -846,11 +847,21 @@ export class RecordingController implements ContextFollowerTarget {
     if (mode === 'live' || this.spoolBudget?.promoted) {
       return undefined
     }
-    const part = this.captureSession.currentSegment.toString()
-    return path.join(
-      storage.directory,
-      `${this.captureSession.currentTestSlug}_part${part}.${storage.uuid()}.mkv`,
-    )
+    const fileName = formatSpoolFileName({
+      part: this.captureSession.currentSegment,
+      slug: this.captureSession.currentTestSlug,
+      uuid: storage.uuid(),
+    })
+    if (fileName === undefined) {
+      // Recovery would not recognize the name, so a crash could not recover
+      // the spool: this segment records live instead.
+      this.log(
+        'debug',
+        `[WdioPuppeteerVideoService] Recording segment ${this.captureSession.currentSegment.toString()} live: its spool name would not be recognized by orphan recovery.`,
+      )
+      return undefined
+    }
+    return path.join(storage.directory, fileName)
   }
 
   private createSpoolBudget(): SpoolBudget | undefined {
