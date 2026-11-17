@@ -426,13 +426,20 @@ export class ScreencastRecorder {
     // Its close event may still be on its way. Report an exit that came
     // first, but never the termination this requests.
     this.noteSinkFailure()
-    this.aborting ??= Promise.resolve().then(() => this.abortRecording())
+    if (this.aborting === undefined) {
+      // Cancelled in the caller's turn, before the abort's own: a caller that
+      // has just read `output` must not see a switch after it.
+      const promotion = this.promotion?.cancel()
+      this.aborting = Promise.resolve().then(() =>
+        this.abortRecording(promotion),
+      )
+    }
     return this.aborting
   }
 
-  private async abortRecording(): Promise<void> {
-    // Cancelled first, in this turn: no switch can follow.
-    const promotion = this.promotion?.cancel()
+  private async abortRecording(
+    promotion: Promise<void> | undefined,
+  ): Promise<void> {
     this.stopCapturing()
     this.cancelled.resolve()
     this.resolveFirstFrame?.()

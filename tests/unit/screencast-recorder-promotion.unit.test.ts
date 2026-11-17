@@ -13,7 +13,10 @@ import {
   SpoolBudget,
   type SpoolLimits,
 } from '../../src/service/spool-budget.js'
-import type { PromotionPlan } from '../../src/service/spool-promotion.js'
+import {
+  type PromotionPlan,
+  SpoolPromotion,
+} from '../../src/service/spool-promotion.js'
 import {
   createFakeFfmpegProcess,
   type FakeFfmpegProcess,
@@ -586,6 +589,30 @@ describe('a recorder aborted in every promotion state', () => {
     expect(await exists(plannedPath())).toBe(false)
     expect(await exists(spoolPath())).toBe(true)
     expect(rig.recorder.output.kind).toBe('spool')
+  })
+
+  it('cancels a replay in the caller’s turn, so output read just before an abort stays true', async () => {
+    // The engine reads `output` and then aborts a discarded recording. A
+    // replay that switched between the two would leave the promoted file
+    // behind while the engine deletes only the spool.
+    const rig = await createRig({
+      limits: { promoteBytes: 300 },
+      stalled: true,
+    })
+    await play(rig, FRAMES.slice(0, 20))
+    await vi.waitFor(() => {
+      expect(rig.processes).toHaveLength(1)
+    })
+    const cancel = vi.spyOn(SpoolPromotion.prototype, 'cancel')
+    try {
+      const aborting = rig.recorder.abort()
+      expect(cancel).toHaveBeenCalledTimes(1)
+      await aborting
+      expect(rig.recorder.output.kind).toBe('spool')
+      expect(await exists(plannedPath())).toBe(false)
+    } finally {
+      cancel.mockRestore()
+    }
   })
 
   it('aborts when live: the encoder dies and no spool remains', async () => {
