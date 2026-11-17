@@ -34,10 +34,12 @@ import {
   type ScreencastQueueStats,
   type ScreencastRecorder,
 } from '../../src/service/screencast-recorder.js'
+import { SpoolBudget } from '../../src/service/spool-budget.js'
 import {
   encodeSpool,
   type SpoolEncodeRunner,
 } from '../../src/service/spool-encode.js'
+import type { PromotionPlan } from '../../src/service/spool-promotion.js'
 import type { OutputFormat } from '../../src/types.js'
 import { requireE2eFfmpeg } from '../scripts/ffmpeg-detection.js'
 import {
@@ -1196,5 +1198,326 @@ describe('recorded frame timeline when the encoder exits early', () => {
     expect(timeline.spans).toHaveLength(1)
     expect(timeline.spans[0]).toMatchObject({ color: 'red', start: 0 })
     expect(timeline.spans[0]?.end).toBeLessThan(0.5)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Promotion: a spool that grows too large continues as a live encoder.
+// ---------------------------------------------------------------------------
+
+const LOW_FREE_BYTES = 1_000
+const HIGH_FREE_BYTES = Number.MAX_SAFE_INTEGER
+const PROMOTION_LIMITS = {
+  promoteBytes: Number.MAX_SAFE_INTEGER,
+  hardCapBytes: Number.MAX_SAFE_INTEGER,
+  promoteFreeBytes: 2_000,
+  stopFreeBytes: 500,
+  // Every check reads the free space, so the test decides when to promote.
+  freeCheckIntervalBytes: 1,
+}
+
+interface PromotedOptions {
+  /** Aborts the recorder after the last frame, as a killed worker would. */
+  readonly kill?: boolean
+  /** The reference: the same script and pace, encoded live. */
+  readonly live?: boolean
+  readonly limits?: Partial<typeof PROMOTION_LIMITS>
+  /**
+   * When free space drops below the promotion floor: at segment start, or
+   * after the frame at this index. `undefined` never promotes.
+   */
+  readonly promoteAt?: 'start' | number
+  /** Stops before the replay has caught up, whatever the encoder does. */
+  readonly stopAtOnce?: boolean
+  /** The promoted encoder takes nothing until the recording has stopped. */
+  readonly stalled?: boolean
+  /** Waits for the switch before the next frame, or only before stop. */
+  readonly waitFor?: 'switch' | 'stop'
+}
+
+/**
+ * Like `recordScripted` for a spool with a promotion plan, but the script is
+ * played asynchronously so the replay and the frames interleave.
+ */
+const recordPromoted = async (
+  name: string,
+  frames: readonly ScriptedFrame[],
+  stopAt: number,
+  options: PromotedOptions = {},
+): Promise<{
+  output: string
+  recorder: ScreencastRecorder
+  spoolPath: string
+  warnings: string[]
+}> => {
+  const output = await reserveOutput(name, 'webm')
+  const spoolPath = path.join(directory, `${name}.spool.mkv`)
+  const warnings: string[] = []
+  let free = options.promoteAt === 'start' ? LOW_FREE_BYTES : HIGH_FREE_BYTES
+  const budget = new SpoolBudget(
+    { ...PROMOTION_LIMITS, ...options.limits },
+    { freeBytes: async () => free },
+  )
+  const plan: PromotionPlan = {
+    ffmpegPath,
+    plannedPath: output,
+    remove: async (filePath) => {
+      await fs.rm(filePath, { force: true })
+    },
+    // The placeholder reserved above, as the engine's reservation would give.
+    reserveOutput: async () => output,
+    warn: (message) => {
+      warnings.push(message)
+    },
+  }
+  const holdClock = createHoldClock()
+  const source = createFrameSource(frames[0] as ScriptedFrame)
+  const recorder = await recordScreencast(
+    source.page,
+    options.live
+      ? { ...spoolSettings('webm', 1), outputPath: output }
+      : { ...spoolSettings('webm', 1), budget, promotion: plan, spoolPath },
+    {
+      clock: holdClock.clock,
+      monotonicNow: source.monotonicNow,
+      ...(options.stalled
+        ? {
+            spawnProcess: (command: string, args: string[]) => {
+              const child = spawnEncoder(command, args)
+              stallInput(child)
+              return child
+            },
+          }
+        : {}),
+    },
+  )
+  // Every step waits for the recorder to hand its blocks on, so a hold block
+  // is written for each quiet second whatever the machine's pace: runs
+  // compared with each other then have the same blocks.
+  const pause = async (): Promise<void> => {
+    await new Promise((resolve) => setImmediate(resolve))
+    for (let turn = 0; turn < 5_000; turn += 1) {
+      if (recorder.queueStats.pendingBlocks === 0) {
+        return
+      }
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+  const switched = (): Promise<void> =>
+    waitFor(() => recorder.output.kind === 'encoded', 'the promotion to switch')
+  const afterFrame = async (index: number): Promise<void> => {
+    if (index === options.promoteAt) {
+      free = LOW_FREE_BYTES
+    }
+    await pause()
+    if (options.waitFor === 'switch' && recorder.output.kind === 'spool') {
+      if (options.promoteAt === 'start' || index > (options.promoteAt ?? 0)) {
+        await switched()
+      }
+    }
+  }
+  await afterFrame(0)
+  let second = 1
+  let index = 0
+  for (const frame of frames.slice(1)) {
+    for (; second < frame.at; second += 1) {
+      source.setNow(second * 1_000)
+      holdClock.hold()
+      await pause()
+    }
+    index += 1
+    source.emit(frame)
+    await afterFrame(index)
+  }
+  for (; second <= stopAt; second += 1) {
+    source.setNow(second * 1_000)
+    holdClock.hold()
+    await pause()
+  }
+  source.setNow(stopAt * 1_000)
+  if (options.waitFor === 'stop' && !options.stopAtOnce) {
+    await switched()
+  }
+  if (options.kill) {
+    await waitFor(
+      () => recorder.queueStats.pendingBlocks === 0,
+      'the spool to take every block',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await recorder.abort()
+  } else {
+    await recorder.stop()
+  }
+  return { output, recorder, spoolPath, warnings }
+}
+
+/** The recording as a player gets it: encoded already, or its spool encoded. */
+const finishPromoted = async (
+  run: Awaited<ReturnType<typeof recordPromoted>>,
+  name: string,
+): Promise<string> => {
+  const { recorder } = run
+  if (recorder.output.kind === 'encoded') {
+    expect(recorder.ffmpegResult.code).toBe(0)
+    expect(recorder.incompleteReason).toBeUndefined()
+    // A promoted recording leaves no spool.
+    await expect(fs.access(run.spoolPath)).rejects.toThrow()
+    return run.output
+  }
+  const output = await reserveOutput(`${name}-encoded`, 'webm')
+  await encodeSpooled(recorder, output)
+  return output
+}
+
+const expectSameTimeline = (
+  actual: string,
+  expected: string,
+  fps: number,
+): void => {
+  const timeline = decodeColorTimeline(ffmpegPath, actual, fps, passthrough)
+  const reference = decodeColorTimeline(ffmpegPath, expected, fps, passthrough)
+  expect(timeline.spans).toEqual(reference.spans)
+  expect(timeline.timestamps).toEqual(reference.timestamps)
+  expect(readContainerDuration(ffmpegPath, actual)).toBe(
+    readContainerDuration(ffmpegPath, expected),
+  )
+  expectFiniteDuration(actual, timeline, fps)
+}
+
+const PROMOTION_FRAMES: readonly ScriptedFrame[] = [
+  { at: 0, color: 'red' },
+  { at: 0.1, color: 'green' },
+  { at: 0.2, color: 'red' },
+  { at: 2, color: 'green' },
+  { at: 2.05, color: 'blue' },
+  { at: 2.1, color: 'red' },
+  { at: 3, color: 'blue' },
+]
+
+describe('promoted recordings', () => {
+  it.each([
+    [
+      'before the first block',
+      { promoteAt: 'start', waitFor: 'switch' },
+      'encoded',
+    ],
+    ['mid-stream', { promoteAt: 2, waitFor: 'switch' }, 'encoded'],
+    ['during a burst', { promoteAt: 3, waitFor: 'stop' }, 'encoded'],
+    // The stop races the replay: either side of it must show the same video.
+    ['just before stop', { promoteAt: 6, stopAtOnce: true }, undefined],
+    [
+      'when stop arrives during the replay',
+      { promoteAt: 3, stalled: true, stopAtOnce: true },
+      'spool',
+    ],
+  ] as const)(
+    'decode to the live timeline, promoted %s',
+    async (title, options, outcome) => {
+      const name = `promoted-${title.replaceAll(' ', '-')}`
+      const live = await recordPromoted(`${name}-live`, PROMOTION_FRAMES, 5, {
+        live: true,
+      })
+      const run = await recordPromoted(name, PROMOTION_FRAMES, 5, options)
+
+      if (outcome) {
+        expect(run.recorder.output.kind).toBe(outcome)
+      }
+      expect(run.warnings).toEqual([])
+      expectSameTimeline(
+        await finishPromoted(run, name),
+        await finishPromoted(live, `${name}-live`),
+        30,
+      )
+      // A segment that did not promote leaves no output behind but its own.
+      if (run.recorder.output.kind === 'spool') {
+        await expect(fs.access(run.output)).rejects.toThrow()
+      }
+    },
+  )
+
+  it('promotes a quiet recording with the timeline a live one has', async () => {
+    const frames: readonly ScriptedFrame[] = [
+      { at: 0, color: 'red' },
+      { at: 35, color: 'green' },
+    ]
+    const reference = await recordPromoted('promoted-gap-ref', frames, 36, {
+      live: true,
+    })
+    const run = await recordPromoted('promoted-gap', frames, 36, {
+      promoteAt: 'start',
+      waitFor: 'switch',
+    })
+
+    expect(run.recorder.output.kind).toBe('encoded')
+    expectSameTimeline(
+      await finishPromoted(run, 'promoted-gap'),
+      await finishPromoted(reference, 'promoted-gap-ref'),
+      30,
+    )
+  })
+
+  it('ends the recording at the hard cap with every earlier span intact', async () => {
+    const frames: readonly ScriptedFrame[] = [
+      { at: 0, color: 'red' },
+      { at: 1, color: 'green' },
+      { at: 2, color: 'blue' },
+      { at: 3, color: 'red' },
+      { at: 4, color: 'green' },
+      { at: 5, color: 'blue' },
+    ]
+    const full = await recordPromoted('cap-full', frames, 6)
+    const fullSize = (await fs.stat(full.spoolPath)).size
+    const capped = await recordPromoted('cap-capped', frames, 6, {
+      limits: { hardCapBytes: Math.floor(fullSize * 0.6) },
+    })
+
+    expect(capped.recorder.incompleteReason).toMatch(
+      /^The recording's frame spools reached the disk limit of .*; capture stopped after .*s to bound disk use\.$/u,
+    )
+    expect((await fs.stat(capped.spoolPath)).size).toBeLessThanOrEqual(
+      Math.floor(fullSize * 0.6),
+    )
+    const spans = decodeColorTimeline(
+      ffmpegPath,
+      await finishPromoted(capped, 'cap-capped'),
+      30,
+      passthrough,
+    ).spans
+    const reference = decodeColorTimeline(
+      ffmpegPath,
+      await finishPromoted(full, 'cap-full'),
+      30,
+      passthrough,
+    ).spans
+    expect(spans.length).toBeGreaterThanOrEqual(2)
+    expect(spans.length).toBeLessThan(reference.length)
+    // Every span before the last is exactly what the whole recording shows.
+    expect(spans.slice(0, -1)).toEqual(reference.slice(0, spans.length - 1))
+    expect(spans.at(-1)?.color).toBe(reference[spans.length - 1]?.color)
+  })
+
+  it('leaves a spool that decodes to its newest held image when a crash comes during the replay', async () => {
+    const run = await recordPromoted(
+      'crash-replay',
+      [
+        { at: 0, color: 'red' },
+        { at: 1, color: 'green' },
+        { at: 2, color: 'blue' },
+      ],
+      8,
+      { kill: true, promoteAt: 0, stalled: true },
+    )
+
+    expect(run.recorder.output.kind).toBe('spool')
+    const output = await reserveOutput('crash-replay-encoded', 'webm')
+    await encodeSpooled(run.recorder, output)
+    const spans = decodeColorTimeline(ffmpegPath, output, 30, passthrough).spans
+    expect(spans.slice(0, 2)).toEqual([
+      { color: 'red', start: 0, end: 1 },
+      { color: 'green', start: 1, end: 2 },
+    ])
+    // Blue is on disk, held until the last hold before the kill.
+    expect(spans[2]).toEqual({ color: 'blue', start: 2, end: 6.533 })
+    expect(spans).toHaveLength(3)
   })
 })
