@@ -66,3 +66,9 @@ export const dominantColor = (spans: readonly ColorSpan[]): SolidColor => {
 export const firstColor = (spans: readonly ColorSpan[]): SolidColor => {
   return paintedSpans(spans)[0].color
 }
+
+/** The color a segment's painted frames end on. */
+export const lastColor = (spans: readonly ColorSpan[]): SolidColor => {
+  const painted = paintedSpans(spans)
+  return (painted.at(-1) ?? painted[0]).color
+}

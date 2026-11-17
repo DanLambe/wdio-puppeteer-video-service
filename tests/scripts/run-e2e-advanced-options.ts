@@ -2,16 +2,21 @@ import { spawn } from 'node:child_process'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
+import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
+import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
 import {
   assertSpoolDirectoryRemoved,
   captureEncodingSuffix,
 } from '../utils/capture-encoding.js'
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
+import { decodeColorTimeline } from '../utils/media-timeline.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
+import { lastColor, segmentPartNumber } from '../utils/segment-colors.js'
 import {
   findTabProvenanceProblems,
   readEntryTabs,
+  type TabStep,
   toTabSteps,
 } from '../utils/tab-provenance.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
@@ -35,6 +40,7 @@ type AdvancedMode =
   | 'global-concurrency'
   | 'ffmpeg-failure'
   | 'failure-burst'
+  | 'tail-frame'
 
 // Each test moves tab twice: part 1 on the first tab, part 2 on the second,
 // part 3 back on the first.
@@ -178,6 +184,75 @@ const assertEncodesOneAtATime = async (
   )
 }
 
+// The part of each tail-frame test that stops right after its red tab turns
+// green, and the tab it records.
+const TAIL_FRAME_PARTS: ReadonlyArray<
+  readonly [title: string, part: number, tab: TabStep]
+> = [
+  ['should film the last paint before a kept test ends', 1, [1, 'start']],
+  [
+    'should film the last paint before recording moves to another tab',
+    3,
+    [1, 'command'],
+  ],
+]
+
+// Chrome delivers the frame of a paint a little after the click that caused
+// it returns: a part that stops straight away must still end on that paint.
+const assertTailFrameEntries = async (
+  resultsDir: string,
+  ffmpegPath: string | undefined,
+): Promise<void> => {
+  if (!ffmpegPath) {
+    throw new Error(
+      '[e2e:advanced] tail-frame mode decodes its parts: no FFmpeg',
+    )
+  }
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] tail-frame mode produced an invalid manifest',
+    )
+  }
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  const passthrough = resolveTimestampPassthroughArgs(
+    await readFfmpegVersion(ffmpegPath),
+  )
+  const problems: string[] = []
+  for (const [title, part, tab] of TAIL_FRAME_PARTS) {
+    const segment = entries
+      .find((entry) => entry.test?.name === title)
+      ?.capture.segments.find(
+        (candidate) => segmentPartNumber(candidate.path) === part,
+      )
+    if (!segment) {
+      problems.push(`"${title}" has no part ${part.toString()}`)
+      continue
+    }
+    const [step] = toTabSteps([segment.tab])
+    const { spans } = decodeColorTimeline(
+      ffmpegPath,
+      path.join(resultsDir, segment.path),
+      30,
+      passthrough,
+    )
+    const last = lastColor(spans)
+    if (JSON.stringify(step) !== JSON.stringify(tab) || last !== 'green') {
+      problems.push(
+        `"${title}" part ${part.toString()} on tab ${JSON.stringify(step)} ends on ${last}: ${JSON.stringify(spans)}`,
+      )
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[e2e:advanced] tail-frame parts should end on the last paint: ${problems.join('; ')}`,
+    )
+  }
+  console.log('[e2e:advanced] tail-frame: every part ends on its last paint.')
+}
+
 const requestedMode = process.argv[2] || 'all'
 
 const resolveModeOrder = (mode: string): AdvancedMode[] => {
@@ -208,6 +283,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'global-concurrency',
       'ffmpeg-failure',
       'failure-burst',
+      'tail-frame',
     ]
   }
 
@@ -227,7 +303,8 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
     mode === 'retention' ||
     mode === 'global-concurrency' ||
     mode === 'ffmpeg-failure' ||
-    mode === 'failure-burst'
+    mode === 'failure-burst' ||
+    mode === 'tail-frame'
   ) {
     return [mode]
   }
@@ -238,7 +315,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, or failure-burst. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, failure-burst, or tail-frame. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
   )
   process.exit(1)
 }
@@ -285,6 +362,12 @@ const runMode = async (
   }
   if (mode === 'failure-burst') {
     await assertFailureBurstEntries(resultsDir)
+  }
+  if (mode === 'tail-frame') {
+    await assertTailFrameEntries(
+      resultsDir,
+      environment.ffmpegDetection.resolvedPath,
+    )
   }
   if (
     mode === 'retry' ||
