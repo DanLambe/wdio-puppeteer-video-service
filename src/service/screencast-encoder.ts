@@ -1,4 +1,4 @@
-import type { ChildProcess } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import { FFMPEG_TERMINATION_HELPER_TIMEOUT_MS } from './constants.js'
 import {
@@ -16,6 +16,21 @@ export interface FfmpegResult {
 export interface ScreencastEncoderDependencies {
   readonly clock?: ClockBoundary
   readonly terminateProcessTree?: TerminateFfmpegProcessTree
+}
+
+/**
+ * Starts FFmpeg on a segment file: it reads the recorder's stream from its
+ * standard input and writes the file itself, so its standard output is unused.
+ */
+export const spawnFfmpegEncoder = (
+  command: string,
+  args: string[],
+): ChildProcess => {
+  return spawn(command, args, {
+    stdio: ['pipe', 'ignore', 'pipe'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  })
 }
 
 // Own the process from spawn, including the interval before CDP attaches.

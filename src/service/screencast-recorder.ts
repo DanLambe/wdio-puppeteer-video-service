@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { CDPSession, Page } from 'puppeteer-core'
@@ -18,8 +18,13 @@ import {
   type CaptureCanvas,
   createFfmpegArguments,
 } from './screencast-arguments.js'
-import type { FfmpegResult } from './screencast-encoder.js'
+import { type FfmpegResult, spawnFfmpegEncoder } from './screencast-encoder.js'
 import type { SegmentBudget, SpoolBudget } from './spool-budget.js'
+import {
+  type PromotionPlan,
+  SpoolPromotion,
+  type SpoolPromotionDependencies,
+} from './spool-promotion.js'
 
 export type { FfmpegResult } from './screencast-encoder.js'
 
@@ -45,6 +50,9 @@ const HOLD_LAG_SECONDS = 0.5
 const WRITE_BATCH = 32
 // What a block adds to its image: the largest cluster header and block header.
 const BLOCK_OVERHEAD_BYTES = 32
+// How long an abort waits for a promotion to undo itself: its encoder aborted,
+// its output removed, its spool gone.
+const PROMOTION_ABORT_TIMEOUT_MS = 3_000
 // Blocks a spooling segment must always have room for: one more hold, and the
 // fill and two end markers that stopping writes.
 const RESERVED_BLOCKS = 4
@@ -75,6 +83,11 @@ export interface ScreencastSpoolTarget {
   /** The recording's spool budget; without it the spool is unbounded. */
   readonly budget?: SpoolBudget
   /**
+   * How the segment continues as live encoding when its spool grows too
+   * large; without it a spool only ever stays a spool.
+   */
+  readonly promotion?: PromotionPlan
+  /**
    * Told why a spool that a failed startup created could not be removed.
    * Startup removes only a file its own exclusive open created.
    */
@@ -90,7 +103,11 @@ export type ScreencastRecorderOptions = ScreencastCaptureOptions &
 
 /** What a stopped recorder produced: an encoded segment file, or a spool. */
 export type ScreencastOutput =
-  | { readonly kind: 'encoded' }
+  | {
+      readonly kind: 'encoded'
+      /** Where a promoted spool's encoder writes; the plan's reserved file. */
+      readonly outputPath?: string
+    }
   | { readonly kind: 'spool'; readonly spool: ScreencastSpool }
 
 // A spool has no encoder until it is encoded, and so no encoder result.
@@ -233,6 +250,11 @@ interface PixelDimensions {
 export interface ScreencastRecorderInit {
   /** Bounds a spool sink's growth and tells the recorder when to stop. */
   readonly budget?: SegmentBudget
+  /** How to continue a spool as live encoding, and what that needs. */
+  readonly promotion?: {
+    readonly dependencies: SpoolPromotionDependencies
+    readonly plan: PromotionPlan
+  }
   /** The frame size FFmpeg is told to expect. */
   readonly canvas: CaptureCanvas
   readonly clock?: ClockBoundary
@@ -272,6 +294,8 @@ export class ScreencastRecorder {
   // Not readonly: a later phase replaces a spool with a live encoder.
   private sink: ScreencastSink
   private readonly budget: SegmentBudget | undefined
+  private readonly promotionSetup: ScreencastRecorderInit['promotion']
+  private promotion: SpoolPromotion | undefined
   private readonly fps: number
   // Output frames per second: capture positions are spaced `1 / fps` apart
   // in capture time and `1 / playbackRate` apart in the video.
@@ -320,6 +344,7 @@ export class ScreencastRecorder {
     this.session = init.session
     this.sink = init.sink
     this.budget = init.budget
+    this.promotionSetup = init.promotion
     this.fps = init.fps
     this.playbackRate = init.fps * (init.speed ?? 1)
     this.monotonicNow = init.monotonicNow
@@ -350,9 +375,13 @@ export class ScreencastRecorder {
 
   /** Whether the recording is an encoded segment file or a spool to encode. */
   get output(): ScreencastOutput {
-    return this.sink.kind === 'spool'
-      ? { kind: 'spool', spool: this.sink.spool }
-      : { kind: 'encoded' }
+    if (this.sink.kind === 'spool') {
+      return { kind: 'spool', spool: this.sink.spool }
+    }
+    const outputPath = this.promotion?.outputPath
+    return outputPath === undefined
+      ? { kind: 'encoded' }
+      : { kind: 'encoded', outputPath }
   }
 
   /** Why capture stopped before the recording was stopped, if it did. */
@@ -402,12 +431,33 @@ export class ScreencastRecorder {
   }
 
   private async abortRecording(): Promise<void> {
+    // Cancelled first, in this turn: no switch can follow.
+    const promotion = this.promotion?.cancel()
     this.stopCapturing()
     this.cancelled.resolve()
     this.resolveFirstFrame?.()
     this.releasePending()
     void this.detachSession()
-    await this.sink.abort()
+    await Promise.all([this.sink.abort(), this.boundedWait(promotion)])
+  }
+
+  // A promotion undoes itself with files and a process; an abort waits for
+  // that only so long.
+  private async boundedWait(task: Promise<void> | undefined): Promise<void> {
+    if (!task) {
+      return
+    }
+    const expired = Promise.withResolvers<void>()
+    const timer = this.clock.setTimeout(
+      expired.resolve,
+      PROMOTION_ABORT_TIMEOUT_MS,
+    )
+    timer.unref?.()
+    try {
+      await Promise.race([task, expired.promise])
+    } finally {
+      this.clock.clearTimeout(timer)
+    }
   }
 
   private detachSession(): Promise<void> {
@@ -433,12 +483,15 @@ export class ScreencastRecorder {
   }
 
   // The budget decides when a spool has taken all the disk it may; the
-  // recorder only acts on it. Promotion is a later step: until a segment can
-  // continue live, the hard cap and the free-space floor are what bound it.
+  // recorder only acts on it. A segment that cannot continue live is bounded
+  // by the hard cap and the free-space floor.
   private watchBudget(): void {
     this.budget?.attach({
-      isSpooling: () => this.sink.kind === 'spool',
-      promote: () => undefined,
+      isSpooling: () =>
+        this.sink.kind === 'spool' && this.promotion?.state !== 'replaying',
+      promote: () => {
+        this.promote()
+      },
       stop: (detail) => {
         this.limitReached(detail)
       },
@@ -452,6 +505,40 @@ export class ScreencastRecorder {
     return this.budget?.check(
       this.queuedBlockBytes + RESERVED_BLOCKS * blockCost(frame),
     )
+  }
+
+  // The spool grew past what it may: replay it into an encoder, which then
+  // takes over. Once, and never while the recording is ending.
+  private promote(): void {
+    const sink = this.sink
+    const setup = this.promotionSetup
+    if (
+      !setup ||
+      sink.kind !== 'spool' ||
+      this.promotion ||
+      this.stopped ||
+      this.stopping !== undefined ||
+      this.aborting !== undefined
+    ) {
+      return
+    }
+    this.promotion = new SpoolPromotion(
+      sink,
+      setup.plan,
+      (encoder) => {
+        this.switchSink(encoder)
+      },
+      setup.dependencies,
+    )
+    this.promotion.start()
+  }
+
+  // Called in the turn that finds the encoder has everything the spool had.
+  private switchSink(encoder: EncoderSink): void {
+    this.sink = encoder
+    this.watchSink(encoder)
+    // The spool is closing and about to be deleted: it no longer counts.
+    this.budget?.release()
   }
 
   private limitReached(detail: string): void {
@@ -545,6 +632,9 @@ export class ScreencastRecorder {
   }
 
   private async finish(): Promise<void> {
+    // A replay still running is cancelled in this turn, so it cannot switch
+    // while the recording ends; the spool is complete and is kept.
+    const promotion = this.promotion?.cancel()
     // Stopping the screencast flushes frames already in flight.
     await Promise.race([
       this.session.send('Page.stopScreencast').catch(() => undefined),
@@ -581,6 +671,9 @@ export class ScreencastRecorder {
     // Everything is with the sink; the held frame is no longer needed.
     this.releasePending()
     this.noteSinkFailure()
+    // A cancelled replay has aborted its encoder and removed its output, and
+    // a switched one has deleted its spool, before the recording is stopped.
+    await Promise.race([promotion, this.cancelled.promise])
     await Promise.race([this.sink.end(), this.cancelled.promise])
     if (await this.wasAborted()) {
       return
@@ -850,6 +943,7 @@ export const recordScreencast = async (
     : undefined
   const sink = openSink(options, canvas, crop, dependencies)
   const budget = registerSpool(sink, options)
+  const promotion = planPromotion(sink, options, clock, dependencies)
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
   let abandoned = false
@@ -913,6 +1007,7 @@ export const recordScreencast = async (
     checkStartup()
     recorder = ScreencastRecorder.create({
       ...(budget ? { budget } : {}),
+      ...(promotion ? { promotion } : {}),
       canvas,
       clock,
       fps: options.fps,
@@ -1005,6 +1100,34 @@ const disposeFailedSpool = async (
   }
 }
 
+// A spool can continue as live encoding only when its owner says how.
+const planPromotion = (
+  sink: ScreencastSink,
+  options: ScreencastRecorderOptions,
+  clock: ClockBoundary,
+  dependencies: ScreencastRecorderDependencies,
+): ScreencastRecorderInit['promotion'] => {
+  if (
+    sink.kind !== 'spool' ||
+    !('promotion' in options) ||
+    !options.promotion
+  ) {
+    return undefined
+  }
+  return {
+    dependencies: {
+      clock,
+      ...(dependencies.spawnProcess
+        ? { spawnProcess: dependencies.spawnProcess }
+        : {}),
+      ...(dependencies.terminateProcessTree
+        ? { terminateProcessTree: dependencies.terminateProcessTree }
+        : {}),
+    },
+    plan: options.promotion,
+  }
+}
+
 // A spool counts against its recording's budget from its first byte.
 const registerSpool = (
   sink: ScreencastSink,
@@ -1045,7 +1168,7 @@ const openSink = (
       },
     )
   }
-  const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpeg)(
+  const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpegEncoder)(
     options.ffmpegPath,
     createFfmpegArguments(
       { ...settings, outputPath: options.outputPath },
@@ -1054,15 +1177,6 @@ const openSink = (
     ),
   )
   return new EncoderSink(ffmpeg, dependencies, true)
-}
-
-// FFmpeg writes the segment file itself, so its standard output is unused.
-const spawnFfmpeg = (command: string, args: string[]): ChildProcess => {
-  return spawn(command, args, {
-    stdio: ['pipe', 'ignore', 'pipe'],
-    detached: process.platform !== 'win32',
-    windowsHide: true,
-  })
 }
 
 // Mirrors Puppeteer: measure the viewport at the device's native pixel ratio,

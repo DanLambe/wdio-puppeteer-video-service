@@ -31,6 +31,7 @@ import {
   DEFAULT_SPOOL_LIMITS,
   SpoolBudget,
 } from '../../src/service/spool-budget.js'
+import type { PromotionPlan } from '../../src/service/spool-promotion.js'
 
 interface FakeRecorder {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
@@ -89,6 +90,7 @@ const createHarness = (
     fileSystem?: FileSystemBoundary
     framePriming?: boolean
     recorder?: FakeRecorder
+    reserveOutput?: (plannedPath: string) => Promise<string>
     sessionToken?: string
   } = {},
 ) => {
@@ -162,6 +164,7 @@ const createHarness = (
     onProtocolChanged: (protocol) => {
       protocols.push(protocol)
     },
+    ...(options.reserveOutput ? { reserveOutput: options.reserveOutput } : {}),
     session,
     startScreencast,
     uuid: () => {
@@ -1434,6 +1437,160 @@ describe('Puppeteer capture engine, deferred capture', () => {
     expect(harness.recorder.stop).not.toHaveBeenCalled()
     await expect(fs.access(spoolPath)).rejects.toThrow()
     await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+  })
+
+  // A segment whose spool was promoted: the recorder reports an encoded file
+  // at the path its promotion reserved, which collision handling may have
+  // renamed.
+  const promoteTo = async (
+    harness: ReturnType<typeof createHarness>,
+    tempDir: string,
+  ) => {
+    const reserved = path.join(tempDir, 'checkout_part1_run2.webm')
+    await fs.writeFile(reserved, '')
+    harness.recorder.output = { kind: 'encoded', outputPath: reserved }
+    return reserved
+  }
+
+  const promotionPlanOf = (
+    harness: ReturnType<typeof createHarness>,
+  ): PromotionPlan | undefined => {
+    const options = harness.startScreencast.mock.calls[0]?.[1] as
+      | (StartScreencastOptions & { promotion?: PromotionPlan })
+      | undefined
+    return options?.promotion
+  }
+
+  it('hands a promoted segment on as a live one at its reserved path', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    const segment = harness.session.activeSegment
+    if (!segment) {
+      throw new Error('no segment')
+    }
+    segment.transcode = true
+    segment.outputFormat = 'mp4'
+    const reserved = await promoteTo(harness, tempDir)
+
+    const stopped = await harness.engine.stopCapture()
+
+    expect(stopped.spool).toBeUndefined()
+    expect(stopped.streamOk).toBe(true)
+    expect(stopped.segment).toMatchObject({
+      outputPath: path.join(tempDir, 'checkout_part1_run2.mp4'),
+      recordingPath: reserved,
+    })
+    expect(stopped.segment?.recordingPath).not.toBe(plannedPath)
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('checks a promoted segment encoder exit as a live segment', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+    harness.recorder.ffmpegResult = {
+      code: 1,
+      diagnostic: 'disk full',
+      signal: null,
+    }
+
+    const stopped = await harness.engine.stopCapture()
+
+    expect(stopped.streamOk).toBe(false)
+    expect(stopped.segment).toMatchObject({
+      recordingPath: reserved,
+      transcode: false,
+    })
+    expect(harness.logs.map(({ message }) => message)).toContainEqual(
+      expect.stringContaining('FFmpeg exited with code 1 while recording'),
+    )
+  })
+
+  it('deletes the output of a discarded recording that promoted', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { spoolPath } = await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+
+    await harness.engine.stopCapture({ discard: true })
+
+    expect(harness.recorder.abort).toHaveBeenCalledOnce()
+    await expect(fs.access(reserved)).rejects.toThrow()
+    await expect(fs.access(spoolPath)).rejects.toThrow()
+  })
+
+  it('removes the output of a promoted segment when the recording is reset', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+
+    await expect(harness.engine.resetRecording()).resolves.toEqual({})
+
+    await expect(fs.access(reserved)).rejects.toThrow()
+  })
+
+  it('removes the output a promotion reserved when the start fails afterwards', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    harness.session.beginRecording('checkout')
+    // A capture is already attached, so attaching this one fails.
+    await startCapture(harness, path.join(tempDir, 'first.webm'))
+    const reserved = await promoteTo(harness, tempDir)
+
+    await expect(
+      harness.engine.startCapture({
+        createOutput: async () => ({
+          outputFormat: 'webm',
+          outputPath: path.join(tempDir, 'second.webm'),
+          recordingFormat: 'webm',
+          recordingPath: path.join(tempDir, 'second.webm'),
+          transcodeEnabled: false,
+        }),
+        ffmpegPath: 'ffmpeg.exe',
+        spoolPath: spoolPathIn(tempDir),
+        transcodeOptions: { deleteOriginal: true },
+      }),
+    ).rejects.toThrow('Cannot attach more than one capture segment')
+
+    await expect(fs.access(reserved)).rejects.toThrow()
+  })
+
+  it('gives a spooled capture the means to promote it: reserve, remove, warn', async () => {
+    const tempDir = await createTempDir()
+    const reserveOutput = vi.fn(async (planned: string) => {
+      await fs.writeFile(planned, '')
+      return planned
+    })
+    const harness = createHarness({ reserveOutput })
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    const plan = promotionPlanOf(harness)
+
+    expect(plan).toMatchObject({ ffmpegPath: 'ffmpeg.exe', plannedPath })
+    await expect(plan?.reserveOutput(plannedPath)).resolves.toBe(plannedPath)
+    expect(reserveOutput).toHaveBeenCalledWith(plannedPath)
+    await plan?.remove(plannedPath, 'unused promoted recording output')
+    await expect(fs.access(plannedPath)).rejects.toThrow()
+    plan?.warn('promotion failed')
+    expect(harness.logs).toContainEqual({
+      level: 'warn',
+      message: 'promotion failed',
+    })
+  })
+
+  it('reserves a promoted output the way a live start does by default', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    await fs.writeFile(plannedPath, 'someone else')
+
+    const reserved = await promotionPlanOf(harness)?.reserveOutput(plannedPath)
+
+    expect(reserved).not.toBe(plannedPath)
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(await fs.readFile(reserved ?? '', 'utf8')).toBe('')
   })
 
   // The real capture, recorder and spool sink behind the engine, over a page

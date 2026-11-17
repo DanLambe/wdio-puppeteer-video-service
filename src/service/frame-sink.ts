@@ -175,6 +175,7 @@ export class SpoolSink implements FrameSink {
   private error: Error | undefined
   private aborting: Promise<void> | undefined
   private accepted = 0
+  private flushWaiters: Array<() => void> = []
   private opened = false
   private closedState = false
 
@@ -200,6 +201,7 @@ export class SpoolSink implements FrameSink {
     stream.once('close', () => {
       this.closedState = true
       closed.resolve()
+      this.onFlushed()
     })
     if (stream.pending === true) {
       stream.once('ready', () => {
@@ -254,7 +256,20 @@ export class SpoolSink implements FrameSink {
       return false
     }
     this.accepted += chunk.length
-    return this.stream.write(chunk)
+    return this.stream.write(chunk, this.onFlushed)
+  }
+
+  /**
+   * Resolves once the file system has taken another write, or the file has
+   * closed. A caller that finds bytes still buffered waits here for them.
+   */
+  waitForFlush(): Promise<void> {
+    if (this.closedState) {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      this.flushWaiters.push(resolve)
+    })
   }
 
   async waitForDrain(): Promise<void> {
@@ -292,6 +307,16 @@ export class SpoolSink implements FrameSink {
       await Promise.race([this.closed, expired.promise])
     } finally {
       this.clock.clearTimeout(timer)
+    }
+  }
+
+  // Every write is told when it has been taken, so a waiter never misses one
+  // that was already in flight.
+  private readonly onFlushed = (): void => {
+    const waiters = this.flushWaiters
+    this.flushWaiters = []
+    for (const resolve of waiters) {
+      resolve()
     }
   }
 
