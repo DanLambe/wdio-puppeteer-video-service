@@ -398,9 +398,9 @@ that moves recording to another tab took this much longer than unrecorded:
 
 Ending a segment first waits up to 125 ms for a frame Chrome is still
 capturing, so a change the test made just before the move, or just before the
-test ends, is the segment's last frame. The wait ends when that frame arrives;
-on a page that has not changed, each move and each kept stop takes the whole
-125 ms. A recording that retention has already decided to discard does not
+test ends, is the segment's last frame. The wait ends after two frames, or
+100 ms after a frame with no other behind it; on a page that has not changed,
+each move and each kept stop takes the whole 125 ms. A recording that retention has already decided to discard does not
 wait.
 
 A command that stays on its tab adds a few milliseconds. Tests that alternate

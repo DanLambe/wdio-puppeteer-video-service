@@ -19,6 +19,7 @@ import {
   type ScreencastCaptureOptions,
   ScreencastRecorder,
   type ScreencastRecorderOptions,
+  TAIL_FRAME_QUIET_MS,
   TAIL_FRAME_WAIT_MS,
 } from '../../src/service/screencast-recorder.js'
 import {
@@ -2744,7 +2745,7 @@ const createTailClock = () => {
 }
 
 describe('screencast recorder tail frame at stop', () => {
-  it('waits for a frame still on its way and places it by its own timestamp', async () => {
+  it('waits a quiet gap after a lone frame on its way, placed by its own timestamp', async () => {
     const { clock, delays } = createTailClock()
     const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
     // The page is static for a second, then the test stops right after a
@@ -2757,20 +2758,101 @@ describe('screencast recorder tail frame at stop', () => {
       TAIL_FRAME_WAIT_MS,
     ])
 
-    // Painted at 0.9 s, delivered 150 ms later, during the wait.
+    // Painted at 0.9 s, delivered 150 ms later, during the wait. Another
+    // frame may follow it, so the wait goes on for a quiet gap.
     run.advance(50)
     run.session.emitFrame('tail', 100.9)
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested.map((delay) => delay.milliseconds)).toEqual([
+      TAIL_FRAME_WAIT_MS,
+      TAIL_FRAME_QUIET_MS,
+    ])
+
+    run.advance(TAIL_FRAME_QUIET_MS)
+    delays.requested[1]?.resolve()
     await stopping
 
     expect(run.session.sent).toContain('Page.stopScreencast')
-    // Shown from 0.9 s, where it was painted, and held to the stop at 1.05 s.
+    // Shown from 0.9 s, where it was painted, and held to the stop at 1.15 s.
     expect(shown(run.frames(10))).toEqual([
       ...Array.from({ length: 9 }, () => 'start'),
       'tail',
       'tail',
+      'tail',
     ])
-    // The wait's timer is released rather than left to run out.
+    // The bound's timer is released rather than left to run out.
     expect(delays.requested[0]?.signal?.aborted).toBe(true)
+  })
+
+  it('waits for a second frame in flight behind an older paint', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // The pointer moved over the button at 0.9 s; the click's paint at 1 s is
+    // right behind it. Neither delay is expired: two frames end the wait.
+    run.advance(20)
+    run.session.emitFrame('pointer', 100.9)
+    run.advance(16)
+    run.session.emitFrame('paint', 101)
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'pointer',
+      'paint',
+    ])
+    // Every timer of the wait is released.
+    expect(delays.requested.map((delay) => delay.signal?.aborted)).toEqual([
+      true,
+      true,
+    ])
+  })
+
+  it('stops at the second frame without waiting for a third', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(500)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // An animating page: two frames end the wait, and the screencast is
+    // stopped before the next frame Chrome would send.
+    run.frame('first', 100.52)
+    run.frame('second', 100.62)
+    await settle()
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    await stopping
+    run.frame('third', 100.72)
+
+    expect(delays.requested).toHaveLength(2)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'first', 'second'])
+    expect(run.recorder.frameCount).toBe(3)
+  })
+
+  it('ends at the bound however slowly frames trickle in', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // A frame late in the wait starts a quiet gap that would outlast the
+    // bound; the bound ends the wait first.
+    run.advance(100)
+    run.session.emitFrame('slow', 100.95)
+    await settle()
+    run.advance(TAIL_FRAME_WAIT_MS - 100)
+    delays.requested[0]?.resolve()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(delays.requested[1]?.signal?.aborted).toBe(true)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'slow'])
   })
 
   it('waits the whole bound on a page that does not change, then stops', async () => {
@@ -2790,26 +2872,6 @@ describe('screencast recorder tail frame at stop', () => {
     expect(run.session.sent).toContain('Page.stopScreencast')
     // The final frame is held to where the stop ended, the wait included.
     expect(spanCounts(run.frames(10))).toEqual({ start: 11 })
-  })
-
-  it('stops at the first frame without waiting for another', async () => {
-    const { clock, delays } = createTailClock()
-    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
-    run.advance(500)
-    const stopping = run.recorder.stop()
-    await settle()
-
-    // An animating page: one frame ends the wait, and the screencast is
-    // stopped before the next frame Chrome would send.
-    run.frame('first', 100.52)
-    await settle()
-    expect(run.session.sent).toContain('Page.stopScreencast')
-    await stopping
-    run.frame('second', 100.55)
-
-    expect(delays.requested).toHaveLength(1)
-    expect(shownLabels(run.frames(10))).toEqual(['start', 'first'])
-    expect(run.recorder.frameCount).toBe(2)
   })
 
   it('does not wait once overload has stopped capture', async () => {
@@ -2939,6 +3001,9 @@ describe('screencast recorder tail frame at stop', () => {
 
     run.advance(50)
     run.session.emitFrame('tail', 100.9)
+    await settle()
+    // No frame follows within the quiet gap.
+    delays.requested[1]?.resolve()
     await stopping
 
     expect(shown(run.frames(10))).toEqual([

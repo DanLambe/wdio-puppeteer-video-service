@@ -435,6 +435,9 @@ describe('a promoted recorder at stop', () => {
 
     // Painted after the last scripted frame, delivered during the wait.
     rig.session.emitFrame('tail', 102.5)
+    await settle()
+    // No frame follows within the quiet gap.
+    delays.requested[1]?.resolve()
     await stopping
 
     expect(rig.recorder.output.kind).toBe('encoded')

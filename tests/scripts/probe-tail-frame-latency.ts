@@ -6,11 +6,16 @@ import puppeteer, { type CDPSession } from 'puppeteer-core'
 // times the first frame showing it from the page's own Date.now(). The stop
 // path's tail-frame wait is sized from these numbers. Not part of any suite.
 //
+// With PROBE_PAIR=1 each change paints twice, one animation frame apart, and
+// the probe reports the gap between the arrivals of the two frames instead:
+// how far apart two frames Chrome has in flight at once can arrive.
+//
 // Usage: tsx tests/scripts/probe-tail-frame-latency.ts [changes]
 // Environment: CHROME_BINARY (required), PROBE_NO_SANDBOX=1 for root in a
-// container.
+// container, PROBE_PAIR=1 for the pair mode.
 
 const QUIET_MS = 400
+const PAIR = process.env.PROBE_PAIR === '1'
 const FRAME_TIMEOUT_MS = 2_000
 const VIEWPORTS = [
   { width: 1280, height: 720 },
@@ -89,6 +94,13 @@ class FrameWatcher {
     return this.frames.length
   }
 
+  // When the first frame showing `colour` arrived after `since`, if one did.
+  arrivedSince(since: number, colour: Rgb): number | undefined {
+    return this.frames.find(
+      (frame) => frame.at >= since && sameColour(frame.colour, colour),
+    )?.at
+  }
+
   // Resolves with the arrival time of the first frame showing `colour`, or
   // undefined when none arrives in time.
   async arrivalOf(colour: Rgb): Promise<number | undefined> {
@@ -132,6 +144,7 @@ const measureViewport = async (
     await session.send('Page.startScreencast', { format: 'png' })
     const latencies: number[] = []
     const pageClock: number[] = []
+    let pairsMerged = 0
     for (let index = 1; index <= changes; index += 1) {
       await sleep(QUIET_MS)
       const colour = colourAt(index)
@@ -140,21 +153,40 @@ const measureViewport = async (
       // is also measured on Node's clock from when the change was requested,
       // which bounds it from above by the request's one-way trip.
       const requestedAt = Date.now()
+      const first = colourAt(index + 1_000)
       const changedAt = await page.evaluate(
-        (css: string) => {
-          const { body } = (
-            globalThis as unknown as {
-              document: { body: { style: { background: string } } }
-            }
-          ).document
-          body.style.background = css
+        (css: string, before: string | undefined) => {
+          const view = globalThis as unknown as {
+            document: { body: { style: { background: string } } }
+            requestAnimationFrame: (callback: () => void) => void
+          }
+          const { body } = view.document
+          if (before === undefined) {
+            body.style.background = css
+          } else {
+            // Two paints one animation frame apart.
+            body.style.background = before
+            view.requestAnimationFrame(() => {
+              view.requestAnimationFrame(() => {
+                body.style.background = css
+              })
+            })
+          }
           return Date.now()
         },
         `rgb(${colour.join(',')})`,
+        PAIR ? `rgb(${first.join(',')})` : undefined,
       )
       const arrivedAt = await arrival
       if (arrivedAt === undefined) {
         console.log(`change ${index.toString()}: no frame within timeout`)
+      } else if (PAIR) {
+        const firstAt = watcher.arrivedSince(requestedAt, first)
+        if (firstAt === undefined) {
+          pairsMerged += 1
+        } else {
+          latencies.push(arrivedAt - firstAt)
+        }
       } else {
         latencies.push(arrivedAt - requestedAt)
         pageClock.push(arrivedAt - changedAt)
@@ -162,6 +194,11 @@ const measureViewport = async (
     }
     await session.send('Page.stopScreencast')
     console.log(`frames received: ${watcher.count.toString()}`)
+    if (PAIR) {
+      console.log(
+        `pairs whose first paint had no frame: ${pairsMerged.toString()}`,
+      )
+    }
     console.log(`measured on the page's clock: ${JSON.stringify(pageClock)}`)
     return latencies
   } finally {
