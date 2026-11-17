@@ -97,6 +97,7 @@ interface HarnessOptions {
   readonly spoolDiskSpace?: DiskSpaceBoundary
   readonly spoolLimits?: SpoolLimits
   readonly spoolStorage?: boolean
+  readonly spoolUuid?: () => string
 }
 
 /**
@@ -342,10 +343,12 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
             ...(harnessOptions.spoolLimits
               ? { limits: harnessOptions.spoolLimits }
               : {}),
-            uuid: () => {
-              uuidIndex += 1
-              return testSpoolUuid(uuidIndex)
-            },
+            uuid:
+              harnessOptions.spoolUuid ??
+              (() => {
+                uuidIndex += 1
+                return testSpoolUuid(uuidIndex)
+              }),
           },
         }),
   })
@@ -510,6 +513,22 @@ describe('deferred segment capture', () => {
     await harness.recordThreeTabs()
 
     expect(spoolPathsOf(harness)).toEqual([undefined, undefined, undefined])
+  })
+
+  it('records live rather than spool under a name orphan recovery would not recognize', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+      spoolUuid: () => 'not-a-uuid',
+    })
+
+    await harness.recordThreeTabs()
+
+    expect(spoolPathsOf(harness)).toEqual([undefined, undefined, undefined])
+    expect(harness.logs).toContainEqual({
+      level: 'debug',
+      message:
+        '[WdioPuppeteerVideoService] Recording segment 1 live: its spool name would not be recognized by orphan recovery.',
+    })
   })
 
   it('reserves no output for a spooled part and holds its spool when it stops', async () => {

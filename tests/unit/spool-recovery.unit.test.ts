@@ -225,6 +225,20 @@ describe('classifySpoolPrefix', () => {
     expect(classifySpoolPrefix(finiteCluster, true)).toBe('unrecognized')
   })
 
+  it('does not skip a header element larger than any the writer writes', () => {
+    const header = headerOnly()
+    // The EBML header claims 5 KiB: skipping it could skip a frame.
+    const oversized = Buffer.concat([
+      header.subarray(0, 4),
+      Buffer.from([0x40 | (5_120 >> 8), 5_120 & 0xff]),
+      Buffer.alloc(5_120),
+    ])
+    expect(classifySpoolPrefix(oversized, true)).toBe('unrecognized')
+    expect(classifySpoolPrefix(oversized.subarray(0, 64), true)).toBe(
+      'unrecognized',
+    )
+  })
+
   it('does not accept the writer elements out of order', () => {
     const header = headerOnly()
     // A second EBML header where the Segment belongs.
