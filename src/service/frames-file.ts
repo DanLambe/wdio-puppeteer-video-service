@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import {
   ARTIFACT_PATH_CANDIDATE_LIMIT,
@@ -27,10 +28,47 @@ export interface FramesFileMoveOptions {
 }
 
 /**
+ * Whether two names are positively the same file: an earlier move linked the
+ * frames name but could not remove the spool's. Same volume and file id, as
+ * Node reports them (`dev` and `ino`; on Windows the volume serial number and
+ * the 64-bit file index, read as bigints so no digit is lost), and, because a
+ * file system may approximate a longer file id, the same link count, size and
+ * times, which hard links share. A file id of 0 means the file system gives
+ * none, and a name that cannot be inspected is not the same file either: both
+ * fall back to the next collision name.
+ */
+const isSameFile = async (
+  spoolPath: string,
+  framesPath: string,
+): Promise<boolean> => {
+  try {
+    const [spool, frames] = await Promise.all([
+      fs.stat(spoolPath, { bigint: true }),
+      fs.stat(framesPath, { bigint: true }),
+    ])
+    return (
+      spool.ino !== 0n &&
+      spool.nlink >= 2n &&
+      spool.dev === frames.dev &&
+      spool.ino === frames.ino &&
+      spool.nlink === frames.nlink &&
+      spool.size === frames.size &&
+      spool.mtimeNs === frames.mtimeNs &&
+      spool.ctimeNs === frames.ctimeNs &&
+      spool.birthtimeNs === frames.birthtimeNs
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
  * Moves a spool to `<name>.frames.mkv` beside its planned segment with a hard
  * link, then removes the spool's name. A name that is taken moves on to the
- * next collision name, so an existing file is never replaced. A spool that
- * cannot be linked stays where it is.
+ * next collision name, so an existing file is never replaced, unless it is
+ * this spool's own frames file from an earlier move that could not remove the
+ * spool: then that file is kept and only the spool's name is removed. A spool
+ * that cannot be linked stays where it is.
  */
 export const moveSpoolToFramesFile = async (
   options: FramesFileMoveOptions,
@@ -51,10 +89,12 @@ export const moveSpoolToFramesFile = async (
       // existing file is never replaced.
       await options.linkFile(options.spoolPath, framesPath)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        return { error }
+      }
+      if (!(await isSameFile(options.spoolPath, framesPath))) {
         continue
       }
-      return { error }
     }
     return {
       framesPath,
