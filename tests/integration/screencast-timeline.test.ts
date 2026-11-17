@@ -399,6 +399,8 @@ describe('recorded frame timeline when the encoder exits early', () => {
       })
     }
     const exited = Promise.withResolvers<void>()
+    let forwardedWrites = 0
+    let endInput = (): void => {}
     const recorder = await recordScreencast(
       createPage(session),
       { ffmpegPath, format: 'webm', fps: 30, quality: 30, scale: 1, speed: 1 },
@@ -414,6 +416,41 @@ describe('recorded frame timeline when the encoder exits early', () => {
             ...['-t', '0.1'],
             ...args.slice(-1),
           ])
+          const input = child.stdin
+          if (input) {
+            // FFmpeg 7 waits for the end of its input after -t, while 6.x
+            // exits at once. The product gets a proxy it can keep writing to;
+            // the test ends the real input once its frames are sent, so every
+            // version exits successfully before the recording is stopped.
+            input.on('error', () => {})
+            let inputEnded = false
+            const proxy = new Writable({
+              write(chunk: Buffer, _encoding, callback) {
+                if (inputEnded) {
+                  callback()
+                } else {
+                  forwardedWrites += 1
+                  if (input.write(chunk)) {
+                    callback()
+                  } else {
+                    input.once('drain', () => callback())
+                    input.once('close', () => callback())
+                  }
+                }
+              },
+              final(callback) {
+                callback()
+              },
+            })
+            endInput = () => {
+              inputEnded = true
+              input.end()
+            }
+            Object.defineProperty(child, 'stdin', {
+              configurable: true,
+              value: proxy,
+            })
+          }
           child.once('close', () => exited.resolve())
           return child
         },
@@ -427,6 +464,14 @@ describe('recorded frame timeline when the encoder exits early', () => {
       now = frame * 100
       emit()
     }
+    // The recorder writes frames in the background: wait for it to go quiet,
+    // then end FFmpeg's input.
+    let seenWrites = -1
+    while (seenWrites !== forwardedWrites) {
+      seenWrites = forwardedWrites
+      await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    }
+    endInput()
     await exited.promise
     await writeStreamDone
 
