@@ -12,7 +12,7 @@ import {
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
 import { decodeColorTimeline } from '../utils/media-timeline.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
-import { lastColor, segmentPartNumber } from '../utils/segment-colors.js'
+import { segmentPartNumber, terminalColor } from '../utils/segment-colors.js'
 import {
   findTabProvenanceProblems,
   readEntryTabs,
@@ -238,7 +238,9 @@ const assertTailFrameEntries = async (
       30,
       passthrough,
     )
-    const last = lastColor(spans)
+    // Each page is a solid color, so only startup frames before its first
+    // paint may be neutral: the final decoded span itself must be green.
+    const last = terminalColor(spans)
     if (JSON.stringify(step) !== JSON.stringify(tab) || last !== 'green') {
       problems.push(
         `"${title}" part ${part.toString()} on tab ${JSON.stringify(step)} ends on ${last}: ${JSON.stringify(spans)}`,

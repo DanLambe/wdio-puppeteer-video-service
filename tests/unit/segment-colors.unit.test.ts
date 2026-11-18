@@ -5,6 +5,7 @@ import {
   lastColor,
   orderSegments,
   segmentPartNumber,
+  terminalColor,
 } from '../utils/segment-colors.js'
 
 describe('segment color verification helpers', () => {
@@ -47,10 +48,31 @@ describe('segment color verification helpers', () => {
     expect(lastColor(spans)).toBe('green')
   })
 
+  it('reports neutral frames that end a segment after its last paint', () => {
+    const spans = [
+      { color: 'red' as const, start: 0, end: 1 },
+      { color: 'green' as const, start: 1, end: 1.1 },
+      { color: 'neutral' as const, start: 1.1, end: 1.2 },
+    ]
+
+    expect(terminalColor(spans)).toBe('neutral')
+  })
+
+  it('ends on the final span once neutral startup frames give way to paint', () => {
+    const spans = [
+      { color: 'neutral' as const, start: 0, end: 0.3 },
+      { color: 'red' as const, start: 0.3, end: 1 },
+      { color: 'green' as const, start: 1, end: 1.1 },
+    ]
+
+    expect(terminalColor(spans)).toBe('green')
+  })
+
   it('fails instead of inventing a color for a segment without frames', () => {
     expect(() => dominantColor([])).toThrow('no frames')
     expect(() => firstColor([])).toThrow('no frames')
     expect(() => lastColor([])).toThrow('no frames')
+    expect(() => terminalColor([])).toThrow('no frames')
   })
 
   it('ignores a page that has not painted yet, however long it lasts', () => {
@@ -69,6 +91,7 @@ describe('segment color verification helpers', () => {
 
     expect(() => dominantColor(spans)).toThrow('no painted frames')
     expect(() => firstColor(spans)).toThrow('no painted frames')
+    expect(() => terminalColor(spans)).toThrow('no painted frames')
   })
 
   it('keeps the earlier color when two last equally long', () => {
