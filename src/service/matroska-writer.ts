@@ -25,7 +25,7 @@ const EBML_MAX_SIZE_LENGTH = 0x42_f3
 const DOC_TYPE = 0x42_82
 const DOC_TYPE_VERSION = 0x42_87
 const DOC_TYPE_READ_VERSION = 0x42_85
-export const SEGMENT = 0x18_53_80_67
+const SEGMENT = 0x18_53_80_67
 const INFO = 0x15_49_a9_66
 const TIMESTAMP_SCALE = 0x2a_d7_b1
 const MUXING_APP = 0x4d_80
@@ -42,9 +42,9 @@ const CODEC_PRIVATE = 0x63_a2
 const VIDEO = 0xe0
 const PIXEL_WIDTH = 0xb0
 const PIXEL_HEIGHT = 0xba
-export const CLUSTER = 0x1f_43_b6_75
+const CLUSTER = 0x1f_43_b6_75
 const CLUSTER_TIMESTAMP = 0xe7
-export const SIMPLE_BLOCK = 0xa3
+const SIMPLE_BLOCK = 0xa3
 
 const APPLICATION = 'wdio-puppeteer-video-service'
 const VIDEO_TRACK_TYPE = 1
@@ -64,6 +64,28 @@ const encodeId = (id: number): Buffer => {
   }
   return Buffer.from(bytes)
 }
+
+/** One element of a stream's opening, as this writer writes it. */
+export interface StreamOpeningElement {
+  readonly id: Buffer
+  /** Whether it is written with an unknown size, its children following it. */
+  readonly unknownSize: boolean
+}
+
+/**
+ * The elements every stream this writer produces starts with, in order: the
+ * header, then the first cluster's opening and its first block. Spool
+ * recovery reads a spool against this list, so the two cannot disagree.
+ */
+export const STREAM_OPENING: readonly StreamOpeningElement[] = [
+  { id: encodeId(EBML), unknownSize: false },
+  { id: encodeId(SEGMENT), unknownSize: true },
+  { id: encodeId(INFO), unknownSize: false },
+  { id: encodeId(TRACKS), unknownSize: false },
+  { id: encodeId(CLUSTER), unknownSize: true },
+  { id: encodeId(CLUSTER_TIMESTAMP), unknownSize: false },
+  { id: encodeId(SIMPLE_BLOCK), unknownSize: false },
+]
 
 export const encodeElementSize = (size: number): Buffer => {
   for (let length = 1; length <= 8; length += 1) {

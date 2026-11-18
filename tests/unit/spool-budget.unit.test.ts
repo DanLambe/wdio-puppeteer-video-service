@@ -357,3 +357,105 @@ describe('spool budget free-space floors', () => {
     expect(segment.check(0)).toContain('Free disk space')
   })
 })
+
+describe('sealed spool segments', () => {
+  // A segment whose sink count reports how often it is read.
+  const startCountedSegment = (budget: SpoolBudget, size: number) => {
+    const reads = { count: 0 }
+    const segment = budget.beginSegment('/spool', () => {
+      reads.count += 1
+      return size
+    })
+    segment.attach({ isSpooling: () => true, promote: vi.fn(), stop: vi.fn() })
+    return { reads, segment }
+  }
+
+  it('never reads a sealed segment again on the capture path, with the same totals', () => {
+    const limits = { ...DEFAULT_SPOOL_LIMITS, hardCapBytes: 100 * 256 + 300 }
+    const unsealed = new SpoolBudget(limits, createDisk().disk)
+    const sealedBudget = new SpoolBudget(limits, createDisk().disk)
+    const old = Array.from({ length: 100 }, () =>
+      startCountedSegment(sealedBudget, 256),
+    )
+    for (let index = 0; index < 100; index += 1) {
+      startCountedSegment(unsealed, 256)
+    }
+    for (const { segment } of old) {
+      segment.seal()
+    }
+    const readsAtSeal = old.reduce((total, { reads }) => total + reads.count, 0)
+    expect(readsAtSeal).toBe(100)
+
+    const active = startSegment(sealedBudget)
+    const reference = startSegment(unsealed)
+    active.state.size = 256
+    reference.state.size = 256
+    for (let check = 0; check < 1_000; check += 1) {
+      expect(active.segment.check(0)).toBe(reference.segment.check(0))
+    }
+
+    const readsAfterSeal =
+      old.reduce((total, { reads }) => total + reads.count, 0) - readsAtSeal
+    expect(readsAfterSeal).toBe(0)
+    expect(sealedBudget.bytes).toBe(unsealed.bytes)
+    expect(sealedBudget.bytes).toBe(101 * 256)
+    // The hard cap is decided on the same total.
+    expect(active.segment.check(44)).toBeUndefined()
+    expect(active.segment.check(45)).toBe(reference.segment.check(45))
+    expect(active.segment.check(45)).toContain('disk limit')
+  })
+
+  it('keeps the bytes accepted when sealed, whatever the sink reports later', () => {
+    const budget = new SpoolBudget(LIMITS, createDisk().disk)
+    const { segment, state } = startSegment(budget)
+    state.size = 120
+    segment.seal()
+    state.size = 999
+    segment.seal()
+
+    expect(segment.bytes).toBe(120)
+    expect(budget.bytes).toBe(120)
+  })
+
+  it('detaches the handlers and decides nothing once sealed', async () => {
+    const { disk } = createDisk(100)
+    const budget = new SpoolBudget(LIMITS, disk)
+    const { handlers, segment, state } = startSegment(budget)
+    segment.begin()
+    segment.seal()
+    // The sample started before the seal resolves after it.
+    await settle()
+    state.size = 1_000
+
+    expect(segment.check(0)).toBeUndefined()
+    expect(handlers.promote).not.toHaveBeenCalled()
+    expect(handlers.stop).not.toHaveBeenCalled()
+    expect(handlers.isSpooling).not.toHaveBeenCalled()
+    // The low reading that arrived late does not promote the recording.
+    expect(budget.promoted).toBe(false)
+  })
+
+  it('takes a sealed spool out of the total when it is released', () => {
+    const budget = new SpoolBudget(LIMITS, createDisk().disk)
+    const sealed = startSegment(budget)
+    sealed.state.size = 70
+    sealed.segment.seal()
+    const active = startSegment(budget)
+    active.state.size = 20
+
+    sealed.segment.release()
+    sealed.segment.release()
+
+    expect(budget.bytes).toBe(20)
+  })
+
+  it('does not count a segment sealed after it was released', () => {
+    const budget = new SpoolBudget(LIMITS, createDisk().disk)
+    const { segment, state } = startSegment(budget)
+    state.size = 70
+    segment.release()
+    segment.seal()
+
+    expect(budget.bytes).toBe(0)
+  })
+})

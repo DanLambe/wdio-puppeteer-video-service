@@ -22,6 +22,7 @@ import {
   createFakeFfmpegProcess,
   type FakeFfmpegProcess,
 } from '../utils/fake-ffmpeg.js'
+import { testSpoolUuid } from '../utils/spool-fixtures.js'
 
 // The real engine, recorder and controller over a scripted page and fake
 // FFmpeg processes, with a real temp directory: what the service does with a
@@ -285,7 +286,7 @@ const createStack = (stackOptions: StackOptions = {}) => {
       limits: { ...LIMITS, ...stackOptions.limits },
       uuid: () => {
         uuidIndex += 1
-        return `uuid-${uuidIndex.toString()}`
+        return testSpoolUuid(uuidIndex)
       },
     },
   })

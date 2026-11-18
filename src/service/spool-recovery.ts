@@ -19,52 +19,24 @@ import {
   isSafeGlobalSlotRunId,
 } from './global-slot-directory.js'
 import type { ServiceLogger } from './logging.js'
-import { CLUSTER, SEGMENT, SIMPLE_BLOCK } from './matroska-writer.js'
+import { STREAM_OPENING, type StreamOpeningElement } from './matroska-writer.js'
 import { describeError } from './normalization.js'
+import { parseSpoolFileName } from './spool-name.js'
 
 // The stream header and the first cluster's opening are a few hundred bytes,
 // so the first block starts well inside this prefix however large its image.
 const SPOOL_PREFIX_BYTES = 16 * 1_024
-const SPOOL_EXTENSION = '.mkv'
+// The writer's header elements and cluster timestamp are each far smaller.
+// A larger size is not the writer's, and skipping it could skip a frame.
+const MAX_OPENING_ELEMENT_BYTES = 4 * 1_024
 const LOG_PREFIX = '[WdioPuppeteerVideoService]'
 
-type SpoolContent = 'frames' | 'no-frames'
-
-type ElementHeader =
-  | {
-      readonly headerLength: number
-      readonly id: number
-      /** Undefined when the element's size is unknown. */
-      readonly size: number | undefined
-    }
-  | 'invalid'
-  | 'truncated'
-
-const readElementId = (
-  bytes: Buffer,
-  offset: number,
-):
-  | { readonly id: number; readonly length: number }
-  | 'invalid'
-  | 'truncated' => {
-  const first = bytes[offset]
-  if (first === undefined) {
-    return 'truncated'
-  }
-  // The leading zero bits of the first byte give the id's length: 1 to 4.
-  const length = Math.clz32(first) - 24 + 1
-  if (length > 4) {
-    return 'invalid'
-  }
-  if (offset + length > bytes.length) {
-    return 'truncated'
-  }
-  let id = 0
-  for (let index = 0; index < length; index += 1) {
-    id = id * 256 + (bytes[offset + index] ?? 0)
-  }
-  return { id, length }
-}
+/**
+ * `frames`: the first block is there. `no-frames`: the file ends inside the
+ * writer's opening, before any image. `unrecognized`: anything else, which is
+ * kept like frames because deleting it could delete a recording.
+ */
+type SpoolContent = 'frames' | 'no-frames' | 'unrecognized'
 
 const readElementSize = (
   bytes: Buffer,
@@ -94,58 +66,73 @@ const readElementSize = (
   return { length, size: allOnes ? undefined : size }
 }
 
-const readElementHeader = (bytes: Buffer, offset: number): ElementHeader => {
-  const id = readElementId(bytes, offset)
-  if (typeof id === 'string') {
-    return id
+/**
+ * Reads the next element of the writer's opening at `offset`: the offset of
+ * the element after it, `ended` when the bytes end first, or `unrecognized`
+ * when they are anything other than exactly that element.
+ */
+const readOpeningElement = (
+  prefix: Buffer,
+  offset: number,
+  expected: StreamOpeningElement,
+  last: boolean,
+): number | 'ended' | 'unrecognized' => {
+  const id = prefix.subarray(offset, offset + expected.id.length)
+  if (!id.equals(expected.id.subarray(0, id.length))) {
+    return 'unrecognized'
   }
-  const size = readElementSize(bytes, offset + id.length)
-  if (typeof size === 'string') {
-    return size
+  if (id.length < expected.id.length) {
+    return 'ended'
   }
-  return {
-    headerLength: id.length + size.length,
-    id: id.id,
-    size: size.size,
+  const size = readElementSize(prefix, offset + id.length)
+  if (size === 'truncated') {
+    return 'ended'
   }
+  if (
+    size === 'invalid' ||
+    (size.size === undefined) !== expected.unknownSize
+  ) {
+    return 'unrecognized'
+  }
+  const length = size.size ?? 0
+  if (!last && length > MAX_OPENING_ELEMENT_BYTES) {
+    return 'unrecognized'
+  }
+  return offset + id.length + size.length + length
 }
 
 /**
- * Whether the start of a spool holds a frame: a `SimpleBlock` inside the
- * first cluster, found by walking the elements the writer produces. Only the
- * prefix is looked at; whatever it cannot settle (a prefix that ends before an
- * answer, an element it does not understand) counts as frames, because the
- * alternative is deleting a recording. `whole` says the prefix is the whole
- * file, so its end is the file's end and no block follows it.
+ * Whether the start of a spool holds a frame, read against the exact element
+ * sequence the writer starts every stream with (`STREAM_OPENING`). Only that
+ * sequence, cut off before the first block has an image, is frameless: an
+ * empty file, a header alone, a header with an empty cluster, or any of them
+ * cut off inside an element. A complete block id and size is a frame. Every
+ * other structure (a `BlockGroup`, an element the writer does not write, a
+ * size it does not give) is `unrecognized`. `whole` says the prefix is the
+ * whole file; a prefix that ends inside the opening while the file goes on
+ * settles nothing and is `unrecognized` too.
  */
 export const classifySpoolPrefix = (
   prefix: Buffer,
   whole: boolean,
 ): SpoolContent => {
-  const unsettled: SpoolContent = whole ? 'no-frames' : 'frames'
   let offset = 0
-  while (offset < prefix.length) {
-    const header = readElementHeader(prefix, offset)
-    if (header === 'truncated') {
-      return unsettled
+  for (const [index, expected] of STREAM_OPENING.entries()) {
+    const next = readOpeningElement(
+      prefix,
+      offset,
+      expected,
+      index === STREAM_OPENING.length - 1,
+    )
+    if (next === 'ended') {
+      return whole ? 'no-frames' : 'unrecognized'
     }
-    if (header === 'invalid') {
-      return 'frames'
+    if (next === 'unrecognized') {
+      return next
     }
-    if (header.id === SIMPLE_BLOCK) {
-      return 'frames'
-    }
-    if (header.id === SEGMENT || header.id === CLUSTER) {
-      // Both are written with an unknown size: their children follow.
-      offset += header.headerLength
-      continue
-    }
-    if (header.size === undefined) {
-      return 'frames'
-    }
-    offset += header.headerLength + header.size
+    offset = next
   }
-  return unsettled
+  return 'frames'
 }
 
 const readSpoolPrefix = async (
@@ -162,13 +149,6 @@ const readSpoolPrefix = async (
   } finally {
     await handle.close()
   }
-}
-
-/** `<slug>_part<N>.<uuid>.mkv` -> `<slug>_part<N>`. */
-const spoolBaseName = (fileName: string): string => {
-  const withoutExtension = fileName.slice(0, -SPOOL_EXTENSION.length)
-  const uuidDot = withoutExtension.lastIndexOf('.')
-  return uuidDot > 0 ? withoutExtension.slice(0, uuidDot) : withoutExtension
 }
 
 export interface SpoolRecoveryOptions {
@@ -210,10 +190,13 @@ type SpoolOutcome =
 /**
  * Recovers the spools a run's workers left behind (a worker killed while it
  * recorded) and removes the run's spool directory once nothing is left in it.
- * A spool with a frame becomes `<outputDir>/<slug>_part<N>.frames.mkv`; one
- * with none is deleted; one that cannot be handled stays, and then so does the
- * directory. Only this run's directory is touched, and only after the same
- * containment check the global-slot cleanup uses. Resolves `undefined` when
+ * Only files named as a worker names its spools are touched. A spool with a
+ * frame, or with content recovery cannot prove frameless, becomes
+ * `<outputDir>/<slug>_part<N>.frames.mkv`; one that is provably frameless is
+ * deleted; one that cannot be handled stays, and then so does the directory,
+ * as it does for any file with another name. Only this run's directory is
+ * touched, and only after the same containment check the global-slot cleanup
+ * uses, with neither it nor the spool root a link. Resolves `undefined` when
  * the run has no spool directory.
  */
 export const recoverOrphanedSpools = async (
@@ -235,14 +218,14 @@ export const recoverOrphanedSpools = async (
   const deleted: string[] = []
   const left: Array<{ path: string; reason: string }> = []
   const recovered: string[] = []
-  for (const spoolPath of spools) {
-    const outcome = await recoverSpool(dependencies, spoolPath)
+  for (const spool of spools) {
+    const outcome = await recoverSpool(dependencies, spool)
     if (outcome.kind === 'recovered') {
       recovered.push(outcome.framesPath)
     } else if (outcome.kind === 'deleted') {
-      deleted.push(spoolPath)
+      deleted.push(spool.path)
     } else {
-      left.push({ path: spoolPath, reason: outcome.reason })
+      left.push({ path: spool.path, reason: outcome.reason })
     }
   }
   warnAboutRecovery(options.log, recovered, left)
@@ -272,36 +255,65 @@ const resolveRunDirectory = async (
       `${LOG_PREFIX} Refusing to recover a spool path outside its configured root.`,
     )
   }
-  const stats = await fs.lstat(runDirectory).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+  // Both the service's spool root and the run's directory must be the plain
+  // directories the workers made: a link or junction could lead anywhere.
+  for (const directory of [root, runDirectory]) {
+    const stats = await lstatIfPresent(directory)
+    if (stats === undefined) {
       return undefined
     }
-    throw error
-  })
-  if (stats === undefined) {
-    return undefined
-  }
-  if (!stats.isDirectory()) {
-    // A link could lead anywhere: it is not the directory the workers made.
-    throw new TypeError(
-      `${LOG_PREFIX} Refusing to recover ${runDirectory}: it is not a plain directory.`,
-    )
+    if (!stats.isDirectory()) {
+      throw new TypeError(
+        `${LOG_PREFIX} Refusing to recover ${directory}: it is not a plain directory.`,
+      )
+    }
   }
   return runDirectory
 }
 
-// Only regular files ending in `.mkv`, directly in the directory, are spools.
-const listSpools = async (runDirectory: string): Promise<string[]> => {
+const lstatIfPresent = async (
+  filePath: string,
+): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> => {
+  try {
+    return await fs.lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined
+    }
+    throw error
+  }
+}
+
+interface SpoolFile {
+  readonly path: string
+  /** `<slug>_part<N>`, from the spool's name. */
+  readonly segmentName: string
+}
+
+// Only regular files directly in the directory, named as a worker names its
+// spools, are spools. Every other file is left as it is.
+const listSpools = async (runDirectory: string): Promise<SpoolFile[]> => {
   const entries = await fs.readdir(runDirectory, { withFileTypes: true })
-  return entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith(SPOOL_EXTENSION))
-    .map((entry) => path.join(runDirectory, entry.name))
+  const names = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
     .sort()
+  const spools: SpoolFile[] = []
+  for (const name of names) {
+    const parsed = parseSpoolFileName(name)
+    if (parsed !== undefined) {
+      spools.push({
+        path: path.join(runDirectory, name),
+        segmentName: parsed.segmentName,
+      })
+    }
+  }
+  return spools
 }
 
 const recoverSpool = async (
   dependencies: RecoveryDependencies,
-  spoolPath: string,
+  { path: spoolPath, segmentName }: SpoolFile,
 ): Promise<SpoolOutcome> => {
   let content: SpoolContent
   try {
@@ -321,19 +333,22 @@ const recoverSpool = async (
         log: dependencies.log,
       },
       filePath,
-      content === 'frames' ? 'moved frame spool' : 'frameless spool',
+      content === 'no-frames' ? 'frameless spool' : 'moved frame spool',
     )
   if (content === 'no-frames') {
     return (await removeSpool(spoolPath))
       ? { kind: 'deleted' }
       : { kind: 'left', reason: 'it holds no frame but could not be deleted' }
   }
+  if (content === 'unrecognized') {
+    dependencies.log(
+      'debug',
+      `${LOG_PREFIX} Keeping ${spoolPath} as a frames file: its structure is not one the writer produces, so it is not treated as frameless.`,
+    )
+  }
   const moved = await moveSpoolToFramesFile({
     linkFile: dependencies.linkFile,
-    plannedPath: path.join(
-      dependencies.outputDir,
-      `${spoolBaseName(path.basename(spoolPath))}.webm`,
-    ),
+    plannedPath: path.join(dependencies.outputDir, `${segmentName}.webm`),
     removeSpool,
     spoolPath,
   })

@@ -40,6 +40,7 @@ import {
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 import type { SlugMetadata } from '../../src/video-name-utils.js'
 import { createControlledClock } from '../utils/controlled-clock.js'
+import { spoolName, testSpoolUuid } from '../utils/spool-fixtures.js'
 
 const METADATA: SlugMetadata = {
   fileToken: 'deferred_spec',
@@ -96,6 +97,7 @@ interface HarnessOptions {
   readonly spoolDiskSpace?: DiskSpaceBoundary
   readonly spoolLimits?: SpoolLimits
   readonly spoolStorage?: boolean
+  readonly spoolUuid?: () => string
 }
 
 /**
@@ -341,10 +343,12 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
             ...(harnessOptions.spoolLimits
               ? { limits: harnessOptions.spoolLimits }
               : {}),
-            uuid: () => {
-              uuidIndex += 1
-              return `uuid-${uuidIndex.toString()}`
-            },
+            uuid:
+              harnessOptions.spoolUuid ??
+              (() => {
+                uuidIndex += 1
+                return testSpoolUuid(uuidIndex)
+              }),
           },
         }),
   })
@@ -355,10 +359,7 @@ const createHarness = (harnessOptions: HarnessOptions = {}) => {
     await controller.followContext('tab-a', 'switch-to-window')
   }
   const spoolOf = (part: number): string =>
-    path.join(
-      spoolDirectory,
-      `${session.currentTestSlug}_part${part.toString()}.uuid-${part.toString()}.mkv`,
-    )
+    path.join(spoolDirectory, spoolName(session.currentTestSlug, part, part))
   return {
     controller,
     discardSpool,
@@ -462,6 +463,22 @@ describe('the spool budget of a recording', () => {
     ).toEqual([harness.spoolOf(1), undefined])
   })
 
+  it('lets go of the budget once the recording is reset', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+    })
+    await harness.controller.startForMetadata(METADATA, 0)
+    await harness.controller.followContext('tab-b', 'command')
+    expect(budgetsOf(harness)[1]).toBe(budgetsOf(harness)[0])
+    await harness.controller.finalizeMedia(true, false)
+    await harness.controller.reset()
+
+    // The controller holds no budget between recordings.
+    expect(
+      (harness.controller as unknown as { spoolBudget: unknown }).spoolBudget,
+    ).toBeUndefined()
+  })
+
   it('gives a live recording no budget', async () => {
     const harness = createHarness()
 
@@ -512,6 +529,22 @@ describe('deferred segment capture', () => {
     await harness.recordThreeTabs()
 
     expect(spoolPathsOf(harness)).toEqual([undefined, undefined, undefined])
+  })
+
+  it('records live rather than spool under a name orphan recovery would not recognize', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+      spoolUuid: () => 'not-a-uuid',
+    })
+
+    await harness.recordThreeTabs()
+
+    expect(spoolPathsOf(harness)).toEqual([undefined, undefined, undefined])
+    expect(harness.logs).toContainEqual({
+      level: 'debug',
+      message:
+        '[WdioPuppeteerVideoService] Recording segment 1 live: its spool name would not be recognized by orphan recovery.',
+    })
   })
 
   it('reserves no output for a spooled part and holds its spool when it stops', async () => {

@@ -329,7 +329,9 @@ frame the spool had. After a run in which every kept recording was encoded, no
 spool file or spool directory remains. A worker that crashes or is killed
 mid-recording leaves its frames in the run's spool directory; the launcher
 recovers them as `.frames.mkv` files at the end of the run, with one warning
-naming them, and a recovered recording stops at its last held image.
+naming them, and a recovered recording stops at its last held image. It
+deletes only a spool it can show holds no image, and leaves files a worker did
+not name, and a spool directory that is a link or junction, untouched.
 
 **Disk use.** A spool holds every frame the recording captured, including the
 periodic hold blocks that keep the newest image on disk, so it grows with the
