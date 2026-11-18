@@ -736,8 +736,9 @@ That table is `'auto'`. Every kept recording decoded in every mode.
   and +3.3 s with retries, against `'live'`. It also used more CPU in those two
   cases (+6.4 s and +5.2 s).
 - **Kept recordings queue for post-processing.** Several failures at once wait
-  for a slot (`concurrency.maxPostProcessesPerProcess`). In a burst at one slot
-  the wait reached 2.3 s.
+  for a slot (`concurrency.maxPostProcessesPerProcess` and
+  `maxPostProcessesGlobal`). In a burst of failures across 4 workers with one
+  global slot, the wait reached 2.3 s.
 
 Other levers measured on a mostly static 1920x1080 page, 8 specs of 2 tests
 each, all passing and discarded, 2 runs per cell: `profile: 'ci'` added +5.5 s
