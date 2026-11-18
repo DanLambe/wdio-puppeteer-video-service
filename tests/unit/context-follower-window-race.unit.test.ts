@@ -7,8 +7,8 @@ import {
 
 // The follower reads WDIO's current window when its cache is empty, for
 // example to decide whether a background script runs there. These cases hold
-// that read open while the test switches, rolls back or resets, then let the
-// old answer arrive. Only the window state after those changes may decide
+// that read open while the test switches, rolls back, closes a tab or resets,
+// then let the old answer arrive. Only the window state after those changes may decide
 // where an implicit Classic action (`browser.keys()`) is filmed.
 
 interface RaceTarget extends ContextFollowerTarget {
@@ -116,6 +116,13 @@ const listWindows = (follower: ContextFollower) =>
 
 const switchSucceeded = (follower: ContextFollower, contextId: string) =>
   follower.afterCommand('switchToWindow', [contextId], null, undefined)
+
+/** A BiDi close of a top-level context that the browser accepts. */
+const closeTab = async (follower: ContextFollower, contextId: string) => {
+  const args = [{ context: contextId }]
+  await follower.beforeCommand('browsingContextClose', args)
+  await follower.afterCommand('browsingContextClose', args, null, undefined)
+}
 
 describe('ContextFollower with a current-window read in flight', () => {
   it('stays on the switched-to tab when the read answers during the switch before-hook', async () => {
@@ -242,5 +249,44 @@ describe('ContextFollower with a current-window read in flight', () => {
 
     expect(target.calls).toEqual(['follow:tab-b:command'])
     expect(target.recorded).toBe('tab-b')
+  })
+
+  it('does not film a tab that a BiDi close removed while the read was in flight', async () => {
+    const { follower, reads, target } = createRace('tab-b')
+    await listWindows(follower)
+    const background = follower.beforeCommand(
+      'scriptCallFunction',
+      script('tab-c'),
+    )
+    await reads.started(1)
+
+    await closeTab(follower, 'tab-a')
+    // The browser answered while tab-a was still open.
+    reads.pending[0]?.resolve('tab-a')
+    await background
+    // The next implicit action must ask again; the browser has no current
+    // window now that tab-a is gone.
+    const action = follower.beforeCommand('performActions', [[]])
+    await settle()
+    reads.pending[1]?.reject(new Error('no such window'))
+    await action
+
+    expect(target.calls).toEqual([])
+    expect(target.recorded).toBe('tab-b')
+    expect(reads.pending).toHaveLength(2)
+  })
+
+  it('keeps a known current window when a BiDi close removes another tab', async () => {
+    const { follower, reads, target } = createRace('tab-b')
+    await listWindows(follower)
+    await follower.afterCommand('getWindowHandle', [], 'tab-b', undefined)
+
+    await closeTab(follower, 'tab-a')
+    await follower.beforeCommand('performActions', [[]])
+
+    expect(target.calls).toEqual([])
+    expect(target.recorded).toBe('tab-b')
+    // The cached window still answered; the browser was not asked.
+    expect(reads.pending).toHaveLength(0)
   })
 })
