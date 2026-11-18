@@ -135,17 +135,32 @@ export const classifySpoolPrefix = (
   return 'frames'
 }
 
+/**
+ * Reads up to `SPOOL_PREFIX_BYTES` from the start of a spool. A read may
+ * return fewer bytes than asked before the end of the file, so reading goes
+ * on until the prefix is full or a read returns nothing. Only that empty read
+ * proves the prefix is the whole file; a full prefix is never called whole.
+ */
 const readSpoolPrefix = async (
   spoolPath: string,
 ): Promise<{ readonly prefix: Buffer; readonly whole: boolean }> => {
   const handle = await fs.open(spoolPath, 'r')
   try {
     const buffer = Buffer.alloc(SPOOL_PREFIX_BYTES)
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    return {
-      prefix: buffer.subarray(0, bytesRead),
-      whole: bytesRead < buffer.length,
+    let filled = 0
+    while (filled < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        filled,
+        buffer.length - filled,
+        filled,
+      )
+      if (bytesRead === 0) {
+        return { prefix: buffer.subarray(0, filled), whole: true }
+      }
+      filled += bytesRead
     }
+    return { prefix: buffer, whole: false }
   } finally {
     await handle.close()
   }
