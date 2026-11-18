@@ -2834,6 +2834,42 @@ describe('screencast recorder tail frame at stop', () => {
     expect(run.recorder.frameCount).toBe(3)
   })
 
+  it('counts only frames it captures toward the wait', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // Two events without a timestamp are acknowledged but not captured, so
+    // they neither end the wait nor start its quiet gap.
+    run.advance(10)
+    run.session.emitFrame('missing')
+    run.session.emitFrame('missing')
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested).toHaveLength(1)
+
+    // The paint arrives before either timer has run out.
+    run.advance(20)
+    run.session.emitFrame('paint', 100.9)
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    delays.requested[1]?.resolve()
+    await stopping
+
+    const acks = run.session.sent.filter(
+      (method) => method === 'Page.screencastFrameAck',
+    )
+    // The first frame, both events without a timestamp and the paint.
+    expect(acks).toHaveLength(4)
+    expect(run.session.sent.indexOf('Page.stopScreencast')).toBeGreaterThan(
+      run.session.sent.lastIndexOf('Page.screencastFrameAck'),
+    )
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'paint'])
+    expect(run.recorder.frameCount).toBe(2)
+  })
+
   it('ends at the bound however slowly frames trickle in', async () => {
     const { clock, delays } = createTailClock()
     const run = await startRecorder({ fps: 10 }, 100, undefined, clock)

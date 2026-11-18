@@ -627,19 +627,23 @@ export class ScreencastRecorder {
     void this.session
       .send('Page.screencastFrameAck', { sessionId: event.sessionId })
       .catch(() => undefined)
-    this.receiveFrame(event)
-    // Whatever became of it, a frame counts toward a stop's wait.
-    this.onTailFrame()
+    // Every event is acknowledged, but only a frame taken into the capture
+    // counts toward a stop's wait: one without a usable timestamp is dropped,
+    // and an overload or a limit ends the wait itself.
+    if (this.receiveFrame(event)) {
+      this.onTailFrame()
+    }
   }
 
-  private receiveFrame(event: ScreencastFrameEvent): void {
+  /** Whether the frame was taken into the capture as its latest frame. */
+  private receiveFrame(event: ScreencastFrameEvent): boolean {
     const timestamp = event.metadata.timestamp
     if (
       this.stopped ||
       typeof timestamp !== 'number' ||
       !Number.isFinite(timestamp)
     ) {
-      return
+      return false
     }
     const previous = this.latest
     const receivedAt = this.monotonicNow()
@@ -676,17 +680,18 @@ export class ScreencastRecorder {
       // The previous frame already has its span; this one would start where
       // the recording now ends.
       this.overload(overload)
-      return
+      return false
     }
     const limit = this.budgetLimitFor(frame)
     if (limit) {
       // As for an overload: the previous frame has its span.
       this.limitReached(limit)
-      return
+      return false
     }
     this.latest = frame
     this.latestEmitted = false
     this.recordHighWater()
+    return true
   }
 
   private async finish(tailFrame: boolean): Promise<void> {
@@ -744,7 +749,7 @@ export class ScreencastRecorder {
     await Promise.race([this.detachSession(), this.cancelled.promise])
   }
 
-  // At most TAIL_FRAME_WAIT_MS, until TAIL_FRAMES frames arrive or none
+  // At most TAIL_FRAME_WAIT_MS, until TAIL_FRAMES frames are captured or none
   // follows the latest within TAIL_FRAME_QUIET_MS. Those frames go through
   // `onFrame` like any other, placed by their own timestamps. Capture that
   // has stopped, or a sink that has closed, has no use for a frame, and an

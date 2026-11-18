@@ -1,4 +1,4 @@
-import type { ColorSpan, SolidColor } from './media-timeline.js'
+import type { ColorSpan, FrameColor, SolidColor } from './media-timeline.js'
 
 /** The `_partN` number of a recorded segment; a path without one is an error. */
 export const segmentPartNumber = (artifactPath: string): number => {
@@ -71,4 +71,14 @@ export const firstColor = (spans: readonly ColorSpan[]): SolidColor => {
 export const lastColor = (spans: readonly ColorSpan[]): SolidColor => {
   const painted = paintedSpans(spans)
   return (painted.at(-1) ?? painted[0]).color
+}
+
+/**
+ * The color of a segment's final decoded span. Unlike `lastColor`, a neutral
+ * span after the first paint is reported, not skipped: only frames before the
+ * page first painted may be neutral, so a segment that ends dark ends there.
+ */
+export const terminalColor = (spans: readonly ColorSpan[]): FrameColor => {
+  const [first] = paintedSpans(spans)
+  return (spans.at(-1) ?? first).color
 }
