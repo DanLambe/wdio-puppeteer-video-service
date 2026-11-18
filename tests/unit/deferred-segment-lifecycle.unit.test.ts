@@ -463,6 +463,22 @@ describe('the spool budget of a recording', () => {
     ).toEqual([harness.spoolOf(1), undefined])
   })
 
+  it('lets go of the budget once the recording is reset', async () => {
+    const harness = createHarness({
+      service: { capture: { encoding: 'deferred' } },
+    })
+    await harness.controller.startForMetadata(METADATA, 0)
+    await harness.controller.followContext('tab-b', 'command')
+    expect(budgetsOf(harness)[1]).toBe(budgetsOf(harness)[0])
+    await harness.controller.finalizeMedia(true, false)
+    await harness.controller.reset()
+
+    // The controller holds no budget between recordings.
+    expect(
+      (harness.controller as unknown as { spoolBudget: unknown }).spoolBudget,
+    ).toBeUndefined()
+  })
+
   it('gives a live recording no budget', async () => {
     const harness = createHarness()
 

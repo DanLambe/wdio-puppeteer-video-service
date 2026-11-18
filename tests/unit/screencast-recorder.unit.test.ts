@@ -2731,3 +2731,114 @@ describe('screencast recorder spool budget', () => {
     await run.recorder.stop()
   })
 })
+
+// A budget that counts how often each registered segment's byte count is read.
+const createCountingBudget = (limits: Partial<SpoolLimits> = {}) => {
+  const budget = createBudget(limits)
+  const reads: number[] = []
+  const begin = budget.beginSegment.bind(budget)
+  vi.spyOn(budget, 'beginSegment').mockImplementation((directory, bytes) => {
+    const index = reads.push(0) - 1
+    return begin(directory, () => {
+      reads[index] = (reads[index] ?? 0) + 1
+      return bytes()
+    })
+  })
+  return { budget, reads }
+}
+
+// Frames a later segment captures, each one a budget check.
+const captureFrames = async (
+  run: Awaited<ReturnType<typeof startSpoolRecorder>>,
+  count: number,
+): Promise<void> => {
+  for (let step = 1; step <= count; step += 1) {
+    run.frame(`g${step.toString()}`, 100 + step / 10)
+    await settle()
+  }
+}
+
+describe('screencast recorder sealed spools', () => {
+  it('seals a stopped spool: later segments count its final bytes without reading it', async () => {
+    const { budget, reads } = createCountingBudget()
+    const first = await startSpoolRecorder({ budget, fps: 10 })
+    first.frame('a', 101)
+    await settle()
+    await first.recorder.stop()
+    const readsAtStop = reads[0]
+
+    const second = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(second, 30)
+    await second.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtStop)
+    expect(reads[1]).toBeGreaterThan(0)
+    expect(budget.bytes).toBe(first.bytes().length + second.bytes().length)
+  })
+
+  it('seals a spool stopped at the hard cap only once stopping has written its last blocks', async () => {
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const { budget, reads } = createCountingBudget({
+      hardCapBytes: header + 400,
+    })
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    for (
+      let step = 1;
+      step <= 60 && !run.recorder.incompleteReason;
+      step += 1
+    ) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    run.advance(2_000)
+    await run.recorder.stop()
+    const readsAtStop = reads[0]
+
+    expect(budget.bytes).toBe(run.bytes().length)
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await later.recorder.stop()
+    expect(reads[0]).toBe(readsAtStop)
+  })
+
+  it('seals an aborted spool', async () => {
+    const { budget, reads } = createCountingBudget()
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    run.frame('a', 101)
+    await settle()
+    await run.recorder.abort()
+    const total = budget.bytes
+    const readsAtAbort = reads[0]
+
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await later.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtAbort)
+    expect(total).toBeGreaterThan(0)
+    expect(budget.bytes).toBe(total + later.bytes().length)
+  })
+
+  it('seals a spool that could not be written', async () => {
+    const { budget, reads } = createCountingBudget()
+    const run = await startSpoolRecorder(
+      { budget, fps: 10 },
+      createFakeSpool(3),
+      createHoldClock(),
+    )
+    run.frame('a', 101)
+    await vi.waitFor(() => {
+      expect(run.recorder.incompleteReason).toMatch(/ENOSPC/u)
+    })
+    await settle()
+    const readsAtFailure = reads[0]
+
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await run.recorder.stop()
+    await later.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtFailure)
+  })
+})
