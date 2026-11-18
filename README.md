@@ -367,6 +367,15 @@ and are not options.
   still writes its video to the same disk. An output that cannot be written
   (`ENOSPC`) is reported as incomplete too.
 
+**Cost and when to use it.** Spooling removes the encoder from the test and
+puts one encode in each kept test's `afterTest` hook. That is a good trade
+when most recordings are discarded and a poor one when most are kept.
+`'auto'` with `recording.retain: 'failures'` is the combination to try; the
+measured numbers and the cases to avoid are in
+[Choosing the capture encoding](#choosing-the-capture-encoding). `'deferred'`
+also spools recordings that `'auto'` would encode live, which is rarely worth
+its cost.
+
 ## Tab Following
 
 In a WebDriver BiDi session, WebdriverIO 10's default, recording follows the tab
@@ -682,9 +691,63 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks. It does not move a deferred recording's encode, which runs when the test ends.
-- With `recording.retain: 'failures'`, try `capture.encoding: 'auto'`: a recording that is discarded then runs no encoder at all, and only kept recordings are encoded, at the end of their test. It needs disk space for the frames of each recording in progress, and adds an encode to each kept recording's `afterTest` hook ([Deferred Encoding](#deferred-encoding)).
+- With `recording.retain: 'failures'` and a suite that mostly passes, try `capture.encoding: 'auto'`. A discarded recording then runs no encoder, and each kept recording is encoded in its `afterTest` hook. It needs disk space for spools. See [Choosing the capture encoding](#choosing-the-capture-encoding) for measured numbers and when to keep the default, `'live'`.
 - Bound frame size with `capture.maxWidth` when the viewport is larger than the video needs to be. Encoding cost scales with pixels, so this is usually the largest single lever on a constrained runner.
 - The `parallel` profile defaults to 24 fps. The `ci` profile additionally bounds capture width at 1280 (except for cropped recordings), transcodes at CRF 28, disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
+
+### Choosing the capture encoding
+
+The default is `capture.encoding: 'live'`: an FFmpeg process encodes each
+recording while its test runs. In one set of measurements, Chrome's screencast
+took about 58% of the CPU recording added and FFmpeg about 32%, so removing the
+encoder from tests that are discarded saves part of the cost, not all of it.
+
+These are measurements, not guarantees. They come from one host (Docker on
+Windows, 2 CPUs, 7 GiB), one image (Chrome 154, FFmpeg 7.0.2), WebDriver BiDi
+and medians of 3 runs per cell. Each cell is the difference from `'live'` with
+the same workload and the same `recording.retain` setting. Negative is better.
+
+| Workload | Workers | Suite time | CPU | Peak memory |
+| --- | --- | --- | --- | --- |
+| All tests pass | 2 | -1.4 s | -12.8 s (-15%) | -28% |
+| All tests pass | 4 | -2.1 s | -12.9 s | -29% |
+| Half of the tests fail | 2 | +3.9 s | -5.6 s | -11% |
+| Half of the tests fail | 4 | +1.1 s | -1.9 s | -7% |
+| `retain: 'all'` | 2 | -0.4 s | +3.3 s | -4% |
+| `retain: 'retries'`, with retries | 2 | 0.0 s | +0.7 s | +4% |
+
+That table is `'auto'`. Every kept recording decoded in every mode.
+
+- **Use `'auto'` when the suite mostly passes and `retain` is `'failures'`.**
+  On an all-passing suite it used about 15% less CPU and 28% less peak memory
+  and was no slower.
+- **A kept recording costs time.** Its encode runs in the `afterTest` hook, and
+  that hook took about 1 to 1.6 s per kept test, against about 0.3 s, in the
+  measurement. With many tab parts it took longer: 6 s in a pilot run at 4 workers.
+  That is the +3.9 s above. At 4 workers other workers overlap the wait, so the
+  same suite lost +1.1 s. Spools also need disk space; see
+  [Deferred Encoding](#deferred-encoding).
+- **Keep `'live'` when many recordings are kept**, when most tests fail, or
+  when the suite runs few workers and fails often, because the hook wait is on
+  the critical path there. With `retain: 'all'`, `'auto'` behaves like `'live'`
+  and gains nothing. Under `retain: 'retries'` a retry is encoded live too.
+- **`'deferred'` rarely fits.** It spools even for `retain: 'all'` and for
+  retries, and that was slower in the measurement: +7.1 s with `retain: 'all'`
+  and +3.3 s with retries, against `'live'`. It also used more CPU in those two
+  cases (+6.4 s and +5.2 s).
+- **Kept recordings queue for post-processing.** Several failures at once wait
+  for a slot (`concurrency.maxPostProcessesPerProcess`). In a burst at one slot
+  the wait reached 2.3 s.
+
+Other levers measured on a mostly static 1920x1080 page, 8 specs of 2 tests
+each, all passing and discarded, 2 runs per cell: `profile: 'ci'` added +5.5 s
+and 38.0 CPU-s with 2 workers, against +7.8 s and 56.6 CPU-s for the default
+options. At 4 workers it added +6.6 s and 33.4 CPU-s, against +9.6 s and 48.3
+CPU-s. Differences under about 1.5 s or 4 CPU-s between cells are within noise.
+Starting a recording took about 245 ms at 2 workers and 440 to 680 ms at 4,
+nearly all of it frame priming; stopping took about 20 ms when discarded and
+215 to 255 ms when kept. Each stop or tab move that keeps media can also wait
+up to 125 ms for the last painted frame to arrive.
 
 ### Measuring
 
@@ -710,6 +773,10 @@ paired comparisons per CPU/worker and retention combination, verifies decoded
 media, and finishes with a five-minute memory soak. See the
 [benchmark instructions](scripts/bench/pipeline/README.md) for image setup,
 metrics, investigation thresholds, and the separate performance workflow.
+
+To compare encodings on your own suite, run it with `capture.encoding` set to
+`'live'` and to `'auto'` and compare suite time, CPU and peak memory. The
+result depends on how many recordings are kept.
 
 Recordings are not throttled by default: `concurrency.maxRecordingsPerProcess`
 and `maxRecordingsGlobal` are both unlimited, so WDIO `maxInstances: 4` means
