@@ -284,7 +284,9 @@ encoded with the arguments a live encoder would have used, in part order,
 before any transcode or merge, and each spool is deleted once its file is
 checked. `processing.timing: 'after-worker'` does not move this encode: it
 still runs when the test ends, and only the transcode and merge wait for the
-worker to finish. A discarded recording runs no FFmpeg process at all.
+worker to finish. Discarding a recording that stayed spooled skips encoding.
+A large spool or low disk space can start a live encoder sooner, before
+retention is known (see below).
 
 Each encode takes a post-processing slot (`concurrency.maxPostProcessesPerProcess`
 and `maxPostProcessesGlobal`), so several workers failing at once encode no
@@ -299,8 +301,8 @@ after them; transcodes and merges follow under their usual rules and
 seconds (or `concurrency.postProcessStartTimeoutMs` with
 `postProcessStartMode: 'fast-fail'`, when shorter), and one encode at most
 `processing.ffmpeg.timeoutMs` when that is set. The budget is not a bound on
-the whole end-of-test hook. The encode runs in the service's `afterTest` (or
-`afterScenario`) hook, so where a framework or wrapper bounds that hook with a
+the whole end-of-test hook. The encode runs in the test's completion hook (`afterTest` in
+Mocha and Jasmine, `afterScenario` in Cucumber), so where a framework or wrapper bounds that hook with a
 timeout shorter than the budget, the hook can time out while the encode still
 finishes, or keeps its frames as below; the test's own result is unaffected.
 Allow that hook at least the budget if it must wait for long recordings.
@@ -368,8 +370,12 @@ and are not options.
   (`ENOSPC`) is reported as incomplete too.
 
 **Cost and when to use it.** Spooling removes the encoder from the test and
-puts one encode in each kept test's `afterTest` hook. That is a good trade
-when most recordings are discarded and a poor one when most are kept.
+puts the encode work in the completion hook of each kept test. Discarding a
+recording that stayed spooled skips encoding. At finalization the service
+encodes each kept spooled segment (a multi-tab test can have several), and large
+spools or low disk space may start a live encoder sooner, before retention is
+known. That is a good trade when most recordings are discarded and a poor one
+when most are kept.
 `'auto'` with `recording.retain: 'failures'` is the combination to try; the
 measured numbers and the cases to avoid are in
 [Choosing the capture encoding](#choosing-the-capture-encoding). `'deferred'`
@@ -701,21 +707,23 @@ incompatible build falls back to WebM capture plus H.264 transcode.
 - Limit recorders with `concurrency.maxRecordingsPerProcess` and `maxRecordingsGlobal`.
 - Use `concurrency.startMode: 'fast-fail'` to bound contention waits.
 - Use `processing.timing: 'after-worker'` to move FFmpeg work out of test hooks. It does not move a deferred recording's encode, which runs when the test ends.
-- With `recording.retain: 'failures'` and a suite that mostly passes, try `capture.encoding: 'auto'`. A discarded recording then runs no encoder, and each kept recording is encoded in its `afterTest` hook. It needs disk space for spools. See [Choosing the capture encoding](#choosing-the-capture-encoding) for measured numbers and when to keep the default, `'live'`.
+- With `recording.retain: 'failures'` and a suite that mostly passes, try `capture.encoding: 'auto'`. Discarding a recording that stayed spooled skips encoding, and at finalization the service encodes each kept spooled segment in the test's completion hook. Large spools or low disk space may start a live encoder sooner. It needs disk space for spools. See [Choosing the capture encoding](#choosing-the-capture-encoding) for measured numbers and when to keep the default, `'live'`.
 - Bound frame size with `capture.maxWidth` when the viewport is larger than the video needs to be. Encoding cost scales with pixels, so this is usually the largest single lever on a constrained runner.
 - The `parallel` profile defaults to 24 fps. The `ci` profile additionally bounds capture width at 1280 (except for cropped recordings), transcodes at CRF 28, disables frame priming and window segmentation, defers processing, fast-fails recording starts, limits global post-processing to one operation, and pins service logging to `warn` unless explicit. Merging remains disabled by default in every profile and can be enabled explicitly.
 
 ### Choosing the capture encoding
 
 The default is `capture.encoding: 'live'`: an FFmpeg process encodes each
-recording while its test runs. In one set of measurements, Chrome's screencast
-took about 58% of the CPU recording added and FFmpeg about 32%, so removing the
-encoder from tests that are discarded saves part of the cost, not all of it.
+recording while its test runs. In a separate, earlier study (WebdriverIO 10
+RC.0 attribution measurements, 2 runs per cell), Chrome's screencast took about
+58% of the CPU recording added and FFmpeg about 32%, so removing the encoder from
+tests that are discarded saves part of the cost, not all of it.
 
 These are measurements, not guarantees. They come from one host (Docker on
 Windows, 2 CPUs, 7 GiB), one image (Chrome 154, FFmpeg 7.0.2), WebDriver BiDi
 and medians of 3 runs per cell. Each cell is the difference from `'live'` with
 the same workload and the same `recording.retain` setting. Negative is better.
+The table is `'auto'` versus `'live'`.
 
 | Workload | Workers | Suite time | CPU | Peak memory |
 | --- | --- | --- | --- | --- |
@@ -726,17 +734,19 @@ the same workload and the same `recording.retain` setting. Negative is better.
 | `retain: 'all'` | 2 | -0.4 s | +3.3 s | -4% |
 | `retain: 'retries'`, with retries | 2 | 0.0 s | +0.7 s | +4% |
 
-That table is `'auto'`. Every kept recording decoded in every mode.
+Every kept recording decoded in every mode.
 
 - **Use `'auto'` when the suite mostly passes and `retain` is `'failures'`.**
   On an all-passing suite it used about 15% less CPU and 28% less peak memory
   and was no slower.
-- **A kept recording costs time.** Its encode runs in the `afterTest` hook, and
-  that hook took about 1 to 1.6 s per kept test, against about 0.3 s, in the
-  measurement. With many tab parts it took longer: 6 s in a pilot run at 4 workers.
-  That is the +3.9 s above. At 4 workers other workers overlap the wait, so the
-  same suite lost +1.1 s. Spools also need disk space; see
-  [Deferred Encoding](#deferred-encoding).
+- **A kept recording costs time.** Its encode runs in the test's completion
+  hook (`afterTest` in Mocha, `afterScenario` in Cucumber). In the Mocha
+  measurement the `afterTest` hook took about 1 to 1.6 s per kept test, against
+  about 0.3 s. That wait delays the next test, which is the +3.9 s in the
+  half-fail row at 2 workers. At 4 workers other workers overlap the wait, so the
+  same suite lost +1.1 s. Separately, a test with many tab parts encodes each
+  kept part, and its hook took longer: 6 s at 4 workers in a pilot run. Spools
+  also need disk space; see [Deferred Encoding](#deferred-encoding).
 - **Keep `'live'` when many recordings are kept**, when most tests fail, or
   when the suite runs few workers and fails often, because the hook wait is on
   the critical path there. With `retain: 'all'`, `'auto'` behaves like `'live'`
@@ -751,10 +761,12 @@ That table is `'auto'`. Every kept recording decoded in every mode.
   global slot, the wait reached 2.3 s.
 
 Other levers measured on a mostly static 1920x1080 page, 8 specs of 2 tests
-each, all passing and discarded, 2 runs per cell: `profile: 'ci'` added +5.5 s
+each, all passing and discarded, 2 runs per cell, from the same earlier RC.0
+study as the attribution above: `profile: 'ci'` added +5.5 s
 and 38.0 CPU-s with 2 workers, against +7.8 s and 56.6 CPU-s for the default
-options. At 4 workers it added +6.6 s and 33.4 CPU-s, against +9.6 s and 48.3
+options. These deltas are versus recording off. At 4 workers it added +6.6 s and 33.4 CPU-s, against +9.6 s and 48.3
 CPU-s. Differences under about 1.5 s or 4 CPU-s between cells are within noise.
+These figures come from the earlier study, not from the encoding table above.
 Starting a recording took about 245 ms at 2 workers and 440 to 680 ms at 4,
 nearly all of it frame priming; stopping took about 20 ms when discarded and
 215 to 255 ms when kept. Each stop or tab move that keeps media can also wait
@@ -787,7 +799,8 @@ metrics, investigation thresholds, and the separate performance workflow.
 
 To compare encodings on your own suite, run it with `capture.encoding` set to
 `'live'` and to `'auto'` and compare suite time, CPU and peak memory. The
-result depends on how many recordings are kept.
+result depends on how many recordings are kept, and no failure rate is a
+reliable cutoff, so measure your own suite.
 
 Recordings are not throttled by default: `concurrency.maxRecordingsPerProcess`
 and `maxRecordingsGlobal` are both unlimited, so WDIO `maxInstances: 4` means
