@@ -417,7 +417,7 @@ export class ScreencastRecorder {
   }
 
   async stop(): Promise<void> {
-    this.stopping ??= this.finish()
+    this.stopping ??= this.finish().finally(this.sealSpool)
     await this.stopping
   }
 
@@ -430,9 +430,9 @@ export class ScreencastRecorder {
       // Cancelled in the caller's turn, before the abort's own: a caller that
       // has just read `output` must not see a switch after it.
       const promotion = this.promotion?.cancel()
-      this.aborting = Promise.resolve().then(() =>
-        this.abortRecording(promotion),
-      )
+      this.aborting = Promise.resolve()
+        .then(() => this.abortRecording(promotion))
+        .finally(this.sealSpool)
     }
     return this.aborting
   }
@@ -548,6 +548,13 @@ export class ScreencastRecorder {
     this.budget?.release()
   }
 
+  // Called once the recorder writes nothing more to its spool. A spool that
+  // was switched to an encoder has already left the budget. A capture that
+  // stopped at a limit is sealed only by stop, which still writes its end.
+  private readonly sealSpool = (): void => {
+    this.budget?.seal()
+  }
+
   private limitReached(detail: string): void {
     if (this.stopped || this.incomplete) {
       return
@@ -563,6 +570,8 @@ export class ScreencastRecorder {
     if (this.stopping !== undefined || this.aborting !== undefined) {
       return
     }
+    // A closed spool accepts nothing more.
+    this.sealSpool()
     this.stopCapturing()
     this.releasePending()
     void this.session.send('Page.stopScreencast').catch(() => undefined)

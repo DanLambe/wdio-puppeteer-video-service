@@ -638,6 +638,8 @@ export class RecordingController implements ContextFollowerTarget {
       this.failedStarts.clear()
       this.unconfirmedGap = undefined
       const { spooled } = await this.captureEngine.resetRecording()
+      // The recording has ended; the next one starts with its own budget.
+      this.spoolBudget = undefined
       // Released first: keeping frames never holds a recording slot.
       await this.recordingSlotScheduler.release()
       this.warnAboutUnprocessedSegments(
@@ -834,7 +836,8 @@ export class RecordingController implements ContextFollowerTarget {
    */
   private createSpoolPath(): string | undefined {
     const storage = this.spoolStorage
-    if (!storage) {
+    // A spool is always bounded by its recording's budget.
+    if (!storage || !this.spoolBudget) {
       return undefined
     }
     const mode = selectCaptureMode({
@@ -844,7 +847,7 @@ export class RecordingController implements ContextFollowerTarget {
     })
     // A recording that has used its spool allowance, or the volume's free
     // space, continues as live encoding: later segments start live.
-    if (mode === 'live' || this.spoolBudget?.promoted) {
+    if (mode === 'live' || this.spoolBudget.promoted) {
       return undefined
     }
     const fileName = formatSpoolFileName({

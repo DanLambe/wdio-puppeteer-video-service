@@ -41,12 +41,15 @@ export interface SegmentBudgetHandlers {
 /**
  * The spool budget of one recording. It decides; sinks only report bytes. Its
  * total is every spool of the recording still on disk, sealed or active, plus
- * what the active one has accepted and not yet flushed.
+ * what the active one has accepted and not yet flushed. A sealed spool counts
+ * as the bytes it held when sealed, so a check never reads it again.
  */
 export class SpoolBudget {
   readonly limits: SpoolLimits
   private readonly diskSpace: DiskSpaceBoundary
-  private readonly segments = new Set<SegmentBudget>()
+  // Segments whose sinks may still accept bytes.
+  private readonly active = new Set<SegmentBudget>()
+  private sealedBytes = 0
   private promotedState = false
 
   constructor(limits: SpoolLimits, diskSpace: DiskSpaceBoundary) {
@@ -56,8 +59,8 @@ export class SpoolBudget {
 
   /** Bytes of every spool of the recording still on disk. */
   get bytes(): number {
-    let total = 0
-    for (const segment of this.segments) {
+    let total = this.sealedBytes
+    for (const segment of this.active) {
       total += segment.bytes
     }
     return total
@@ -73,12 +76,12 @@ export class SpoolBudget {
   }
 
   /**
-   * Registers a spool segment. `bytes` reports what its sink has accepted; it
-   * keeps its final count after the spool is sealed, until the spool is gone.
+   * Registers a spool segment. `bytes` reports what its sink has accepted
+   * until the segment is sealed; it is not called after that.
    */
   beginSegment(directory: string, bytes: () => number): SegmentBudget {
     const segment = new SegmentBudget(this, directory, bytes)
-    this.segments.add(segment)
+    this.active.add(segment)
     return segment
   }
 
@@ -92,9 +95,20 @@ export class SpoolBudget {
     }
   }
 
+  /** The segment's sink accepts no more bytes: it counts as `bytes` from now. */
+  seal(segment: SegmentBudget, bytes: number): void {
+    if (this.active.delete(segment)) {
+      this.sealedBytes += bytes
+    }
+  }
+
   /** The spool left the disk or never existed. */
-  forget(segment: SegmentBudget): void {
-    this.segments.delete(segment)
+  forget(segment: SegmentBudget, sealedBytes: number | undefined): void {
+    if (sealedBytes === undefined) {
+      this.active.delete(segment)
+    } else {
+      this.sealedBytes -= sealedBytes
+    }
   }
 }
 
@@ -107,7 +121,9 @@ export class SegmentBudget {
   private freeBytes: number | undefined
   private lastSampleBytes = 0
   private promotionRequested = false
-  private released = false
+  private state: 'active' | 'sealed' | 'released' = 'active'
+  // The bytes the sink had accepted when it was sealed.
+  private sealedBytes = 0
   private sampling = false
 
   constructor(
@@ -120,9 +136,9 @@ export class SegmentBudget {
     this.reportBytes = reportBytes
   }
 
-  /** Bytes this segment's sink has accepted. */
+  /** Bytes this segment's sink has accepted, or had when it was sealed. */
   get bytes(): number {
-    return this.reportBytes()
+    return this.state === 'active' ? this.reportBytes() : this.sealedBytes
   }
 
   attach(handlers: SegmentBudgetHandlers): void {
@@ -141,7 +157,7 @@ export class SegmentBudget {
    * stop capturing now, or `undefined`.
    */
   check(pendingBytes: number): string | undefined {
-    if (this.released) {
+    if (this.state !== 'active') {
       return undefined
     }
     const { limits } = this.recording
@@ -159,10 +175,30 @@ export class SegmentBudget {
     return this.lowSpaceReason()
   }
 
+  /**
+   * The recorder has finished writing to the spool: stopped, aborted, or its
+   * file failed. Its final byte count is kept; the sink is not asked again
+   * and the segment decides nothing more.
+   */
+  seal(): void {
+    if (this.state !== 'active') {
+      return
+    }
+    this.sealedBytes = this.reportBytes()
+    this.state = 'sealed'
+    this.handlers = undefined
+    this.recording.seal(this, this.sealedBytes)
+  }
+
   /** The spool left the disk, or its segment never started. */
   release(): void {
-    this.released = true
-    this.recording.forget(this)
+    if (this.state === 'released') {
+      return
+    }
+    const sealed = this.state === 'sealed' ? this.sealedBytes : undefined
+    this.state = 'released'
+    this.handlers = undefined
+    this.recording.forget(this, sealed)
   }
 
   private requestPromotion(): void {
@@ -188,14 +224,15 @@ export class SegmentBudget {
   }
 
   private sample(): void {
-    if (this.sampling || this.released) {
+    if (this.sampling || this.state !== 'active') {
       return
     }
     this.sampling = true
     this.lastSampleBytes = this.bytes
     void this.recording.readFreeBytes(this.directory).then((free) => {
       this.sampling = false
-      if (!this.released && free !== undefined) {
+      // A sample that resolves after the seal or release changes nothing.
+      if (this.state === 'active' && free !== undefined) {
         this.applyFreeSpace(free)
       }
     })
