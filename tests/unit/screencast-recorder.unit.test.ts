@@ -2777,24 +2777,29 @@ describe('screencast recorder sealed spools', () => {
   })
 
   it('seals a spool stopped at the hard cap only once stopping has written its last blocks', async () => {
+    const clock = createHoldClock()
     const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
     const { budget, reads } = createCountingBudget({
-      hardCapBytes: header + 400,
+      hardCapBytes: header + 350,
     })
-    const run = await startSpoolRecorder({ budget, fps: 10 })
+    const run = await startSpoolRecorder({ budget, fps: 10 }, undefined, clock)
     for (
-      let step = 1;
-      step <= 60 && !run.recorder.incompleteReason;
-      step += 1
+      let hold = 0;
+      hold < 100 && !run.recorder.incompleteReason;
+      hold += 1
     ) {
-      run.frame(`f${step.toString()}`, 100 + step / 10)
+      run.advance(1_000)
+      clock.tick()
       await settle()
     }
     expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    const atLimit = run.bytes().length
     run.advance(2_000)
     await run.recorder.stop()
     const readsAtStop = reads[0]
 
+    // Stopping still wrote the end of the video, and that is counted.
+    expect(run.bytes().length).toBeGreaterThan(atLimit)
     expect(budget.bytes).toBe(run.bytes().length)
     const later = await startSpoolRecorder({ budget, fps: 10 })
     await captureFrames(later, 5)

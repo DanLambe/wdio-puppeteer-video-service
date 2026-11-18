@@ -431,6 +431,8 @@ describe('sealed spool segments', () => {
     expect(handlers.promote).not.toHaveBeenCalled()
     expect(handlers.stop).not.toHaveBeenCalled()
     expect(handlers.isSpooling).not.toHaveBeenCalled()
+    // The low reading that arrived late does not promote the recording.
+    expect(budget.promoted).toBe(false)
   })
 
   it('takes a sealed spool out of the total when it is released', () => {
