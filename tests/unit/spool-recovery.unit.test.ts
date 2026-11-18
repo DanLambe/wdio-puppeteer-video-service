@@ -10,7 +10,9 @@ import { SPOOL_DIR_NAME } from '../../src/service/constants.js'
 import type { ServiceLogger } from '../../src/service/logging.js'
 import {
   createMatroskaHeader,
+  encodeElementSize,
   MatroskaBlockWriter,
+  STREAM_OPENING,
 } from '../../src/service/matroska-writer.js'
 import {
   classifySpoolPrefix,
@@ -85,6 +87,76 @@ const recover = (overrides: Partial<SpoolRecoveryOptions> = {}) =>
 
 const warnings = (): string[] =>
   logs.filter(({ level }) => level === 'warn').map(({ message }) => message)
+
+type ReadAt = (
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number,
+) => Promise<{ bytesRead: number }>
+
+/**
+ * Caps each read of a spool at the next of `sizes` bytes, as a read may
+ * return fewer bytes than asked before the end of a file; reads after the
+ * last size are not capped. Records the length each read asked for and the
+ * bytes it returned.
+ */
+const shortenReads = (
+  sizes: readonly number[] = [],
+): { readonly requested: number[]; readonly returned: number[] } => {
+  const requested: number[] = []
+  const returned: number[] = []
+  const realOpen = fs.open.bind(fs)
+  vi.spyOn(fs, 'open').mockImplementation(
+    async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen(...args)
+      const read = handle.read.bind(handle) as ReadAt
+      const shortened: ReadAt = async (buffer, offset, length, position) => {
+        requested.push(length)
+        const cap = sizes[returned.length] ?? length
+        const result = await read(
+          buffer,
+          offset,
+          Math.min(cap, length),
+          position,
+        )
+        returned.push(result.bytesRead)
+        return result
+      }
+      handle.read = shortened as typeof handle.read
+      return handle
+    },
+  )
+  return { requested, returned }
+}
+
+// The unknown size the writer gives a Segment and a Cluster.
+const UNKNOWN_SIZE = Buffer.from([
+  0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+])
+// The largest header element or cluster timestamp recovery accepts.
+const LARGEST_OPENING_ELEMENT = 4 * 1_024
+
+/**
+ * The writer's opening with each sized element as large as recovery accepts,
+ * then a block: the opening alone is longer than the prefix recovery reads.
+ */
+const longOpeningStream = (): Buffer => {
+  const opening = STREAM_OPENING.slice(0, -1).flatMap(({ id, unknownSize }) =>
+    unknownSize
+      ? [id, UNKNOWN_SIZE]
+      : [
+          id,
+          encodeElementSize(LARGEST_OPENING_ELEMENT),
+          Buffer.alloc(LARGEST_OPENING_ELEMENT),
+        ],
+  )
+  const block = Buffer.concat([
+    Buffer.from([0x81, 0, 0, 0x80]),
+    Buffer.alloc(64, 7),
+  ])
+  return Buffer.concat([...opening, ebmlElement(0xa3, block)])
+}
 
 const noDelay: ClockBoundary = {
   ...systemClock,
@@ -442,29 +514,7 @@ describe('recoverOrphanedSpools', () => {
   it('recovers a spool whose first image is far larger than the prefix it reads', async () => {
     const stream = withFrames(300_000, 1)
     await writeSpool(spoolName('big', 1), stream)
-    const requested: number[] = []
-    const realOpen = fs.open.bind(fs)
-    vi.spyOn(fs, 'open').mockImplementation(
-      async (...args: Parameters<typeof fs.open>) => {
-        const handle = await realOpen(...args)
-        const read = handle.read.bind(handle) as (
-          buffer: Buffer,
-          offset: number,
-          length: number,
-          position: number,
-        ) => Promise<{ bytesRead: number }>
-        handle.read = (async (
-          buffer: Buffer,
-          offset: number,
-          length: number,
-          position: number,
-        ) => {
-          requested.push(length)
-          return read(buffer, offset, length, position)
-        }) as typeof handle.read
-        return handle
-      },
-    )
+    const { requested } = shortenReads()
 
     await recover()
 
@@ -474,6 +524,65 @@ describe('recoverOrphanedSpools', () => {
     // Only a bounded prefix was asked for, never the whole file.
     expect(requested).toHaveLength(1)
     expect(requested[0]).toBeLessThan(stream.length / 10)
+  })
+
+  it.each([
+    { cut: 'inside the header', sizes: () => [30, 100] },
+    {
+      cut: 'just before the first block',
+      sizes: () => [headerOnly().length, clusterOpening().length],
+    },
+  ])('reads on past a short read that ends $cut', async ({ sizes }) => {
+    const stream = withFrames()
+    const spoolPath = await writeSpool(spoolName('short', 1), stream)
+    const { returned } = shortenReads(sizes())
+
+    const result = await recover()
+
+    const framesPath = path.join(outputDir, 'short_part1.frames.mkv')
+    expect(result).toMatchObject({
+      deleted: [],
+      left: [],
+      recovered: [framesPath],
+    })
+    expect(await fs.readFile(framesPath)).toEqual(stream)
+    expect(await exists(spoolPath)).toBe(false)
+    expect(returned.slice(0, 2)).toEqual(sizes())
+    expect(returned.at(-1)).toBe(0)
+  })
+
+  it('deletes a header-only spool once a read confirms the file has ended', async () => {
+    const spoolPath = await writeSpool(spoolName('empty', 1), headerOnly())
+    const { returned } = shortenReads([100, 50])
+
+    const result = await recover()
+
+    expect(result).toMatchObject({
+      deleted: [spoolPath],
+      left: [],
+      recovered: [],
+    })
+    expect(await exists(spoolPath)).toBe(false)
+    expect(returned).toEqual([100, 50, headerOnly().length - 150, 0])
+  })
+
+  it('does not take a full prefix read in short pieces for the whole file', async () => {
+    const stream = longOpeningStream()
+    const spoolPath = await writeSpool(spoolName('long', 1), stream)
+    const { returned } = shortenReads([8 * 1_024, 4 * 1_024])
+
+    const result = await recover()
+
+    const framesPath = path.join(outputDir, 'long_part1.frames.mkv')
+    expect(result).toMatchObject({
+      deleted: [],
+      left: [],
+      recovered: [framesPath],
+    })
+    expect(await fs.readFile(framesPath)).toEqual(stream)
+    expect(await exists(spoolPath)).toBe(false)
+    // The prefix filled without a read reaching the end of the file.
+    expect(returned).toEqual([8 * 1_024, 4 * 1_024, 4 * 1_024])
   })
 
   it('never replaces a file that already has the frames name', async () => {
