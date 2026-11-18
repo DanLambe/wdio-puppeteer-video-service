@@ -312,7 +312,7 @@ const listSpools = async (runDirectory: string): Promise<SpoolFile[]> => {
   const names = entries
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
-    .sort()
+    .sort((left, right) => left.localeCompare(right))
   const spools: SpoolFile[] = []
   for (const name of names) {
     const parsed = parseSpoolFileName(name)
@@ -390,15 +390,20 @@ const warnAboutRecovery = (
   if (first !== undefined) {
     const names = recovered.map((framesPath) => path.basename(framesPath))
     const noun = names.length === 1 ? 'recording' : 'recordings'
+    const example = `${first.slice(0, -FRAMES_EXTENSION.length)}.webm`
     log(
       'warn',
-      `${LOG_PREFIX} A worker ended while recording, so the frames of ${names.length.toString()} ${noun} were recovered: ${names.join(', ')}. Each recovered recording stops at its last held image. Convert them with, for example: ${describeConversion(first, `${first.slice(0, -FRAMES_EXTENSION.length)}.webm`)}`,
+      `${LOG_PREFIX} A worker ended while recording, so the frames of ${names.length.toString()} ${noun} were recovered: ${names.join(', ')}. Each recovered recording stops at its last held image. Convert them with, for example: ${describeConversion(first, example)}`,
     )
   }
   if (left.length > 0) {
+    const spools = left.length === 1 ? 'spool' : 'spools'
+    const reasons = left
+      .map(({ path: spoolPath, reason }) => `${spoolPath} (${reason})`)
+      .join('; ')
     log(
       'warn',
-      `${LOG_PREFIX} ${left.length.toString()} frame spool${left.length === 1 ? '' : 's'} could not be recovered and stay where they are: ${left.map(({ path: spoolPath, reason }) => `${spoolPath} (${reason})`).join('; ')}`,
+      `${LOG_PREFIX} ${left.length.toString()} frame ${spools} could not be recovered and stay where they are: ${reasons}`,
     )
   }
 }

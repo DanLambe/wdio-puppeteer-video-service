@@ -109,8 +109,13 @@ export class ScreencastEncoder {
 
   private readonly onExit = (): void => {
     const { code, signal, diagnostic } = this.result
-    this.exitFailure ??= new Error()
-    this.exitFailure.message = `FFmpeg ${signal ? `was terminated by ${signal}` : `exited with code ${String(code)}`} during screencast startup${diagnostic ? `: ${diagnostic}` : '.'}`
+    const ended = signal
+      ? `was terminated by ${signal}`
+      : `exited with code ${String(code)}`
+    const detail = diagnostic ? `: ${diagnostic}` : '.'
+    const message = `FFmpeg ${ended} during screencast startup${detail}`
+    this.exitFailure ??= new Error(message)
+    this.exitFailure.message = message
     this.onError(this.exitFailure)
   }
 

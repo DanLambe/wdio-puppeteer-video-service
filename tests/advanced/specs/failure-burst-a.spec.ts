@@ -1,3 +1,7 @@
-import { describeFailureBurst } from './failure-burst.js'
+import { runFailureBurst } from './failure-burst.js'
 
-describeFailureBurst('A')
+describe('Advanced E2E - Failure burst A', () => {
+  it('should keep every part when worker A fails with the others', async () => {
+    await runFailureBurst()
+  })
+})
