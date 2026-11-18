@@ -248,8 +248,11 @@ export class ContextFollower {
       await this.target.recoverFailedClose(signal.contextId)
       return
     }
-    if (signal?.kind === 'close' && signal.contextId === this.currentWindow) {
-      this.setCurrentWindow(undefined)
+    if (signal?.kind === 'close') {
+      // A read still in flight may have seen the closed tab as current, so
+      // its answer is dropped. A different known current window stays.
+      const closedCurrent = signal.contextId === this.currentWindow
+      this.setCurrentWindow(closedCurrent ? undefined : this.currentWindow)
     }
     await this.target.resumeAfterClose()
   }
