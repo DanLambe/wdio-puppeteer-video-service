@@ -95,11 +95,13 @@ export class SpoolBudget {
     }
   }
 
-  /** The segment's sink accepts no more bytes: it counts as `bytes` from now. */
+  /**
+   * The segment's sink accepts no more bytes: it counts as `bytes` from now.
+   * Called once per segment, while it is active.
+   */
   seal(segment: SegmentBudget, bytes: number): void {
-    if (this.active.delete(segment)) {
-      this.sealedBytes += bytes
-    }
+    this.active.delete(segment)
+    this.sealedBytes += bytes
   }
 
   /** The spool left the disk or never existed. */
