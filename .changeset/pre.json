@@ -5,6 +5,12 @@
     "wdio-puppeteer-video-service": "1.0.0"
   },
   "changesets": [
-    "wdio-10-support"
+    "cheaper-post-processing",
+    "deferred-encoding",
+    "hold-tab-segments",
+    "tab-follow-setup-script",
+    "tail-frame-at-stop",
+    "wdio-10-support",
+    "webm-duration"
   ]
 }

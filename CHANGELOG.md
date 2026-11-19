@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0-rc.1
+
+### Patch Changes
+
+- 46cd18e: The service looks for FFmpeg before a worker's first test, while the browser warms up, instead of inside the first test, and runs `ffmpeg -version` once for each candidate instead of twice. On Windows each run takes about 34 ms. A missing FFmpeg is still reported once, and recording is still disabled for that worker.
+- 46cd18e: New option `capture.encoding` (`'live'`, `'auto'` or `'deferred'`, default `'live'`). With `'deferred'`, no encoder runs while a test runs: its frames are written to disk, deleted unencoded if the recording is discarded while still spooled, and encoded per kept segment when the test ends (a large spool or low disk space can start a live encoder sooner). `'auto'` does this only for recordings that may be discarded, such as passing tests under `retain: 'failures'`, and encodes the rest live. Kept recordings produce the same files and manifest entries as live ones. A kept recording that cannot be encoded keeps its frames as a `.frames.mkv` file, with a warning that says how to convert it, and is reported as incomplete; frames a crashed worker left behind are recovered the same way when the run ends. That recovery only touches spool files a worker named, deletes only a spool it can show holds no image, keeps anything it cannot read that way as a `.frames.mkv` file, and does nothing if the spool directory is a link. A deferred recording that spools more than 256 MiB continues as live encoding mid-recording, one that would pass 1 GiB stops and is reported as incomplete, and low free disk space promotes it and then stops it, so a worker's disk use stays bounded. The default, `'live'`, records as before.
+
+  The README's performance tuning section now says when to choose each encoding, with measured numbers.
+
+- 46cd18e: A tab move no longer transcodes the segment it ends. Before, with `format: 'mp4'` and the default `processing.timing: 'after-test'`, the command that moved recording to another tab waited while the previous segment was transcoded, and if the test then passed under `retain: 'failures'` that work was thrown away. Segments are now processed when the test ends, only when the recording is kept; a discarded recording is not transcoded or merged. Kept recordings produce the same files and manifest entries as before.
+- 46cd18e: In WebDriver BiDi sessions, recording no longer jumps to a newly opened window because of WebdriverIO's own setup script before the test switches to it. A script now moves recording only to a tab the test holds (from `browser.url()`, `browser.newWindow()`, `browser.browsingContexts()` or a context's `frame()`), a window it has switched to, WebdriverIO's current window, or the recorded tab. A raw `browser.scriptCallFunction()` or `browser.scriptEvaluate()` on a tab known only from `browser.getWindowHandles()` no longer moves recording there; switch to the tab first or use a held context. See the [migration guide](https://github.com/DanLambe/wdio-puppeteer-video-service/blob/master/MIGRATION.md#what-changes-in-webdriver-bidi-sessions).
+
+  An implicit action after `browser.switchToWindow()`, such as `browser.keys()`, no longer moves recording back to the previous tab when a current-window lookup the service started before the switch answers late. Likewise, such a late answer no longer sends recording to a tab that `browser.browsingContextClose()` has closed.
+
+- 46cd18e: A recording now ends on the last change the test made. Before, a change made just before a test ended, or just before recording moved to another tab, was often missing from that video or segment, because Chrome was still capturing its frame when recording stopped. Stopping now waits up to 125 ms for that frame, so each kept stop and each tab move can take up to 125 ms longer; on a page that keeps changing the wait ends after two frames.
+- 46cd18e: WebM recordings now carry their length and a seek index. Before, a kept WebM that was not merged or transcoded had neither, so video players and the HTML report could not show how long a recording was, and the scrub bar could not seek to a point in proportion to its length. FFmpeg now writes each recording file itself, which fixes both.
+
 ## 2.0.0-rc.0
 
 ### Major Changes
