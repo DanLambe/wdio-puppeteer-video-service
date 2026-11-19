@@ -1,4 +1,4 @@
-import type { ChildProcess } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import { FFMPEG_TERMINATION_HELPER_TIMEOUT_MS } from './constants.js'
 import {
@@ -16,6 +16,21 @@ export interface FfmpegResult {
 export interface ScreencastEncoderDependencies {
   readonly clock?: ClockBoundary
   readonly terminateProcessTree?: TerminateFfmpegProcessTree
+}
+
+/**
+ * Starts FFmpeg on a segment file: it reads the recorder's stream from its
+ * standard input and writes the file itself, so its standard output is unused.
+ */
+export const spawnFfmpegEncoder = (
+  command: string,
+  args: string[],
+): ChildProcess => {
+  return spawn(command, args, {
+    stdio: ['pipe', 'ignore', 'pipe'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  })
 }
 
 // Own the process from spawn, including the interval before CDP attaches.
@@ -94,8 +109,13 @@ export class ScreencastEncoder {
 
   private readonly onExit = (): void => {
     const { code, signal, diagnostic } = this.result
-    this.exitFailure ??= new Error()
-    this.exitFailure.message = `FFmpeg ${signal ? `was terminated by ${signal}` : `exited with code ${String(code)}`} during screencast startup${diagnostic ? `: ${diagnostic}` : '.'}`
+    const ended = signal
+      ? `was terminated by ${signal}`
+      : `exited with code ${String(code)}`
+    const detail = diagnostic ? `: ${diagnostic}` : '.'
+    const message = `FFmpeg ${ended} during screencast startup${detail}`
+    this.exitFailure ??= new Error(message)
+    this.exitFailure.message = message
     this.onError(this.exitFailure)
   }
 
@@ -147,7 +167,6 @@ export class ScreencastEncoder {
         this.child.on('error', ignoreStreamError)
         this.child.once('close', removeLateErrorGuard)
       }
-      this.child.stdout?.destroy()
       this.child.stderr?.destroy()
       this.child.unref?.()
     }

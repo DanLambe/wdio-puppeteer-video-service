@@ -9,6 +9,7 @@ import {
 import {
   type RecordingAllurePort,
   type RecordingManifestPort,
+  type RecordingMediaFinalization,
   type WorkerRecordingActions,
   WorkerRecordingCoordinator,
 } from '../../src/service/worker-recording-coordinator.js'
@@ -98,6 +99,7 @@ const createHarness = (
   harnessOptions: {
     availability?: { available: boolean; reason?: string }
     allureError?: Error
+    finalization?: RecordingMediaFinalization
     finalizeError?: Error
     startError?: Error
     startResult?: boolean
@@ -118,6 +120,9 @@ const createHarness = (
       )
       if (harnessOptions.finalizeError) {
         throw harnessOptions.finalizeError
+      }
+      if (harnessOptions.finalization) {
+        return harnessOptions.finalization
       }
       return { deferred: false, paths: keepArtifacts ? paths : [] }
     },
@@ -515,6 +520,54 @@ describe('worker recording coordinator', () => {
     })
     expect(harness.events.at(-1)).toBe('media:reset')
   })
+
+  it.each(['warn', 'error'] as const)(
+    'reports failed processing, attaches only its video files, then throws its error with failurePolicy=%s',
+    async (failurePolicy) => {
+      const processingError = new Error('transcode failed')
+      const tabs = new Map([
+        [1, { contextId: 'tab-a', ordinal: 1, reason: 'start' as const }],
+        [2, { contextId: 'tab-b', ordinal: 2, reason: 'command' as const }],
+      ])
+      const harness = createHarness(
+        { failurePolicy, recording: { retain: 'all' } },
+        {
+          allureError: new Error('allure unavailable'),
+          finalization: {
+            captureFailure: 'stream incomplete',
+            deferred: false,
+            paths: ['t_part1.mp4', 't_part2.frames.mkv'],
+            processingFailure: { error: processingError },
+            tabs,
+          },
+        },
+      )
+      await harness.coordinator.beginEntity(createEntity())
+
+      await expect(
+        harness.coordinator.endEntity({
+          manifestResult: 'failed',
+          passed: false,
+        }),
+      ).rejects.toBe(processingError)
+
+      expect(harness.manifest.completed).toEqual([
+        {
+          decision: 'failed',
+          paths: ['t_part1.mp4', 't_part2.frames.mkv'],
+          processingOutcome: 'failed',
+          reason: 'transcode failed',
+          result: 'failed',
+          tabs,
+        },
+      ])
+      expect(harness.events.slice(-3)).toEqual([
+        'manifest:complete',
+        'allure:attach:t_part1.mp4:false',
+        'media:reset',
+      ])
+    },
+  )
 
   it.each(['warn', 'error'] as const)(
     'applies Allure failures after reset with failurePolicy=%s',

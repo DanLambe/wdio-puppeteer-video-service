@@ -28,6 +28,8 @@ const assertCropDiagnosticIsRecognized = async (): Promise<void> => {
     capture,
     format: 'webm',
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || 'ffmpeg',
+    // Never written: the crop is rejected before FFmpeg starts.
+    outputPath: 'unused-crop-check.webm',
   }).then(
     () => undefined,
     (error: unknown) => error,

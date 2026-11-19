@@ -1,29 +1,44 @@
-import { type ChildProcess, spawn } from 'node:child_process'
-import { PassThrough } from 'node:stream'
+import type { ChildProcess } from 'node:child_process'
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import type { CDPSession, Page } from 'puppeteer-core'
 import type { CaptureCrop, OutputFormat } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
+import { removeFileWithRetry } from './file-removal.js'
+import {
+  EncoderSink,
+  type OpenSpoolFile,
+  type ScreencastSink,
+  type ScreencastSpool,
+  SpoolSink,
+} from './frame-sink.js'
 import { createMatroskaHeader, MatroskaBlockWriter } from './matroska-writer.js'
 import type { TerminateFfmpegProcessTree } from './process-supervisor.js'
-import { type FfmpegResult, ScreencastEncoder } from './screencast-encoder.js'
+import {
+  type CaptureCanvas,
+  createFfmpegArguments,
+} from './screencast-arguments.js'
+import { type FfmpegResult, spawnFfmpegEncoder } from './screencast-encoder.js'
+import type { SegmentBudget, SpoolBudget } from './spool-budget.js'
+import {
+  type PromotionPlan,
+  SpoolPromotion,
+  type SpoolPromotionDependencies,
+} from './spool-promotion.js'
 
 export type { FfmpegResult } from './screencast-encoder.js'
 
 // Puppeteer resolves `page.screencast()` once the first frame arrives. Keep that
 // ordering, but do not wait indefinitely for a tab that never paints.
 const FIRST_FRAME_TIMEOUT_MS = 1_000
-// libvpx's fastest realtime speed. Puppeteer derives it from the host's CPU
-// count, so a 4-CPU CI runner encodes 1080p VP9 at about 7 frames per second on
-// one core: slower than the capture rate, so every stop has a backlog to drain.
-// On a busy full-HD test page, speed 8 encoded about 13 times faster than speed
-// 2 at near-identical SSIM, with files about 2.7 times larger.
-const VP9_REALTIME_SPEED = 8
 // Chrome can stamp a screencast's first frame with the time the page last
 // painted, seconds before capture began. Never place a frame later than it
 // arrived, measured from the first frame's arrival, beyond this delivery slack.
 const TIMESTAMP_ARRIVAL_SLACK_SECONDS = 0.25
 // Owned-session operations only; viewport restoration must remain awaited.
 const CDP_STARTUP_TIMEOUT_MS = 10_000
+// How long the encoder may take to spawn, or the spool file to open.
+const SINK_READY_TIMEOUT_MS = 10_000
 // Chrome sends no frames while a page is static, so the last frame's duration is
 // only known when another frame arrives or the recording stops. Mark it on this
 // cadence so a recording cut short by a crashed worker still covers the quiet
@@ -33,8 +48,31 @@ const HOLD_INTERVAL_MS = 1_000
 const HOLD_LAG_SECONDS = 0.5
 // Consecutive writes the encoder accepted before yielding to the event loop.
 const WRITE_BATCH = 32
+// What a block adds to its image: the largest cluster header and block header.
+const BLOCK_OVERHEAD_BYTES = 32
+// How long an abort waits for a promotion to undo itself: its encoder aborted,
+// its output removed, its spool gone.
+const PROMOTION_ABORT_TIMEOUT_MS = 3_000
+// Blocks a spooling segment must always have room for: one more hold, and the
+// fill and two end markers that stopping writes.
+const RESERVED_BLOCKS = 4
+// Chrome captures a screencast frame after the paint: it reads the drawn
+// surface back and encodes it before sending it. A paint just before a stop
+// is still on its way when the stop is requested, so a stop that keeps the
+// recording waits up to this long for it first. From paint to frame took
+// under 30 ms on quiet hosts and about 100 ms (p95) on a saturated two-CPU
+// container; a page that does not change pays the whole wait.
+export const TAIL_FRAME_WAIT_MS = 125
+// Chrome has been seen to keep two frames in flight, so the first frame after
+// the stop request can be an older paint, such as a pointer move, with the
+// last paint right behind it. The wait ends once this many frames arrive.
+export const TAIL_FRAMES = 2
+// Or once no further frame follows the latest within this gap. Two frames in
+// flight arrived at most 18 ms apart on quiet hosts, but up to about 100 ms
+// apart (p95 92-97 ms) on a saturated two-CPU container.
+export const TAIL_FRAME_QUIET_MS = 100
 
-export interface ScreencastRecorderOptions {
+export interface ScreencastCaptureOptions {
   readonly crop?: Readonly<CaptureCrop>
   readonly ffmpegPath: string
   readonly format: OutputFormat
@@ -47,10 +85,56 @@ export interface ScreencastRecorderOptions {
   readonly speed: number
 }
 
-/** The frame size Chrome is asked to deliver. */
-export interface CaptureCanvas {
-  readonly width: number
-  readonly height: number
+/** Encode the recording as it is captured: today's behaviour. */
+export interface ScreencastEncodeTarget {
+  /** The segment file FFmpeg writes; it replaces any placeholder there. */
+  readonly outputPath: string
+}
+
+/** Spool the recording for an encode once its outcome is known. */
+export interface ScreencastSpoolTarget {
+  /** A new file for the stream a live encoder would be given. */
+  readonly spoolPath: string
+  /** The recording's spool budget; without it the spool is unbounded. */
+  readonly budget?: SpoolBudget
+  /**
+   * How the segment continues as live encoding when its spool grows too
+   * large; without it a spool only ever stays a spool.
+   */
+  readonly promotion?: PromotionPlan
+  /**
+   * Told why a spool that a failed startup created could not be removed.
+   * Startup removes only a file its own exclusive open created.
+   */
+  readonly onSpoolCleanupFailure?: (message: string) => void
+}
+
+export type ScreencastOutputTarget =
+  | ScreencastEncodeTarget
+  | ScreencastSpoolTarget
+
+export type ScreencastRecorderOptions = ScreencastCaptureOptions &
+  ScreencastOutputTarget
+
+/** What a stopped recorder produced: an encoded segment file, or a spool. */
+export type ScreencastOutput =
+  | {
+      readonly kind: 'encoded'
+      /** Where a promoted spool's encoder writes; the plan's reserved file. */
+      readonly outputPath?: string
+    }
+  | { readonly kind: 'spool'; readonly spool: ScreencastSpool }
+
+// A spool has no encoder until it is encoded, and so no encoder result.
+const NO_ENCODER_RESULT: FfmpegResult = {
+  code: null,
+  diagnostic: '',
+  signal: null,
+}
+
+const SINK_NAMES: Readonly<Record<ScreencastSink['kind'], string>> = {
+  encoder: 'encoder',
+  spool: 'frame spool',
 }
 
 /**
@@ -109,6 +193,8 @@ export interface ScreencastRecorderDependencies {
   readonly clock?: ClockBoundary
   /** Monotonic milliseconds, used to bound frame timestamps and the final hold. */
   readonly monotonicNow?: () => number
+  /** Opens a spool file; a new `fs.WriteStream` by default. */
+  readonly openSpoolFile?: OpenSpoolFile
   readonly queueLimits?: Partial<ScreencastQueueLimits>
   readonly spawnProcess?: (command: string, args: string[]) => ChildProcess
   readonly terminateProcessTree?: TerminateFfmpegProcessTree
@@ -141,9 +227,25 @@ interface ReceivedFrame {
   readonly timestamp: number
 }
 
+interface TailFrameWait {
+  readonly done: PromiseWithResolvers<void>
+  /** Frames that arrived since the stop request. */
+  frames: number
+  /** Aborts the running quiet gap, if one runs. */
+  quiet: AbortController | undefined
+}
+
 interface PendingBlock {
   readonly frame: ReceivedFrame
   readonly position: number
+}
+
+// What one block of this frame adds to the stream. A frame not yet decoded is
+// estimated from its base64 length, rounded up.
+const blockCost = (frame: ReceivedFrame): number => {
+  const image =
+    frame.encoded?.length ?? Math.ceil(((frame.data?.length ?? 0) * 3) / 4)
+  return image + BLOCK_OVERHEAD_BYTES
 }
 
 // Base64 is ASCII, which V8 stores at one byte per character; a decoded frame
@@ -169,26 +271,33 @@ interface PixelDimensions {
 }
 
 export interface ScreencastRecorderInit {
+  /** Bounds a spool sink's growth and tells the recorder when to stop. */
+  readonly budget?: SegmentBudget
+  /** How to continue a spool as live encoding, and what that needs. */
+  readonly promotion?: {
+    readonly dependencies: SpoolPromotionDependencies
+    readonly plan: PromotionPlan
+  }
   /** The frame size FFmpeg is told to expect. */
   readonly canvas: CaptureCanvas
   readonly clock?: ClockBoundary
-  readonly encoder?: ScreencastEncoder
-  readonly ffmpeg: ChildProcess
   readonly fps: number
   readonly monotonicNow: () => number
   readonly queueLimits?: Partial<ScreencastQueueLimits>
   readonly session: CDPSession
+  /** Where the Matroska stream goes: a live encoder or a spool file. */
+  readonly sink: ScreencastSink
   /** Playback speed; applied to frame timestamps, so FFmpeg never retimes. */
   readonly speed?: number
-  readonly terminateProcessTree?: TerminateFfmpegProcessTree
 }
 
 /**
- * Records a page's screencast into FFmpeg. Replaces Puppeteer 24's
- * `ScreenRecorder`, whose output does not play back in real time: it passes
- * `-framerate` after `-i`, so FFmpeg assumes 25 fps; it rounds each frame gap on
- * its own, dropping frames Chrome captures faster than `fps`; and its
- * `-avioflags direct` input makes FFmpeg discard the first two frames.
+ * Records a page's screencast into FFmpeg, which writes the segment file
+ * itself. Replaces Puppeteer 24's `ScreenRecorder`, whose output does not play
+ * back in real time: it passes `-framerate` after `-i`, so FFmpeg assumes
+ * 25 fps; it rounds each frame gap on its own, dropping frames Chrome captures
+ * faster than `fps`; and its `-avioflags direct` input makes FFmpeg discard
+ * the first two frames.
  *
  * Frames are placed on an `fps` grid anchored at the first frame, using
  * Chrome's timestamps bounded by when each frame actually arrived. Each
@@ -198,10 +307,18 @@ export interface ScreencastRecorderInit {
  * the frames waiting on it are bounded; past either limit capture stops and
  * the recording is reported incomplete rather than growing without bound. An
  * encoder that exits before the recording is stopped leaves it incomplete too.
+ *
+ * The stream goes to a sink: a live encoder, or a spool file that receives
+ * exactly the bytes a live encoder would, hold blocks included, for an encode
+ * once the recording's outcome is known. A spool that cannot be written leaves
+ * the recording incomplete as an encoder exit does.
  */
-export class ScreencastRecorder extends PassThrough {
-  private readonly ffmpeg: ChildProcess
-  private readonly encoder: ScreencastEncoder
+export class ScreencastRecorder {
+  // Not readonly: a later phase replaces a spool with a live encoder.
+  private sink: ScreencastSink
+  private readonly budget: SegmentBudget | undefined
+  private readonly promotionSetup: ScreencastRecorderInit['promotion']
+  private promotion: SpoolPromotion | undefined
   private readonly fps: number
   // Output frames per second: capture positions are spaced `1 / fps` apart
   // in capture time and `1 / playbackRate` apart in the video.
@@ -225,51 +342,46 @@ export class ScreencastRecorder extends PassThrough {
   private highWaterLag = 0
   private holdTimer: NodeJS.Timeout | undefined
   private incomplete: string | undefined
-  private inputEnded = false
   private lastBlockPosition = -1
   private latest: ReceivedFrame | undefined
   private latestEmitted = false
   private previousBlockPosition = -1
+  // Bytes the pending blocks will add to the sink.
+  private queuedBlockBytes = 0
   private draining = false
   private idle: PromiseWithResolvers<void> | undefined
   private received = 0
   private stopping: Promise<void> | undefined
   private stopped = false
+  // While a stop waits for frames on their way: settled when the wait ends.
+  private tailWait: TailFrameWait | undefined
   private resolveFirstFrame: (() => void) | undefined
 
-  /** Starts a recorder on an already spawned encoder and attached session. */
+  /** Starts a recorder on an already opened sink and attached session. */
   static create(init: ScreencastRecorderInit): ScreencastRecorder {
     const recorder = new ScreencastRecorder(init)
-    // An encoder that exits early can take nothing more: stop retaining frames.
-    void recorder.encoder.closed.then(recorder.onEncoderClosed)
+    recorder.watchSink(init.sink)
+    recorder.watchBudget()
     return recorder
   }
 
   private constructor(init: ScreencastRecorderInit) {
-    super({ allowHalfOpen: false })
     this.session = init.session
-    this.ffmpeg = init.ffmpeg
+    this.sink = init.sink
+    this.budget = init.budget
+    this.promotionSetup = init.promotion
     this.fps = init.fps
     this.playbackRate = init.fps * (init.speed ?? 1)
     this.monotonicNow = init.monotonicNow
     this.clock = init.clock ?? systemClock
     this.limits = { ...DEFAULT_SCREENCAST_QUEUE_LIMITS, ...init.queueLimits }
-    this.encoder =
-      init.encoder ??
-      new ScreencastEncoder(init.ffmpeg, {
-        ...(init.clock ? { clock: init.clock } : {}),
-        ...(init.terminateProcessTree
-          ? { terminateProcessTree: init.terminateProcessTree }
-          : {}),
-      })
-    init.ffmpeg.stdin?.write(
+    init.sink.write(
       createMatroskaHeader({
         codec: 'png',
         fps: this.playbackRate,
         ...init.canvas,
       }),
     )
-    init.ffmpeg.stdout?.pipe(this)
     init.session.on('Page.screencastFrame', this.onFrame)
   }
 
@@ -278,9 +390,23 @@ export class ScreencastRecorder extends PassThrough {
     return this.received
   }
 
-  /** How FFmpeg exited, once it has, and the end of its error output. */
+  /**
+   * How FFmpeg exited, once it has, and the end of its error output. A spool
+   * has no encoder: it reports no exit.
+   */
   get ffmpegResult(): FfmpegResult {
-    return this.encoder.result
+    return this.sink.kind === 'encoder' ? this.sink.result : NO_ENCODER_RESULT
+  }
+
+  /** Whether the recording is an encoded segment file or a spool to encode. */
+  get output(): ScreencastOutput {
+    if (this.sink.kind === 'spool') {
+      return { kind: 'spool', spool: this.sink.spool }
+    }
+    const outputPath = this.promotion?.outputPath
+    return outputPath === undefined
+      ? { kind: 'encoded' }
+      : { kind: 'encoded', outputPath }
   }
 
   /** Why capture stopped before the recording was stopped, if it did. */
@@ -315,8 +441,15 @@ export class ScreencastRecorder extends PassThrough {
     }
   }
 
-  async stop(): Promise<void> {
-    this.stopping ??= this.finish()
+  /**
+   * Ends the recording. By default it first waits a bounded time for a frame
+   * Chrome is still capturing; `tailFrame: false` skips that for a recording
+   * whose media is thrown away.
+   */
+  async stop(options: Readonly<{ tailFrame?: boolean }> = {}): Promise<void> {
+    this.stopping ??= this.finish(options.tailFrame ?? true).finally(
+      this.sealSpool,
+    )
     await this.stopping
   }
 
@@ -324,35 +457,46 @@ export class ScreencastRecorder extends PassThrough {
   abort(): Promise<void> {
     // Its close event may still be on its way. Report an exit that came
     // first, but never the termination this requests.
-    if (this.encoderExited) {
-      this.noteEarlyExit()
+    this.noteSinkFailure()
+    if (this.aborting === undefined) {
+      // Cancelled in the caller's turn, before the abort's own: a caller that
+      // has just read `output` must not see a switch after it.
+      const promotion = this.promotion?.cancel()
+      this.aborting = Promise.resolve()
+        .then(() => this.abortRecording(promotion))
+        .finally(this.sealSpool)
     }
-    this.aborting ??= Promise.resolve().then(() => this.abortRecording())
     return this.aborting
   }
 
-  override _destroy(
-    error: Error | null,
-    callback: (error?: Error | null) => void,
-  ): void {
-    this.stopCapturing()
-    // Normal stream auto-destruction can precede FFmpeg's close event. An
-    // explicit destroy during stop is different: it must still cancel stop.
-    if (!this.readableEnded || !this.writableFinished) {
-      void this.abort()
-    }
-    void this.detachSession()
-    callback(error)
-  }
-
-  private async abortRecording(): Promise<void> {
+  private async abortRecording(
+    promotion: Promise<void> | undefined,
+  ): Promise<void> {
     this.stopCapturing()
     this.cancelled.resolve()
     this.resolveFirstFrame?.()
     this.releasePending()
-    this.ffmpeg.stdout?.unpipe(this)
-    this.destroy()
-    await this.encoder.abort()
+    void this.detachSession()
+    await Promise.all([this.sink.abort(), this.boundedWait(promotion)])
+  }
+
+  // A promotion undoes itself with files and a process; an abort waits for
+  // that only so long.
+  private async boundedWait(task: Promise<void> | undefined): Promise<void> {
+    if (!task) {
+      return
+    }
+    const expired = Promise.withResolvers<void>()
+    const timer = this.clock.setTimeout(
+      expired.resolve,
+      PROMOTION_ABORT_TIMEOUT_MS,
+    )
+    timer.unref?.()
+    try {
+      await Promise.race([task, expired.promise])
+    } finally {
+      this.clock.clearTimeout(timer)
+    }
   }
 
   private detachSession(): Promise<void> {
@@ -364,48 +508,142 @@ export class ScreencastRecorder extends PassThrough {
     this.stopped = true
     this.stopHolding()
     this.session.off('Page.screencastFrame', this.onFrame)
+    // No frame can follow: a stop waiting for one goes on at once.
+    this.tailWait?.done.resolve()
   }
 
-  private readonly onEncoderClosed = (): void => {
-    this.noteEarlyExit()
-    if (this.stopping || this.aborting) {
+  // A sink that closes early, an encoder that exits or a spool that cannot be
+  // written, can take nothing more: stop retaining frames. Only the current
+  // sink's close counts.
+  private watchSink(sink: ScreencastSink): void {
+    void sink.closed.then(() => {
+      if (sink === this.sink) {
+        this.onSinkClosed()
+      }
+    })
+  }
+
+  // The budget decides when a spool has taken all the disk it may; the
+  // recorder only acts on it. A segment that cannot continue live is bounded
+  // by the hard cap and the free-space floor.
+  private watchBudget(): void {
+    this.budget?.attach({
+      isSpooling: () =>
+        this.sink.kind === 'spool' && this.promotion?.state !== 'replaying',
+      promote: () => {
+        this.promote()
+      },
+      stop: (detail) => {
+        this.limitReached(detail)
+      },
+    })
+    this.budget?.begin()
+  }
+
+  // Why a spooling segment may not commit more bytes now, if it may not. The
+  // budget is told what is queued and what stopping will still write.
+  private budgetLimitFor(frame: ReceivedFrame): string | undefined {
+    return this.budget?.check(
+      this.queuedBlockBytes + RESERVED_BLOCKS * blockCost(frame),
+    )
+  }
+
+  // The spool grew past what it may: replay it into an encoder, which then
+  // takes over. Once, and never while the recording is ending.
+  private promote(): void {
+    const sink = this.sink
+    const setup = this.promotionSetup
+    if (
+      !setup ||
+      sink.kind !== 'spool' ||
+      this.promotion ||
+      this.stopped ||
+      this.stopping !== undefined ||
+      this.aborting !== undefined
+    ) {
       return
     }
+    this.promotion = new SpoolPromotion(
+      sink,
+      setup.plan,
+      (encoder) => {
+        this.switchSink(encoder)
+      },
+      setup.dependencies,
+    )
+    this.promotion.start()
+  }
+
+  // Called in the turn that finds the encoder has everything the spool had.
+  private switchSink(encoder: EncoderSink): void {
+    this.sink = encoder
+    this.watchSink(encoder)
+    // The spool is closing and about to be deleted: it no longer counts.
+    this.budget?.release()
+  }
+
+  // Called once the recorder writes nothing more to its spool. A spool that
+  // was switched to an encoder has already left the budget. A capture that
+  // stopped at a limit is sealed only by stop, which still writes its end.
+  private readonly sealSpool = (): void => {
+    this.budget?.seal()
+  }
+
+  private limitReached(detail: string): void {
+    if (this.stopped || this.incomplete) {
+      return
+    }
+    const seconds = this.emitted / this.fps
+    this.incomplete = `${detail}; capture stopped after ${seconds.toFixed(1)}s to bound disk use.`
     this.stopCapturing()
-    this.releasePending()
     void this.session.send('Page.stopScreencast').catch(() => undefined)
   }
 
-  private get encoderExited(): boolean {
-    return this.ffmpeg.exitCode !== null || this.ffmpeg.signalCode !== null
-  }
-
-  // Only stop ends FFmpeg's input, so an encoder that exits before then has
-  // not encoded the whole recording, whatever its exit code. Abort terminates
-  // it on purpose.
-  private noteEarlyExit(): void {
-    if (this.inputEnded || this.aborting || this.incomplete) {
+  private onSinkClosed(): void {
+    this.noteSinkFailure()
+    // A stop waiting for one more frame has nowhere to put it.
+    this.tailWait?.done.resolve()
+    if (this.stopping !== undefined || this.aborting !== undefined) {
       return
     }
-    const { code, diagnostic, signal } = this.encoder.result
-    const exit = signal
-      ? `was terminated by ${signal}`
-      : `exited with code ${String(code)}`
-    const detail = diagnostic ? `: ${diagnostic}` : '.'
-    this.incomplete = `FFmpeg ${exit} before the recording was stopped${detail}`
+    // A closed spool accepts nothing more.
+    this.sealSpool()
+    this.stopCapturing()
+    this.releasePending()
+    void this.session.send('Page.stopScreencast').catch(() => undefined)
+    void this.detachSession()
+  }
+
+  // The sink reports a failure only for what it did on its own before stop
+  // ended its input; an abort is never one.
+  private noteSinkFailure(): void {
+    if (this.aborting !== undefined || this.incomplete) {
+      return
+    }
+    this.incomplete = this.sink.failure
   }
 
   private readonly onFrame = (event: ScreencastFrameEvent): void => {
     void this.session
       .send('Page.screencastFrameAck', { sessionId: event.sessionId })
       .catch(() => undefined)
+    // Every event is acknowledged, but only a frame taken into the capture
+    // counts toward a stop's wait: one without a usable timestamp is dropped,
+    // and an overload or a limit ends the wait itself.
+    if (this.receiveFrame(event)) {
+      this.onTailFrame()
+    }
+  }
+
+  /** Whether the frame was taken into the capture as its latest frame. */
+  private receiveFrame(event: ScreencastFrameEvent): boolean {
     const timestamp = event.metadata.timestamp
     if (
       this.stopped ||
       typeof timestamp !== 'number' ||
       !Number.isFinite(timestamp)
     ) {
-      return
+      return false
     }
     const previous = this.latest
     const receivedAt = this.monotonicNow()
@@ -442,14 +680,27 @@ export class ScreencastRecorder extends PassThrough {
       // The previous frame already has its span; this one would start where
       // the recording now ends.
       this.overload(overload)
-      return
+      return false
+    }
+    const limit = this.budgetLimitFor(frame)
+    if (limit) {
+      // As for an overload: the previous frame has its span.
+      this.limitReached(limit)
+      return false
     }
     this.latest = frame
     this.latestEmitted = false
     this.recordHighWater()
+    return true
   }
 
-  private async finish(): Promise<void> {
+  private async finish(tailFrame: boolean): Promise<void> {
+    // A replay still running is cancelled in this turn, so it cannot switch
+    // while the recording ends; the spool is complete and is kept.
+    const promotion = this.promotion?.cancel()
+    if (tailFrame) {
+      await this.awaitTailFrame()
+    }
     // Stopping the screencast flushes frames already in flight.
     await Promise.race([
       this.session.send('Page.stopScreencast').catch(() => undefined),
@@ -483,18 +734,70 @@ export class ScreencastRecorder extends PassThrough {
     if (await this.wasAborted()) {
       return
     }
-    // Everything is with the encoder; the held frame is no longer needed.
+    // Everything is with the sink; the held frame is no longer needed.
     this.releasePending()
-    if (this.encoderExited) {
-      this.noteEarlyExit()
-    }
-    this.inputEnded = true
-    this.ffmpeg.stdin?.end()
-    await Promise.race([this.encoder.closed, this.cancelled.promise])
+    this.noteSinkFailure()
+    // A cancelled replay has aborted its encoder and removed its output, and
+    // a switched one has deleted its spool, before the recording is stopped.
+    await Promise.race([promotion, this.cancelled.promise])
+    await Promise.race([this.sink.end(), this.cancelled.promise])
     if (await this.wasAborted()) {
       return
     }
+    // A spool that could not flush what it was given is incomplete too.
+    this.noteSinkFailure()
     await Promise.race([this.detachSession(), this.cancelled.promise])
+  }
+
+  // At most TAIL_FRAME_WAIT_MS, until TAIL_FRAMES frames are captured or none
+  // follows the latest within TAIL_FRAME_QUIET_MS. Those frames go through
+  // `onFrame` like any other, placed by their own timestamps. Capture that
+  // has stopped, or a sink that has closed, has no use for a frame, and an
+  // abort ends the wait at once.
+  private async awaitTailFrame(): Promise<void> {
+    if (this.stopped) {
+      return
+    }
+    const wait: TailFrameWait = {
+      done: Promise.withResolvers<void>(),
+      frames: 0,
+      quiet: undefined,
+    }
+    const expiry = new AbortController()
+    this.tailWait = wait
+    try {
+      await Promise.race([
+        wait.done.promise,
+        this.clock.delay(TAIL_FRAME_WAIT_MS, expiry.signal),
+        this.cancelled.promise,
+      ])
+    } finally {
+      expiry.abort()
+      wait.quiet?.abort()
+      this.tailWait = undefined
+    }
+  }
+
+  // Counts a frame toward the stop's wait, and restarts its quiet gap.
+  private onTailFrame(): void {
+    const wait = this.tailWait
+    if (!wait) {
+      return
+    }
+    wait.frames += 1
+    wait.quiet?.abort()
+    if (wait.frames >= TAIL_FRAMES) {
+      wait.done.resolve()
+      return
+    }
+    const quiet = new AbortController()
+    wait.quiet = quiet
+    void this.clock.delay(TAIL_FRAME_QUIET_MS, quiet.signal).then(() => {
+      // An aborted delay also resolves: only a gap that ran out ends the wait.
+      if (!quiet.signal.aborted) {
+        wait.done.resolve()
+      }
+    })
   }
 
   // Awaited between steps, so TypeScript would otherwise keep `aborting`
@@ -523,6 +826,11 @@ export class ScreencastRecorder extends PassThrough {
   private readonly holdLatest = (): void => {
     const latest = this.latest
     if (this.stopped || !latest) {
+      return
+    }
+    const limit = this.budgetLimitFor(latest)
+    if (limit) {
+      this.limitReached(limit)
       return
     }
     this.fillTo(latest, this.heldPosition(latest, HOLD_LAG_SECONDS))
@@ -577,11 +885,11 @@ export class ScreencastRecorder extends PassThrough {
   }
 
   private enqueue(frame: ReceivedFrame, position: number): void {
-    const stdin = this.ffmpeg.stdin
-    if (!stdin || stdin.writableEnded || stdin.destroyed) {
+    if (!this.sink.writable) {
       return
     }
     frameBytes(frame)
+    this.queuedBlockBytes += blockCost(frame)
     this.pending.push({ frame, position })
     this.pendingFrames.set(frame, (this.pendingFrames.get(frame) ?? 0) + 1)
     this.previousBlockPosition = this.lastBlockPosition
@@ -607,18 +915,19 @@ export class ScreencastRecorder extends PassThrough {
   // add at most that one block, and the next frame's arrival is checked again.
   private overloadFor(frame: ReceivedFrame): string | undefined {
     const bytes = this.retainedBytes(frame)
+    const sink = SINK_NAMES[this.sink.kind]
     if (bytes > this.limits.maxPendingBytes) {
-      return `${formatBytes(bytes)} of frames waiting for the encoder exceeds ${formatBytes(this.limits.maxPendingBytes)}`
+      return `${formatBytes(bytes)} of frames waiting for the ${sink} exceeds ${formatBytes(this.limits.maxPendingBytes)}`
     }
     if (this.pending.length >= this.limits.maxPendingBlocks) {
-      return `${this.pending.length.toString()} frames waiting for the encoder reached the limit of ${this.limits.maxPendingBlocks.toString()}`
+      return `${this.pending.length.toString()} frames waiting for the ${sink} reached the limit of ${this.limits.maxPendingBlocks.toString()}`
     }
     return undefined
   }
 
   private overload(detail: string): void {
     const seconds = this.emitted / this.fps
-    this.incomplete = `The encoder fell behind the screencast (${detail}); capture stopped after ${seconds.toFixed(1)}s to bound memory.`
+    this.incomplete = `The ${SINK_NAMES[this.sink.kind]} fell behind the screencast (${detail}); capture stopped after ${seconds.toFixed(1)}s to bound memory.`
     this.stopCapturing()
     // Chrome need not keep encoding frames nobody will write.
     void this.session.send('Page.stopScreencast').catch(() => undefined)
@@ -645,10 +954,11 @@ export class ScreencastRecorder extends PassThrough {
   private releasePending(): void {
     this.pending.length = 0
     this.pendingFrames.clear()
+    this.queuedBlockBytes = 0
     this.latest = undefined
   }
 
-  // Hands queued blocks to FFmpeg in order, one writer at a time, and resolves
+  // Hands queued blocks to the sink in order, one writer at a time, and resolves
   // once nothing is queued. Waits for the input to drain whenever it reports
   // backpressure, and yields between batches of small writes so timers,
   // deadlines and abort still run.
@@ -671,8 +981,8 @@ export class ScreencastRecorder extends PassThrough {
       let batch = 0
       let block = this.pending.shift()
       while (block) {
-        const stdin = this.ffmpeg.stdin
-        if (!stdin || stdin.writableEnded || stdin.destroyed) {
+        const sink = this.sink
+        if (!sink.writable) {
           this.releasePending()
           return
         }
@@ -681,13 +991,13 @@ export class ScreencastRecorder extends PassThrough {
           frameBytes(block.frame),
           Math.round((block.position * 1_000) / this.playbackRate),
         )) {
-          accepted = stdin.write(chunk) && accepted
+          accepted = sink.write(chunk) && accepted
         }
         this.releaseBlock(block)
         batch += 1
         if (!accepted) {
           batch = 0
-          await this.waitForDrain(stdin)
+          await Promise.race([sink.waitForDrain(), this.cancelled.promise])
         } else if (batch >= WRITE_BATCH) {
           batch = 0
           await new Promise<void>((resolve) => setImmediate(resolve))
@@ -702,25 +1012,15 @@ export class ScreencastRecorder extends PassThrough {
   }
 
   private releaseBlock(block: PendingBlock): void {
+    this.queuedBlockBytes = Math.max(
+      0,
+      this.queuedBlockBytes - blockCost(block.frame),
+    )
     const references = (this.pendingFrames.get(block.frame) ?? 1) - 1
     if (references > 0) {
       this.pendingFrames.set(block.frame, references)
     } else {
       this.pendingFrames.delete(block.frame)
-    }
-  }
-
-  private async waitForDrain(
-    stdin: NonNullable<ChildProcess['stdin']>,
-  ): Promise<void> {
-    const { promise, resolve } = Promise.withResolvers<void>()
-    stdin.once('drain', resolve)
-    stdin.once('close', resolve)
-    try {
-      await Promise.race([promise, this.encoder.closed, this.cancelled.promise])
-    } finally {
-      stdin.off('drain', resolve)
-      stdin.off('close', resolve)
     }
   }
 }
@@ -735,6 +1035,12 @@ const formatBytes = (bytes: number): string => {
 /** Detaches a session nobody will use, ignoring a page that already closed. */
 const detachQuietly = (session: CDPSession): void => {
   void session.detach().catch(() => undefined)
+}
+
+const describeSinkTimeout = (kind: ScreencastSink['kind']): string => {
+  const waited =
+    kind === 'spool' ? 'opening the frame spool' : 'starting the encoder'
+  return `Screencast startup timed out after ${SINK_READY_TIMEOUT_MS}ms ${waited}`
 }
 
 export const recordScreencast = async (
@@ -752,11 +1058,9 @@ export const recordScreencast = async (
   const crop = options.crop
     ? toDevicePixelCrop(options.crop, dimensions)
     : undefined
-  const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpeg)(
-    options.ffmpegPath,
-    createFfmpegArguments(options, canvas, crop),
-  )
-  const encoder = new ScreencastEncoder(ffmpeg, dependencies, true)
+  const sink = openSink(options, canvas, crop, dependencies)
+  const budget = registerSpool(sink, options)
+  const promotion = planPromotion(sink, options, clock, dependencies)
   let session: CDPSession | undefined
   let recorder: ScreencastRecorder | undefined
   let abandoned = false
@@ -776,18 +1080,26 @@ export const recordScreencast = async (
     if (cancellationError) {
       throw cancellationError
     }
-    encoder.throwIfFailed()
+    sink.throwIfFailed()
   }
-  const encoderFailed = encoder.failed.then((error) => {
+  const sinkFailed = sink.failed.then((error) => {
     throw error
   })
   // Observe failures before any asynchronous startup operation can settle.
-  const interrupted = Promise.race([encoderFailed, cancelled.promise])
+  const interrupted = Promise.race([sinkFailed, cancelled.promise])
   void interrupted.catch(() => undefined)
   page.once?.('close', onPageClosed)
   try {
-    await Promise.race([encoder.spawned, interrupted])
+    // The encoder has spawned, or the spool file is open. Bound that wait:
+    // a stalled file open would otherwise attach to the page long after the
+    // test that asked for the recording.
+    timer = clock.setTimeout(() => {
+      cancel(new Error(describeSinkTimeout(sink.kind)))
+    }, SINK_READY_TIMEOUT_MS)
+    timer.unref?.()
+    await Promise.race([sink.ready, interrupted])
     checkStartup()
+    clock.clearTimeout(timer)
     timer = clock.setTimeout(() => {
       cancel(
         new Error(
@@ -811,10 +1123,10 @@ export const recordScreencast = async (
     ])
     checkStartup()
     recorder = ScreencastRecorder.create({
+      ...(budget ? { budget } : {}),
+      ...(promotion ? { promotion } : {}),
       canvas,
       clock,
-      encoder,
-      ffmpeg,
       fps: options.fps,
       speed: options.speed,
       monotonicNow: dependencies.monotonicNow ?? (() => performance.now()),
@@ -822,6 +1134,7 @@ export const recordScreencast = async (
         ? { queueLimits: dependencies.queueLimits }
         : {}),
       session,
+      sink,
     })
     await Promise.race([
       session.send('Page.startScreencast', {
@@ -840,18 +1153,20 @@ export const recordScreencast = async (
     timer = undefined
     await Promise.race([recorder.waitForFirstFrame(clock), interrupted])
     checkStartup()
-    if (recorder.destroyed) {
-      throw new Error('Recorder closed during screencast startup')
-    }
-    encoder.markStarted()
+    sink.markStarted()
     return recorder
   } catch (error) {
     abandoned = true
+    // Whatever the spool holds, it is not this recording's to keep.
+    budget?.release()
     if (recorder) {
       await recorder.abort()
     } else {
       void session?.detach().catch(() => undefined)
-      await encoder.abort()
+      await sink.abort()
+    }
+    if (sink.kind === 'spool') {
+      await disposeFailedSpool(sink, clock, options)
     }
     throw error
   } finally {
@@ -862,68 +1177,123 @@ export const recordScreencast = async (
   }
 }
 
-export const createFfmpegArguments = (
-  options: Pick<ScreencastRecorderOptions, 'format' | 'quality'> &
-    Partial<Pick<ScreencastRecorderOptions, 'scale'>>,
-  dimensions: Pick<PixelDimensions, 'width' | 'height'>,
-  crop: Readonly<CaptureCrop> | undefined,
-): string[] => {
-  const { width, height } = dimensions
-  const filters = [
-    `crop='min(${width},iw):min(${height},ih):0:0'`,
-    `pad=${width}:${height}:0:0`,
-  ]
-  // `scale` defaults to 1, which is truthy, so an unconfigured recording would
-  // otherwise pay for a full Lanczos resample of every frame to produce the
-  // frame it already had. `speed` is applied to the frame timestamps.
-  if (crop) {
-    filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`)
+/**
+ * A failed startup owns only a file its own exclusive open created; nobody
+ * else is handed the spool, so it is removed here. The file is removed once
+ * it closes, even if it opens or closes after startup has given up waiting,
+ * and startup waits for that only a bounded time.
+ */
+const disposeFailedSpool = async (
+  sink: SpoolSink,
+  clock: ClockBoundary,
+  options: ScreencastRecorderOptions,
+): Promise<void> => {
+  const report =
+    'onSpoolCleanupFailure' in options
+      ? options.onSpoolCleanupFailure
+      : undefined
+  const disposal = sink.closed.then(async () => {
+    if (!sink.created) {
+      return
+    }
+    await removeFileWithRetry(
+      {
+        clock,
+        fileSystem: { unlink: (filePath) => fs.unlink(filePath) },
+        log: (_level, message) => {
+          report?.(message)
+        },
+      },
+      sink.spool.path,
+      'frame spool of a recording that failed to start',
+    )
+  })
+  // The abort has already waited, a bounded time, for the file to close. A
+  // file still open is removed whenever it closes, without holding startup.
+  if (sink.isClosed) {
+    await disposal
+  } else {
+    void disposal.catch(() => undefined)
   }
-  if (options.scale !== undefined && options.scale !== 1) {
-    filters.push(`scale=iw*${options.scale}:-1:flags=lanczos`)
-  }
-  // RGB input would otherwise select VP9 profile 1 (planar RGB): about 2.5
-  // times the size of 4:2:0, and not playable by Safari or hardware decoders.
-  filters.push('format=yuv420p')
-  return [
-    ['-loglevel', 'error'],
-    // Frames arrive once each, timestamped on the grid, so the video holds an
-    // unchanged page instead of decoding and encoding it at every position.
-    // Keep input buffering and probing at their defaults; a tiny probe size or
-    // `-avioflags direct` loses the first frames.
-    ['-f', 'matroska', '-i', 'pipe:0'],
-    ['-an', '-threads', '1', '-b:v', '0'],
-    ['-vcodec', 'vp9', '-crf', `${options.quality}`],
-    ['-deadline', 'realtime'],
-    ['-cpu-used', `${VP9_REALTIME_SPEED}`],
-    // Disable lookahead to reduce buffering and stop latency in the realtime
-    // capture encoder: libvpx otherwise holds frames back and encodes them all
-    // when recording stops, while a tab switch or the test's end waits.
-    ['-lag-in-frames', '0'],
-    // WebM keeps frame timestamps by default. MP4 would otherwise repeat each
-    // frame onto a constant rate; its `hybrid_fragmented` flag already needs an
-    // FFmpeg recent enough to accept `-fps_mode`.
-    options.format === 'mp4'
-      ? [
-          '-fps_mode',
-          'passthrough',
-          '-movflags',
-          'hybrid_fragmented',
-          '-f',
-          'mp4',
-        ]
-      : ['-f', 'webm'],
-    ['-vf', filters.join()],
-    ['-y', 'pipe:1'],
-  ].flat()
 }
 
-const spawnFfmpeg = (command: string, args: string[]): ChildProcess => {
-  return spawn(command, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
-    windowsHide: true,
-  })
+// A spool can continue as live encoding only when its owner says how.
+const planPromotion = (
+  sink: ScreencastSink,
+  options: ScreencastRecorderOptions,
+  clock: ClockBoundary,
+  dependencies: ScreencastRecorderDependencies,
+): ScreencastRecorderInit['promotion'] => {
+  if (
+    sink.kind !== 'spool' ||
+    !('promotion' in options) ||
+    !options.promotion
+  ) {
+    return undefined
+  }
+  return {
+    dependencies: {
+      clock,
+      ...(dependencies.spawnProcess
+        ? { spawnProcess: dependencies.spawnProcess }
+        : {}),
+      ...(dependencies.terminateProcessTree
+        ? { terminateProcessTree: dependencies.terminateProcessTree }
+        : {}),
+    },
+    plan: options.promotion,
+  }
+}
+
+// A spool counts against its recording's budget from its first byte.
+const registerSpool = (
+  sink: ScreencastSink,
+  options: ScreencastRecorderOptions,
+): SegmentBudget | undefined => {
+  if (sink.kind !== 'spool' || !('budget' in options)) {
+    return undefined
+  }
+  return options.budget?.beginSegment(
+    path.dirname(sink.spool.path),
+    () => sink.bytesAccepted,
+  )
+}
+
+// Encoding now spawns FFmpeg on the segment file; spooling opens a new file
+// for the same stream and spawns nothing.
+const openSink = (
+  options: ScreencastRecorderOptions,
+  canvas: CaptureCanvas,
+  crop: CaptureCrop | undefined,
+  dependencies: ScreencastRecorderDependencies,
+): ScreencastSink => {
+  const settings = {
+    canvas,
+    format: options.format,
+    quality: options.quality,
+    scale: options.scale,
+    ...(crop ? { crop } : {}),
+  }
+  if ('spoolPath' in options) {
+    return new SpoolSink(
+      { path: options.spoolPath, settings },
+      {
+        ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+        ...(dependencies.openSpoolFile
+          ? { openFile: dependencies.openSpoolFile }
+          : {}),
+      },
+    )
+  }
+  const ffmpeg = (dependencies.spawnProcess ?? spawnFfmpegEncoder)(
+    options.ffmpegPath,
+    createFfmpegArguments(
+      { ...settings, outputPath: options.outputPath },
+      canvas,
+      crop,
+    ),
+  )
+  return new EncoderSink(ffmpeg, dependencies, true)
 }
 
 // Mirrors Puppeteer: measure the viewport at the device's native pixel ratio,

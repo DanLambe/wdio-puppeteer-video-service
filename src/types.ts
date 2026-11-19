@@ -17,6 +17,12 @@ export type ArtifactNameStyle =
   | 'session'
   | 'session-full'
 export type AllureAttachmentMode = 'failures' | 'retained'
+/**
+ * When a recording is encoded: `'live'` while the test runs, `'deferred'` from
+ * frames written to disk once the test ends and only if the recording is kept,
+ * and `'auto'` live for a recording certain to be kept and deferred otherwise.
+ */
+export type CaptureEncoding = 'live' | 'auto' | 'deferred'
 
 export interface RecordingFilterOptions {
   includeSpecs?: string[]
@@ -82,6 +88,11 @@ export interface CaptureOptions {
   framePriming?: boolean
   /** Maximum time to wait for WDIO's CDP-backed Puppeteer connection. @default 10000 */
   connectionTimeoutMs?: number
+  /**
+   * Encode while the test runs, or write its frames to disk and encode them
+   * only when the recording is kept. @default 'live'
+   */
+  encoding?: CaptureEncoding
 }
 
 export interface ProcessingFfmpegOptions {
@@ -214,6 +225,7 @@ export interface ResolvedCaptureOptions {
   readonly crop?: Readonly<CaptureCrop>
   readonly framePriming: boolean
   readonly connectionTimeoutMs: number
+  readonly encoding: CaptureEncoding
 }
 
 export interface ResolvedProcessingFfmpegOptions {

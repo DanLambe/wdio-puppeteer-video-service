@@ -5,6 +5,7 @@ import { initializeLauncherService } from '@wdio/utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import { writeReporterFragment } from '../../src/reporter/fragments.js'
+import { generateVideoReportForRun } from '../../src/reporter/report-generator.js'
 import type { LauncherCompositionOverrides } from '../../src/service/composition.js'
 import { resolveGlobalSlotRunDirectories } from '../../src/service/global-slot-directory.js'
 import {
@@ -13,12 +14,19 @@ import {
   LAUNCHER_WORKER_CONFIG_KEY,
 } from '../../src/service/launcher-context.js'
 import {
+  aggregateManifestRun,
   assignManifestWorkerContext,
   readManifestRunContext,
   readManifestWorkerContext,
 } from '../../src/service/manifest-runtime.js'
+import {
+  createMatroskaHeader,
+  MatroskaBlockWriter,
+} from '../../src/service/matroska-writer.js'
+import { recoverOrphanedSpools } from '../../src/service/spool-recovery.js'
 import type { WorkerRecordingCoordinatorPort } from '../../src/service/worker-recording-coordinator.js'
 import WdioPuppeteerVideoService from '../../src/service.js'
+import { spoolName } from '../utils/spool-fixtures.js'
 
 const tempDirs: string[] = []
 
@@ -130,6 +138,300 @@ describe('WdioPuppeteerVideoLauncher', () => {
         call[2].includes('Later runs remain isolated'),
       ),
     ).toBe(true)
+  })
+
+  describe('orphaned spool recovery', () => {
+    const track = { codec: 'png', fps: 25, height: 600, width: 800 } as const
+
+    const spoolStream = (): Buffer =>
+      Buffer.concat([
+        createMatroskaHeader(track),
+        ...new MatroskaBlockWriter().frame(Buffer.alloc(32, 7), 0),
+      ])
+
+    const prepare = async (
+      outputDir: string,
+      overrides: LauncherCompositionOverrides = {},
+      options: { failurePolicy?: 'error' | 'warn' } = {},
+    ) => {
+      const writeLog = vi.fn()
+      const launcher = new WdioPuppeteerVideoLauncher(
+        { outputDir, ...options },
+        undefined,
+        undefined,
+        { uuid: () => 'current-run', writeLog, ...overrides },
+      )
+      await launcher.onPrepare()
+      return { launcher, writeLog }
+    }
+
+    const warnings = (writeLog: ReturnType<typeof vi.fn>): string[] =>
+      writeLog.mock.calls
+        .filter((call) => call[1] === 'warn')
+        .map((call) => String(call[2]))
+
+    it('recovers the run spools after the manifest and report steps, then removes the directory', async () => {
+      const outputDir = await createTempDir()
+      const order: string[] = []
+      const { launcher, writeLog } = await prepare(outputDir, {
+        aggregateManifestRun: async (context, exitCode) => {
+          order.push('manifest')
+          return aggregateManifestRun(context, exitCode)
+        },
+        cleanupGlobalSlotRunDirectory: async () => {
+          order.push('slots')
+        },
+        generateVideoReportForRun: async (options) => {
+          order.push('report')
+          return generateVideoReportForRun(options)
+        },
+        recoverOrphanedSpools: async (options) => {
+          order.push('spools')
+          return recoverOrphanedSpools(options)
+        },
+      })
+      const spoolRoot = path.join(outputDir, '.wdio-video-spool')
+      const runDirectory = path.join(spoolRoot, 'current-run')
+      await fs.mkdir(runDirectory, { recursive: true })
+      const stream = spoolStream()
+      await fs.writeFile(
+        path.join(runDirectory, spoolName('checkout', 1)),
+        stream,
+      )
+      await fs.writeFile(
+        path.join(runDirectory, spoolName('checkout', 2)),
+        createMatroskaHeader(track),
+      )
+      await fs.mkdir(path.join(spoolRoot, 'other-run'))
+
+      await launcher.onComplete()
+
+      expect(order).toEqual(['manifest', 'report', 'spools', 'slots'])
+      expect(
+        await fs.readFile(path.join(outputDir, 'checkout_part1.frames.mkv')),
+      ).toEqual(stream)
+      await expect(fs.stat(runDirectory)).rejects.toThrow()
+      expect(await fs.readdir(spoolRoot)).toEqual(['other-run'])
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('checkout_part1.frames.mkv'),
+      ])
+    })
+
+    it('removes the empty spool directory a clean run leaves', async () => {
+      const outputDir = await createTempDir()
+      const { launcher, writeLog } = await prepare(outputDir)
+      await fs.mkdir(path.join(outputDir, '.wdio-video-spool', 'current-run'), {
+        recursive: true,
+      })
+
+      await launcher.onComplete()
+
+      expect(await fs.readdir(outputDir)).not.toContain('.wdio-video-spool')
+      expect(warnings(writeLog)).toEqual([])
+    })
+
+    it('does not warn or fail when the run has no spool directory', async () => {
+      const outputDir = await createTempDir()
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {},
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+      expect(warnings(writeLog)).toEqual([])
+      expect(await fs.readdir(outputDir)).not.toContain('.wdio-video-spool')
+    })
+
+    it('passes the output directory and this run id to the recovery', async () => {
+      const outputDir = await createTempDir()
+      const recoverOrphanedSpools = vi.fn(async () => undefined)
+      const { launcher } = await prepare(outputDir, { recoverOrphanedSpools })
+
+      await launcher.onComplete()
+
+      expect(recoverOrphanedSpools).toHaveBeenCalledOnce()
+      expect(recoverOrphanedSpools).toHaveBeenCalledWith({
+        log: expect.any(Function),
+        outputDir,
+        runId: 'current-run',
+      })
+    })
+
+    it('warns and completes when the recovery fails under failurePolicy warn', async () => {
+      const outputDir = await createTempDir()
+      const cleanupGlobalSlotRunDirectory = vi.fn(async () => undefined)
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          cleanupGlobalSlotRunDirectory,
+          recoverOrphanedSpools: async () => {
+            throw new Error('disk on fire')
+          },
+        },
+        { failurePolicy: 'warn' },
+      )
+
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining(
+          'Failed to recover orphaned frame spools: disk on fire',
+        ),
+      ])
+      expect(cleanupGlobalSlotRunDirectory).toHaveBeenCalledOnce()
+    })
+
+    it('throws when the recovery fails under failurePolicy error, after the slots are cleaned', async () => {
+      const outputDir = await createTempDir()
+      const failure = new Error('disk on fire')
+      const cleanupGlobalSlotRunDirectory = vi.fn(async () => undefined)
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          cleanupGlobalSlotRunDirectory,
+          recoverOrphanedSpools: async () => {
+            throw failure
+          },
+        },
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).rejects.toBe(failure)
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('Failed to recover orphaned frame spools'),
+      ])
+      expect(cleanupGlobalSlotRunDirectory).toHaveBeenCalledOnce()
+    })
+
+    it('throws the manifest error, not the later recovery error, and logs both', async () => {
+      const outputDir = await createTempDir()
+      const manifestFailure = new Error('aggregation failed')
+      const cleanupGlobalSlotRunDirectory = vi.fn(async () => undefined)
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          aggregateManifestRun: async () => {
+            throw manifestFailure
+          },
+          cleanupGlobalSlotRunDirectory,
+          recoverOrphanedSpools: async () => {
+            throw new Error('disk on fire')
+          },
+        },
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).rejects.toBe(manifestFailure)
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining(
+          'Failed to aggregate manifest journals: aggregation failed',
+        ),
+        expect.stringContaining(
+          'Failed to recover orphaned frame spools: disk on fire',
+        ),
+      ])
+      expect(cleanupGlobalSlotRunDirectory).toHaveBeenCalledOnce()
+    })
+
+    it('throws the recovery error when nothing failed before it', async () => {
+      const outputDir = await createTempDir()
+      const recoveryFailure = new Error('disk on fire')
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          recoverOrphanedSpools: async () => {
+            throw recoveryFailure
+          },
+        },
+        { failurePolicy: 'error' },
+      )
+
+      await expect(launcher.onComplete()).rejects.toBe(recoveryFailure)
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('Failed to recover orphaned frame spools'),
+      ])
+    })
+
+    it('throws nothing under failurePolicy warn and logs every failure', async () => {
+      const outputDir = await createTempDir()
+      const { launcher, writeLog } = await prepare(
+        outputDir,
+        {
+          aggregateManifestRun: async () => {
+            throw new Error('aggregation failed')
+          },
+          recoverOrphanedSpools: async () => {
+            throw new Error('disk on fire')
+          },
+        },
+        { failurePolicy: 'warn' },
+      )
+
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('Failed to aggregate manifest journals'),
+        expect.stringContaining('Failed to recover orphaned frame spools'),
+      ])
+    })
+
+    it('refuses a run directory that is a link and leaves its target alone', async () => {
+      const outputDir = await createTempDir()
+      const elsewhere = await createTempDir()
+      const victim = path.join(elsewhere, spoolName('a', 1))
+      await fs.writeFile(victim, spoolStream())
+      const { launcher, writeLog } = await prepare(outputDir)
+      await fs.mkdir(path.join(outputDir, '.wdio-video-spool'))
+      await fs.symlink(
+        elsewhere,
+        path.join(outputDir, '.wdio-video-spool', 'current-run'),
+        'junction',
+      )
+
+      await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+      expect((await fs.stat(victim)).size).toBeGreaterThan(0)
+      expect(warnings(writeLog)).toEqual([
+        expect.stringContaining('not a plain directory'),
+      ])
+    })
+
+    it('refuses a spool root that is a link and leaves the run behind it alone', async () => {
+      const outputDir = await createTempDir()
+      const elsewhere = await createTempDir()
+      await fs.mkdir(path.join(elsewhere, 'current-run'))
+      const frameless = path.join(elsewhere, 'current-run', spoolName('a', 1))
+      const victim = path.join(elsewhere, 'current-run', spoolName('b', 1))
+      await fs.writeFile(frameless, createMatroskaHeader(track))
+      await fs.writeFile(victim, spoolStream())
+      const { launcher, writeLog } = await prepare(outputDir)
+      const spoolRoot = path.join(outputDir, '.wdio-video-spool')
+      await fs.symlink(elsewhere, spoolRoot, 'junction')
+
+      try {
+        await expect(launcher.onComplete()).resolves.toBeUndefined()
+
+        expect(await fs.readFile(frameless)).toEqual(
+          createMatroskaHeader(track),
+        )
+        expect(await fs.readFile(victim)).toEqual(spoolStream())
+        expect(
+          (await fs.readdir(outputDir)).filter((name) =>
+            name.endsWith('.frames.mkv'),
+          ),
+        ).toEqual([])
+        expect(warnings(writeLog)).toEqual([
+          expect.stringContaining('not a plain directory'),
+        ])
+      } finally {
+        await fs.unlink(spoolRoot).catch(() => undefined)
+      }
+    })
   })
 
   it('mints a fresh run identity each time a launcher is prepared', async () => {

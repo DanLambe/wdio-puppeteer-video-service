@@ -3,6 +3,7 @@ import type { OutputFormat, ResolvedCaptureOptions } from '../types.js'
 import { type ClockBoundary, systemClock } from './boundaries.js'
 import {
   recordScreencast,
+  type ScreencastOutputTarget,
   type ScreencastRecorder,
   type ScreencastRecorderOptions,
 } from './screencast-recorder.js'
@@ -36,7 +37,7 @@ export type ScreencastRecordFunction = (
   options: ScreencastRecorderOptions,
 ) => Promise<ScreencastRecorder>
 
-export interface StartScreencastOptions {
+interface StartScreencastSettings {
   capture: ResolvedCaptureOptions
   /** Bounds the restored-surface paint; defaults to the system clock. */
   clock?: ClockBoundary
@@ -44,6 +45,13 @@ export interface StartScreencastOptions {
   format: OutputFormat
   onViewportRestoreError?: (error: unknown) => void
 }
+
+/**
+ * Starts encoding into `outputPath`, the reserved segment file, by default;
+ * with `spoolPath`, spools the stream there for a later encode instead.
+ */
+export type StartScreencastOptions = StartScreencastSettings &
+  ScreencastOutputTarget
 
 export const startScreencast = async (
   page: Page,
@@ -84,10 +92,11 @@ export const startScreencast = async (
 }
 
 export const createScreencastOptions = (
-  options: Pick<StartScreencastOptions, 'capture' | 'ffmpegPath' | 'format'>,
+  options: Pick<StartScreencastSettings, 'capture' | 'ffmpegPath' | 'format'> &
+    ScreencastOutputTarget,
 ): ScreencastRecorderOptions => {
   const { capture } = options
-  return {
+  const settings = {
     format: options.format,
     fps: capture.fps,
     quality: capture.quality,
@@ -99,6 +108,18 @@ export const createScreencastOptions = (
       ? {}
       : { maxHeight: capture.maxHeight }),
     ...(capture.crop ? { crop: capture.crop } : {}),
+  }
+  if (!('spoolPath' in options)) {
+    return { ...settings, outputPath: options.outputPath }
+  }
+  return {
+    ...settings,
+    spoolPath: options.spoolPath,
+    ...(options.budget ? { budget: options.budget } : {}),
+    ...(options.promotion ? { promotion: options.promotion } : {}),
+    ...(options.onSpoolCleanupFailure
+      ? { onSpoolCleanupFailure: options.onSpoolCleanupFailure }
+      : {}),
   }
 }
 

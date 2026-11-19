@@ -45,6 +45,18 @@ filming a tab the test had left.
 - When the recorded tab closes, recording continues on WebdriverIO's current
   window.
 
+A window handle from `browser.getWindowHandles()` alone does not move recording
+when a script runs there. WebdriverIO installs its own script in every window a
+page opens, before the test switches to it, so a script is followed only in a
+context the test holds (from `url()`, `newWindow()`, `frame()` or
+`browsingContexts()`), a window it has switched to, WebdriverIO's current
+window, or the recorded tab. A raw `browser.scriptCallFunction()` or
+`browser.scriptEvaluate()` naming a tab the test has only listed therefore no
+longer moves recording there. Switch to the tab with
+`browser.switchToWindow(handle)` first, or use a held context, such as one
+from `browser.browsingContexts()`. Other commands on a listed tab, such as
+navigation, element commands and input, still move recording.
+
 Each change of tab starts a new segment, so tests that use several tabs
 produce more segments than under 1.x. The recorded tab is brought to the
 front, because Chrome does not paint tabs in the background. Each segment's
@@ -83,7 +95,28 @@ The manifest stays at version 1, and its new fields are optional:
 - `tabs` on a merged file and on `final`, the tabs of its parts in order.
 
 The 1.x validator accepts a 2.0 manifest. Code that reads the manifest needs no
-changes unless it wants the tab history.
+changes unless it wants the tab history, or compares records exactly. A
+recording with one segment used to have a `final` identical to that segment;
+in 2.0 the segment has `tab` and `final` has `tabs`, so compare them without
+those fields.
+
+## `capture.encoding` can defer encoding until a recording is kept
+
+The new `capture.encoding` option defaults to `'live'`, which records as 1.x
+did. With `'deferred'`, or `'auto'` for a recording that may be discarded, the
+frames are written to `<outputDir>/.wdio-video-spool/` during the test and
+encoded only if the recording is kept, when its test ends. Files, names and
+manifest entries are the same. Two things are new:
+
+- A kept recording that cannot be encoded keeps its frames as
+  `<test>_part<N>.frames.mkv` in `outputDir`, logs a warning with an FFmpeg
+  command that converts it, and is reported as `capture-incomplete`. Tooling
+  that lists `outputDir` should not treat `*.frames.mkv` as a video; the
+  manifest never lists it.
+- `processing.timing: 'after-worker'` does not move the encode of a deferred
+  recording; only its transcode and merge wait for the worker to end.
+
+See [Deferred Encoding](README.md#deferred-encoding).
 
 # Migrating from 0.8 to 1.0
 

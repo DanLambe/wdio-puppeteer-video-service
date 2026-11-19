@@ -9,6 +9,7 @@ export type {
   ArtifactNamingOptions,
   ArtifactOptions,
   CaptureCrop,
+  CaptureEncoding,
   CaptureOptions,
   CaptureViewport,
   ConcurrencyOptions,

@@ -1,9 +1,9 @@
-import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  nodeDiskSpace,
   nodeFileSystem,
   nodeProcess,
   systemClock,
@@ -36,6 +36,25 @@ describe('service runtime boundaries', () => {
     }
   })
 
+  it('ends a delay early and quietly when its signal aborts', async () => {
+    vi.useFakeTimers()
+    try {
+      const expiry = new AbortController()
+      const settled = vi.fn()
+      const delayTask = systemClock.delay(10_000, expiry.signal).then(settled)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).not.toHaveBeenCalled()
+      expiry.abort()
+      await delayTask
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('performs filesystem operations through the injected contract', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wdio-boundary-'))
     const nestedDir = path.join(tempDir, 'nested')
@@ -46,13 +65,7 @@ describe('service runtime boundaries', () => {
       await handle.writeFile('boundary')
       await handle.close()
 
-      const writeStream = nodeFileSystem.createWriteStream(filePath, 'a')
-      writeStream.end('-stream')
-      await once(writeStream, 'finish')
-
-      await expect(nodeFileSystem.readText(filePath)).resolves.toBe(
-        'boundary-stream',
-      )
+      await expect(nodeFileSystem.readText(filePath)).resolves.toBe('boundary')
       await expect(nodeFileSystem.stat(filePath)).resolves.toMatchObject({
         mtimeMs: expect.any(Number),
       })
@@ -61,6 +74,18 @@ describe('service runtime boundaries', () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('reads the free space of the volume holding a directory', async () => {
+    const free = await nodeDiskSpace.freeBytes(os.tmpdir())
+
+    expect(Number.isFinite(free)).toBe(true)
+    expect(free).toBeGreaterThanOrEqual(0)
+    await expect(
+      nodeDiskSpace.freeBytes(
+        path.join(os.tmpdir(), 'wdio-no-such-directory-1'),
+      ),
+    ).rejects.toThrow()
   })
 
   it('exposes process properties and environment lookup', () => {

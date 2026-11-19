@@ -1,6 +1,7 @@
 import type { Browser as PuppeteerBrowser } from 'puppeteer-core'
 import type { Browser } from 'webdriverio'
 import type { ActiveSegment } from './constants.js'
+import type { ScreencastSpool } from './frame-sink.js'
 import type { SessionProtocol } from './protocol.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
 
@@ -32,6 +33,64 @@ export interface SegmentTab {
   readonly reason: SegmentTabReason
 }
 
+/**
+ * A segment whose capture has stopped, held without post-processing until the
+ * recording's outcome is known. This is the one record of a stopped segment:
+ * its part, tab, files and whether it was captured whole.
+ */
+export interface HeldSegment {
+  /** How long the segment was captured, in seconds. */
+  readonly capturedSeconds: number
+  /**
+   * Whether the segment was captured whole: its encoder finished the file, or
+   * its spool holds every frame.
+   */
+  readonly clean: boolean
+  /** Why capture stopped short, when the recorder knows. */
+  readonly incompleteReason?: string
+  readonly part: number
+  /**
+   * The segment's files. A spooled segment's paths are planned, not yet
+   * reserved: nothing is at them until the spool is encoded.
+   */
+  readonly segment: ActiveSegment
+  /** A spooled segment's frames, still to be encoded. */
+  readonly spool?: ScreencastSpool
+  readonly tab?: SegmentTab
+}
+
+/** A held segment whose frames are still in its spool. */
+export type SpooledSegment = HeldSegment & { readonly spool: ScreencastSpool }
+
+export const isSpooledSegment = (held: HeldSegment): held is SpooledSegment =>
+  held.spool !== undefined
+
+/** How a stopped segment ended, as its capture reported it. */
+export interface StoppedSegmentDetails {
+  readonly capturedSeconds: number
+  readonly clean: boolean
+  readonly incompleteReason?: string
+  readonly spool?: ScreencastSpool
+}
+
+const createHeldSegment = (
+  part: number,
+  segment: ActiveSegment,
+  details: StoppedSegmentDetails,
+  tab: SegmentTab | undefined,
+): HeldSegment =>
+  Object.freeze({
+    capturedSeconds: details.capturedSeconds,
+    clean: details.clean,
+    ...(details.incompleteReason === undefined
+      ? {}
+      : { incompleteReason: details.incompleteReason }),
+    part,
+    segment,
+    ...(details.spool ? { spool: details.spool } : {}),
+    ...(tab ? { tab } : {}),
+  })
+
 export interface AttachCaptureOptions {
   readonly recorder: ScreencastRecorder
   readonly segment: ActiveSegment
@@ -47,6 +106,7 @@ export class CaptureSession {
   private segmentNumber = 0
   private recordingSlug = ''
   private readonly retainedPaths = new Set<string>()
+  private readonly stoppedSegments: HeldSegment[] = []
   private activeWindowHandle: string | undefined
   private readonly tabOrdinals = new Map<string, number>()
   private readonly tabsBySegment = new Map<number, SegmentTab>()
@@ -78,6 +138,27 @@ export class CaptureSession {
 
   get recordedPaths(): readonly string[] {
     return Object.freeze([...this.retainedPaths])
+  }
+
+  /** Stopped segments not yet finalized or discarded, in part order. */
+  get heldSegments(): readonly HeldSegment[] {
+    return Object.freeze([...this.stoppedSegments])
+  }
+
+  /**
+   * Every media file the recording has on disk: its recorded paths, and the
+   * files of the live segments still held. Spools are not media; a spooled
+   * segment's planned path is not the recording's until it is encoded.
+   */
+  get filePaths(): readonly string[] {
+    return Object.freeze([
+      ...new Set([
+        ...this.retainedPaths,
+        ...this.stoppedSegments
+          .filter((held) => !held.spool)
+          .map((held) => held.segment.recordingPath),
+      ]),
+    ])
   }
 
   get currentWindowHandle(): string | undefined {
@@ -133,6 +214,7 @@ export class CaptureSession {
     this.segmentNumber = 1
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.stoppedSegments.length = 0
     this.clearTabs()
   }
 
@@ -186,12 +268,70 @@ export class CaptureSession {
     this.retainedPaths.clear()
   }
 
+  /** Holds a segment stopped as the current part, with that part's tab. */
+  holdSegment(
+    segment: ActiveSegment,
+    details: StoppedSegmentDetails,
+  ): HeldSegment {
+    if (!this.recordingSlug) {
+      throw new Error('Cannot hold a segment without an active recording')
+    }
+    const held = createHeldSegment(
+      this.segmentNumber,
+      segment,
+      details,
+      this.tabsBySegment.get(this.segmentNumber),
+    )
+    // Parts are numbered as they start and stop one at a time, so the order
+    // they stop in is part order.
+    this.stoppedSegments.push(held)
+    return held
+  }
+
+  /**
+   * Replaces a spooled segment, once its spool is encoded, with the segment
+   * now on disk, keeping its place in part order.
+   */
+  replaceHeldSegment(held: HeldSegment, segment: ActiveSegment): HeldSegment {
+    const index = this.stoppedSegments.indexOf(held)
+    if (index < 0) {
+      throw new Error('Cannot replace a segment that is not held')
+    }
+    const replacement = createHeldSegment(
+      held.part,
+      segment,
+      {
+        capturedSeconds: held.capturedSeconds,
+        clean: held.clean,
+        ...(held.incompleteReason === undefined
+          ? {}
+          : { incompleteReason: held.incompleteReason }),
+      },
+      held.tab,
+    )
+    this.stoppedSegments[index] = replacement
+    return replacement
+  }
+
+  /** Stops holding a segment once it has been finalized. */
+  releaseHeldSegment(held: HeldSegment): void {
+    const index = this.stoppedSegments.indexOf(held)
+    if (index >= 0) {
+      this.stoppedSegments.splice(index, 1)
+    }
+  }
+
+  clearHeldSegments(): void {
+    this.stoppedSegments.length = 0
+  }
+
   resetRecording(): DetachedCapture {
     const detached = this.detachCapture()
     this.segmentNumber = 0
     this.recordingSlug = ''
     this.activeWindowHandle = undefined
     this.retainedPaths.clear()
+    this.stoppedSegments.length = 0
     this.clearTabs()
     return detached
   }

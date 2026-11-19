@@ -14,6 +14,7 @@ import {
   evaluateRecordingEligibility,
   resolveProcessingOperation,
   resolveRecordingAttempt,
+  selectCaptureMode,
   shouldRetainRecording,
 } from '../../src/service/recording-policy.js'
 
@@ -265,6 +266,33 @@ describe('recording policy', () => {
     },
   )
 
+  // Every retain x encoding x (first attempt, retry) combination.
+  it.each([
+    ['all', 'live', 0, 'live'],
+    ['all', 'live', 1, 'live'],
+    ['all', 'deferred', 0, 'deferred'],
+    ['all', 'deferred', 1, 'deferred'],
+    ['all', 'auto', 0, 'live'],
+    ['all', 'auto', 1, 'live'],
+    ['failures', 'live', 0, 'live'],
+    ['failures', 'live', 1, 'live'],
+    ['failures', 'deferred', 0, 'deferred'],
+    ['failures', 'deferred', 1, 'deferred'],
+    ['failures', 'auto', 0, 'deferred'],
+    ['failures', 'auto', 1, 'deferred'],
+    ['retries', 'live', 0, 'live'],
+    ['retries', 'live', 1, 'live'],
+    ['retries', 'deferred', 0, 'deferred'],
+    ['retries', 'deferred', 1, 'deferred'],
+    ['retries', 'auto', 0, 'deferred'],
+    ['retries', 'auto', 2, 'live'],
+  ] as const)(
+    'captures retain=%s encoding=%s retry=%i as %s',
+    (retain, encoding, retryCount, expected) => {
+      expect(selectCaptureMode({ encoding, retain, retryCount })).toBe(expected)
+    },
+  )
+
   it('builds manifest completion decisions for retention and processing', () => {
     const baseProcessing = resolveServiceConfiguration().options.processing
     expect(
@@ -361,4 +389,31 @@ describe('recording policy', () => {
       })
     },
   )
+
+  it('records failed processing as failed with its files and tabs, before a capture failure', () => {
+    const tabs = new Map([
+      [1, { contextId: 'tab-a', ordinal: 1, reason: 'start' as const }],
+    ])
+    expect(
+      createCompletedManifestOptions({
+        captureFailed: true,
+        deferred: false,
+        keepArtifacts: true,
+        result: 'failed',
+        paths: ['part1.webm'],
+        processing: resolveServiceConfiguration({
+          processing: { transcode: { enabled: true } },
+        }).options.processing,
+        processingFailure: 'Transcode failed',
+        tabs,
+      }),
+    ).toEqual({
+      decision: 'failed',
+      paths: ['part1.webm'],
+      processingOutcome: 'failed',
+      reason: 'Transcode failed',
+      result: 'failed',
+      tabs,
+    })
+  })
 })

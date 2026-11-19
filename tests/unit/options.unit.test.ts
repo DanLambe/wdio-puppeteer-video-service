@@ -29,6 +29,7 @@ describe('service option resolution', () => {
         speed: 1,
         framePriming: true,
         connectionTimeoutMs: 10_000,
+        encoding: 'live',
       },
       processing: {
         format: 'webm',
@@ -256,6 +257,7 @@ describe('service option resolution', () => {
         crop: { x: 10, y: 20, width: 1200, height: 800 },
         framePriming: false,
         connectionTimeoutMs: 1500,
+        encoding: 'deferred',
       },
       processing: {
         format: 'mp4',
@@ -307,6 +309,7 @@ describe('service option resolution', () => {
         crop: { x: 10, y: 20, width: 1200, height: 800 },
         framePriming: false,
         connectionTimeoutMs: 1500,
+        encoding: 'deferred',
       },
       processing: {
         format: 'mp4',
@@ -431,6 +434,8 @@ describe('service option resolution', () => {
       'capture.crop.x',
     ],
     [{ capture: { connectionTimeoutMs: 0 } }, 'capture.connectionTimeoutMs'],
+    [{ capture: { encoding: 'later' } }, 'capture.encoding'],
+    [{ capture: { encoding: true } }, 'capture.encoding'],
     [
       { concurrency: { maxRecordingsGlobal: 1.5 } },
       'concurrency.maxRecordingsGlobal',

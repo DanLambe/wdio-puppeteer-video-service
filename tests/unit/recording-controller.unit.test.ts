@@ -1,9 +1,6 @@
-import { createWriteStream, type WriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { PassThrough } from 'node:stream'
-import { finished } from 'node:stream/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Browser } from 'webdriverio'
 import { nodeFileSystem, systemClock } from '../../src/service/boundaries.js'
@@ -96,14 +93,16 @@ const createHarness = (
       afterWindowCommand: vi.fn(async () => {}),
       beforeWindowCommand: vi.fn(async () => {}),
       currentWindowHandle: vi.fn(async () => undefined),
+      discardSpool: vi.fn(async () => {}),
       isRecordedPageClosed: false,
       resetRecording: vi.fn(async () => {
         session.resetRecording()
+        return {}
       }),
       startCapture,
       stopCapture: vi.fn(async () => {
         const { segment } = session.detachCapture()
-        return { segment, streamOk: true }
+        return { capturedSeconds: 0, segment, streamOk: true }
       }),
     }
   let slotOwned = false
@@ -174,17 +173,12 @@ const createHarness = (
 }
 
 const createActiveSegment = (recordingPath: string): ActiveSegment => ({
-  onRecorderError: vi.fn(),
-  onWriteStreamError: vi.fn(),
   outputFormat: 'webm',
   outputPath: recordingPath,
   recordingFormat: 'webm',
   recordingPath,
   transcode: false,
   transcodeOptions: { deleteOriginal: true },
-  writeStream: {} as WriteStream,
-  writeStreamDone: Promise.resolve(),
-  writeStreamErrored: false,
 })
 
 const attachTranscodedSegment = async (
@@ -228,23 +222,21 @@ const createRealCaptureEngine =
       uuid: () => 'uuid',
     })
 
-type ControlledRecorder = PassThrough & {
+interface ControlledRecorder {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
 
-// A recorder streaming into a real file, as the engine attaches one, whose
-// capture has already failed for `incompleteReason` when that is set.
+// A recorder whose encoder wrote a real file, as the engine attaches one, and
+// whose capture has already failed for `incompleteReason` when that is set.
 const attachControlledCapture = (
   session: CaptureSession,
   recordingPath: string,
   incompleteReason: string | undefined,
 ): ControlledRecorder => {
-  const recorder = new PassThrough() as ControlledRecorder
-  Object.assign(recorder, {
-    abort: vi.fn(async () => {
-      recorder.destroy()
-    }),
+  const recorder = {
+    abort: vi.fn(async () => {}),
+    output: { kind: 'encoded' as const },
     ffmpegResult: { code: 0, diagnostic: '', signal: null },
     frameCount: 5,
     incompleteReason,
@@ -255,19 +247,11 @@ const attachControlledCapture = (
       pendingBlocks: 0,
       pendingBytes: 0,
     },
-    stop: vi.fn(async () => {
-      recorder.end()
-    }),
-  })
-  const writeStream = createWriteStream(recordingPath, { flags: 'r+' })
-  recorder.pipe(writeStream)
+    stop: vi.fn(async () => {}),
+  }
   session.attachCapture({
     recorder: recorder as unknown as ScreencastRecorder,
-    segment: {
-      ...createActiveSegment(recordingPath),
-      writeStream,
-      writeStreamDone: finished(writeStream),
-    },
+    segment: createActiveSegment(recordingPath),
     windowHandle: undefined,
   })
   return recorder
@@ -286,7 +270,7 @@ const createEntityCoordinator = (
       finalizeMedia: (passed, keep) =>
         harness.controller.finalizeMedia(passed, keep),
       getAvailability: () => ({ available: true }),
-      getRecordedPaths: () => harness.session.recordedPaths,
+      getRecordedPaths: () => harness.session.filePaths,
       isRecordingActive: () => harness.session.isRecordingActive,
       resetRecording: () => harness.controller.reset(),
       runSerialized: (task) => harness.controller.runSerialized(task),
@@ -615,7 +599,7 @@ describe('RecordingController', () => {
     })
   })
 
-  it('still transcodes a mid-test segment before retention is known', async () => {
+  it('transcodes a mid-test segment only once retention keeps it', async () => {
     await withTempDir(async (tempDir) => {
       const recordingPath = path.join(tempDir, 'retained.webm')
       const outputPath = path.join(tempDir, 'retained.mp4')
@@ -631,8 +615,14 @@ describe('RecordingController', () => {
 
       await harness.controller.stopRecording()
 
+      expect(harness.transcode).not.toHaveBeenCalled()
+      expect(harness.session.recordedPaths).toEqual([])
+      expect(harness.session.filePaths).toEqual([recordingPath])
+
+      await expect(
+        harness.controller.finalizeMedia(false, true),
+      ).resolves.toEqual({ deferred: false, paths: [outputPath] })
       expect(harness.transcode).toHaveBeenCalledOnce()
-      expect(harness.session.recordedPaths).toEqual([outputPath])
     })
   })
 
@@ -804,7 +794,7 @@ describe('RecordingController', () => {
     })
   })
 
-  it('releases the recording slot before finalizing a stopped segment', async () => {
+  it('releases the recording slot when a segment stops, before finalizing it', async () => {
     const harness = createHarness()
     const order: string[] = []
     const segment = createActiveSegment('capture.webm')
@@ -828,6 +818,13 @@ describe('RecordingController', () => {
 
     await harness.controller.stopRecording()
 
+    expect(order).toEqual(['release'])
+    expect(harness.session.heldSegments.map((held) => held.segment)).toEqual([
+      segment,
+    ])
+
+    await harness.controller.finalizeMedia(false, true)
+
     expect(order).toEqual(['release', 'finalize'])
     expect(harness.releaseSlot).toHaveBeenCalledOnce()
   })
@@ -845,7 +842,7 @@ describe('RecordingController', () => {
     vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
       async () => {
         harness.session.detachCapture()
-        return { segment, streamOk: false }
+        return { capturedSeconds: 0, segment, streamOk: false }
       },
     )
     vi.spyOn(harness.media, 'finalizeSegment').mockResolvedValue(undefined)
@@ -871,7 +868,7 @@ describe('RecordingController', () => {
     vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
       async () => {
         harness.session.detachCapture()
-        return { segment: undefined, streamOk: true }
+        return { capturedSeconds: 0, segment: undefined, streamOk: true }
       },
     )
 
@@ -911,6 +908,7 @@ describe('RecordingController', () => {
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
           async () => ({
             ...harness.session.detachCapture(),
+            capturedSeconds: 0,
             ...(reason ? { incompleteReason: reason } : {}),
             streamOk: false,
           }),
@@ -1096,7 +1094,11 @@ describe('RecordingController', () => {
           windowHandle: undefined,
         })
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
-          async () => ({ ...harness.session.detachCapture(), streamOk: false }),
+          async () => ({
+            ...harness.session.detachCapture(),
+            capturedSeconds: 0,
+            streamOk: false,
+          }),
         )
         const merge = vi.spyOn(harness.media, 'mergeCurrentSegments')
         const queue = vi.spyOn(harness.media, 'queueDeferredMerge')
@@ -1110,7 +1112,11 @@ describe('RecordingController', () => {
           windowHandle: undefined,
         })
         vi.mocked(harness.captureEngine.stopCapture).mockImplementation(
-          async () => ({ ...harness.session.detachCapture(), streamOk: true }),
+          async () => ({
+            ...harness.session.detachCapture(),
+            capturedSeconds: 0,
+            streamOk: true,
+          }),
         )
         harness.media.enqueue({
           kind: 'transcode',

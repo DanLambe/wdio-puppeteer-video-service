@@ -25,6 +25,7 @@ const options = {
   ffmpegPath: process.execPath,
   format: 'webm' as const,
   fps: 10,
+  outputPath: 'unused.webm',
   quality: 30,
   scale: 1,
   speed: 1,
@@ -80,7 +81,7 @@ it.each([
         },
         spawnProcess: () => {
           parent = spawn(process.execPath, ['-e', wrapperProgram], {
-            stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+            stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
             detached: process.platform !== 'win32',
             windowsHide: true,
           })
@@ -119,7 +120,6 @@ it.each([
       expect(session.listenerCount('Page.screencastFrame')).toBe(0)
       expect(page.listenerCount('close')).toBe(0)
       expect(parent?.stdin?.destroyed).toBe(true)
-      expect(parent?.stdout?.destroyed).toBe(true)
       expect(parent?.stderr?.destroyed).toBe(true)
     } finally {
       if (parent && parent.exitCode === null && parent.signalCode === null) {
@@ -163,7 +163,7 @@ it('captures an early real encoder exit before CDP attachment completes', async 
                 'console.error("early encoder failure"); process.exitCode = 7',
               ],
               {
-                stdio: ['pipe', 'pipe', 'pipe'],
+                stdio: ['pipe', 'ignore', 'pipe'],
                 detached: process.platform !== 'win32',
                 windowsHide: true,
               },

@@ -7,13 +7,26 @@ import {
   type ClockBoundary,
   systemClock,
 } from '../../src/service/boundaries.js'
+import { RECORDER_STOP_TIMEOUT_MS } from '../../src/service/constants.js'
 import {
-  createFfmpegArguments,
+  EncoderSink,
+  type SpoolFileStream,
+} from '../../src/service/frame-sink.js'
+import { createFfmpegArguments } from '../../src/service/screencast-arguments.js'
+import {
   recordScreencast,
   resolveCaptureCanvas,
+  type ScreencastCaptureOptions,
   ScreencastRecorder,
   type ScreencastRecorderOptions,
+  TAIL_FRAME_QUIET_MS,
+  TAIL_FRAME_WAIT_MS,
 } from '../../src/service/screencast-recorder.js'
+import {
+  SpoolBudget,
+  type SpoolLimits,
+} from '../../src/service/spool-budget.js'
+import { createControlledDelays } from '../utils/controlled-delays.js'
 import {
   type GridFrame,
   gridFrames,
@@ -25,6 +38,7 @@ const options: ScreencastRecorderOptions = {
   ffmpegPath: 'ffmpeg',
   format: 'webm',
   fps: 30,
+  outputPath: 'segment.webm',
   quality: 30,
   scale: 1,
   speed: 1,
@@ -71,7 +85,6 @@ const createFakeFfmpeg = (
     exitCode: number | null
     signalCode: NodeJS.Signals | null
   }
-  const stdout = new PassThrough()
   const stderr = new PassThrough()
   const stdin = new Writable({
     ...(highWaterMark === undefined ? {} : { highWaterMark }),
@@ -81,13 +94,12 @@ const createFakeFfmpeg = (
     },
   })
   let closing = false
-  // Like a real process, output ends before the exit is reported.
+  // Like a real process, the exit is reported a turn after input ends.
   const close = (): void => {
     if (closing) {
       return
     }
     closing = true
-    stdout.end()
     setImmediate(() => {
       child.exitCode ??= 0
       child.emit('close', child.exitCode)
@@ -106,7 +118,8 @@ const createFakeFfmpeg = (
     signalCode: null,
     stderr,
     stdin,
-    stdout,
+    // FFmpeg writes the segment file itself; its output is not piped.
+    stdout: null,
     unref: vi.fn(),
   })
   // Like child_process.spawn, report the start after the process is created.
@@ -242,7 +255,7 @@ const startRecorder = async (
       ...(queueLimits ? { queueLimits } : {}),
     },
   )
-  recorder.resume()
+
   return {
     ...ffmpeg,
     advance: (milliseconds: number) => {
@@ -261,7 +274,7 @@ const startRecorder = async (
 const createRecorder = (ffmpeg: FakeFfmpeg, session: CDPSession) => {
   return ScreencastRecorder.create({
     canvas: { width: 1280, height: 720 },
-    ffmpeg: ffmpeg.child,
+    sink: new EncoderSink(ffmpeg.child),
     fps: 30,
     monotonicNow: () => 0,
     session,
@@ -301,7 +314,40 @@ describe('screencast recorder FFmpeg arguments', () => {
     expect(args.slice(args.indexOf('-f', args.indexOf('-i')))).toEqual(
       expect.arrayContaining(['-f', 'webm']),
     )
-    expect(args.at(-1)).toBe('pipe:1')
+  })
+
+  it('writes the segment file itself, replacing its reserved placeholder', () => {
+    const args = createFfmpegArguments(
+      options,
+      { width: 1280, height: 720 },
+      undefined,
+    )
+    // A pipe cannot be seeked, so a WebM written to one has no duration and
+    // no seek index. The reserved empty file is overwritten.
+    expect(args.slice(-2)).toEqual(['-y', 'segment.webm'])
+    expect(args).not.toContain('pipe:1')
+    // Short clusters, flushed as they are written, keep what a killed
+    // encoder leaves behind decodable up to its last second.
+    const output = args.slice(args.indexOf('-f', args.indexOf('-i')))
+    expect(output.slice(0, 6)).toEqual([
+      '-f',
+      'webm',
+      '-cluster_time_limit',
+      '1000',
+      '-flush_packets',
+      '1',
+    ])
+  })
+
+  it('keeps the Matroska cluster flags out of direct MP4 output', () => {
+    const args = createFfmpegArguments(
+      { ...options, format: 'mp4', outputPath: 'segment.mp4' },
+      { width: 1280, height: 720 },
+      undefined,
+    )
+    expect(args.slice(-2)).toEqual(['-y', 'segment.mp4'])
+    expect(args).not.toContain('-cluster_time_limit')
+    expect(args).not.toContain('-flush_packets')
   })
 
   it('applies crop and scale in the same filter order as Puppeteer', () => {
@@ -324,7 +370,7 @@ describe('screencast recorder FFmpeg arguments', () => {
 
   it('omits the scale filter when it is not set', () => {
     const args = createFfmpegArguments(
-      { format: 'webm', quality: 30 },
+      { format: 'webm', outputPath: 'segment.webm', quality: 30 },
       { width: 1280, height: 720 },
       undefined,
     )
@@ -339,7 +385,7 @@ describe('screencast recorder FFmpeg arguments', () => {
     // cost every default recording a Lanczos resample that produced the frame
     // it already had.
     const args = createFfmpegArguments(
-      { format: 'webm', quality: 30, scale: 1 },
+      { format: 'webm', outputPath: 'segment.webm', quality: 30, scale: 1 },
       { width: 1280, height: 720 },
       undefined,
     )
@@ -512,7 +558,6 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
     exitCode: number | null
     signalCode: NodeJS.Signals | null
   }
-  const stdout = new PassThrough()
   const stderr = new PassThrough()
   const stdin = new Writable({
     highWaterMark: 1,
@@ -535,7 +580,6 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
       return
     }
     closing = true
-    stdout.end()
     setImmediate(() => {
       child.exitCode = 0
       child.emit('close', 0)
@@ -552,7 +596,8 @@ const createStalledFfmpeg = (): FakeFfmpeg & {
     signalCode: null,
     stderr,
     stdin,
-    stdout,
+    // FFmpeg writes the segment file itself; its output is not piped.
+    stdout: null,
     unref: vi.fn(),
   })
   return {
@@ -972,7 +1017,6 @@ const exitEncoder = (
     exitCode: outcome.code,
     signalCode: outcome.signal ?? null,
   })
-  ;(child.stdout as PassThrough).end()
   child.emit('exit', outcome.code, outcome.signal ?? null)
   if (close) {
     child.emit('close', outcome.code, outcome.signal ?? null)
@@ -1359,7 +1403,6 @@ describe('screencast recorder frame timing', () => {
     })
     clock.expire()
     const recorder = await starting
-    recorder.resume()
 
     await recorder.stop()
 
@@ -1382,7 +1425,9 @@ describe('screencast recorder frame timing', () => {
       expect(harness.child.exitCode).toBe(0)
     })
 
-    // FFmpeg's output ended, so the recorder stream closed and stopped listening.
+    // FFmpeg exited, so the recorder stopped listening and let go of the
+    // session.
+    expect(harness.session.detach).toHaveBeenCalledOnce()
     harness.session.emitFrame('late', 101)
     await expect(harness.recorder.stop()).resolves.toBeUndefined()
 
@@ -1429,10 +1474,9 @@ describe('screencast recorder frame timing', () => {
     )
   })
 
-  it('stops FFmpeg and the CDP session when destroyed', async () => {
+  it('stops FFmpeg and the CDP session when aborted', async () => {
     const harness = await startRecorder()
 
-    harness.recorder.destroy()
     await harness.recorder.abort()
 
     expect(harness.kill).toHaveBeenCalledTimes(1)
@@ -1441,14 +1485,14 @@ describe('screencast recorder frame timing', () => {
     expect(harness.frames(10)).toEqual([])
   })
 
-  it('terminates the encoder when destroyed during a stalled CDP stop', async () => {
+  it('terminates the encoder when aborted during a stalled CDP stop', async () => {
     const harness = await startRecorder()
     const { promise: stalledStop, resolve: finishLate } =
       Promise.withResolvers<never>()
     vi.mocked(harness.session.send).mockImplementation(() => stalledStop)
     const stopping = harness.recorder.stop()
 
-    harness.recorder.destroy()
+    void harness.recorder.abort()
     await new Promise((resolve) => setImmediate(resolve))
 
     expect(harness.kill).toHaveBeenCalledOnce()
@@ -1472,7 +1516,6 @@ describe('screencast recorder frame timing', () => {
     expect(harness.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL')
     expect(harness.session.detach).toHaveBeenCalledOnce()
     expect(harness.child.unref).toHaveBeenCalledOnce()
-    expect(harness.child.stdout?.destroyed).toBe(true)
     expect(harness.child.stderr?.destroyed).toBe(true)
   })
 
@@ -1513,11 +1556,13 @@ describe('screencast recorder frame timing', () => {
     const recorder = ScreencastRecorder.create({
       canvas: { width: 1280, height: 720 },
       clock: systemClock,
-      ffmpeg: ffmpeg.child,
       fps: 30,
       monotonicNow: () => 0,
       session: createFakeSession(),
-      terminateProcessTree,
+      sink: new EncoderSink(ffmpeg.child, {
+        clock: systemClock,
+        terminateProcessTree,
+      }),
     })
     try {
       const aborted = recorder.abort()
@@ -1528,7 +1573,7 @@ describe('screencast recorder frame timing', () => {
         true,
       )
       expect(ffmpeg.child.unref).toHaveBeenCalledOnce()
-      expect(ffmpeg.child.stdout?.destroyed).toBe(true)
+      expect(ffmpeg.child.stderr?.destroyed).toBe(true)
       expect(vi.getTimerCount()).toBe(0)
       expect(ffmpeg.child.listenerCount('spawn')).toBe(0)
       expect(ffmpeg.child.listenerCount('exit')).toBe(0)
@@ -1540,7 +1585,6 @@ describe('screencast recorder frame timing', () => {
       expect(ffmpeg.child.listenerCount('error')).toBe(0)
     } finally {
       vi.useRealTimers()
-      recorder.destroy()
     }
   })
 })
@@ -1616,7 +1660,6 @@ describe('screencast recorder startup', () => {
       expect(session.send).not.toHaveBeenCalled()
       expect(session.listenerCount('Page.screencastFrame')).toBe(0)
       expect(ffmpeg.child.stdin?.destroyed).toBe(true)
-      expect(ffmpeg.child.stdout?.destroyed).toBe(true)
       expect(ffmpeg.child.stderr?.destroyed).toBe(true)
     },
   )
@@ -1937,5 +1980,1195 @@ describe('screencast recorder startup', () => {
       recordScreencast(page, options, { spawnProcess: ffmpeg.spawn }),
     ).rejects.toThrow('Protocol error')
     expect(ffmpeg.kill).toHaveBeenCalled()
+  })
+})
+
+// A spool file the recorder writes through, with writes the test controls.
+const createFakeSpool = (failOnWrite?: number) => {
+  const chunks: Buffer[] = []
+  const waiting: Array<() => void> = []
+  let flowing = true
+  let writes = 0
+  let written = 0
+  const stream = new Writable({
+    highWaterMark: 1,
+    write(chunk: Buffer, _encoding, callback) {
+      writes += 1
+      if (writes === failOnWrite) {
+        callback(
+          Object.assign(new Error('ENOSPC: no space left on device, write'), {
+            code: 'ENOSPC',
+          }),
+        )
+        return
+      }
+      const accept = (): void => {
+        chunks.push(Buffer.from(chunk))
+        written += chunk.length
+        callback()
+      }
+      if (flowing) {
+        accept()
+      } else {
+        waiting.push(accept)
+      }
+    },
+  }) as SpoolFileStream
+  Object.defineProperty(stream, 'bytesWritten', { get: () => written })
+  return {
+    /** What is on disk now, as a killed worker would leave it. */
+    bytes: () => Buffer.concat(chunks),
+    frames: (fps = 30) => gridFrames(Buffer.concat(chunks), fps),
+    open: vi.fn((_path: string) => stream),
+    release: () => {
+      flowing = true
+      for (const accept of waiting.splice(0)) {
+        accept()
+      }
+    },
+    stall: () => {
+      flowing = false
+    },
+    stream,
+  }
+}
+
+// The shared capture settings, without the live encode's output path.
+const { outputPath: _liveOutput, ...captureOptions } =
+  options as typeof options & {
+    outputPath: string
+  }
+const spoolOptions = { ...captureOptions, spoolPath: 'segment.spool.mkv' }
+
+const startedOnFirstFrame = (timestamp: number) =>
+  createFakeSession((method, current) => {
+    if (method === 'Page.startScreencast') {
+      current.emitFrame('start', timestamp)
+    }
+  })
+
+// `startRecorder`, spooling to a fake file instead of spawning FFmpeg.
+const startSpoolRecorder = async (
+  recorderOptions: Partial<ScreencastCaptureOptions> & {
+    budget?: SpoolBudget
+  } = {},
+  spool = createFakeSpool(),
+  clock: ClockBoundary = createClock(),
+  queueLimits?: { maxPendingBytes?: number; maxPendingBlocks?: number },
+) => {
+  const session = startedOnFirstFrame(100)
+  let monotonic = 0
+  const spawnProcess = vi.fn()
+  const recorder = await recordScreencast(
+    createPage(session),
+    { ...spoolOptions, ...recorderOptions },
+    {
+      clock,
+      monotonicNow: () => monotonic,
+      openSpoolFile: spool.open,
+      spawnProcess,
+      ...(queueLimits ? { queueLimits } : {}),
+    },
+  )
+  return {
+    ...spool,
+    advance: (milliseconds: number) => {
+      monotonic += milliseconds
+    },
+    frame: (label: string, timestamp: number) => {
+      monotonic = (timestamp - 100) * 1_000
+      session.emitFrame(label, timestamp)
+    },
+    recorder,
+    session,
+    spawnProcess,
+  }
+}
+
+type ScriptStep =
+  | { readonly frame: string; readonly at: number }
+  | { readonly hold: number }
+
+// Plays the same frames and holds to a live recorder or a spooling one.
+const playScript = async (
+  run: {
+    advance: (milliseconds: number) => void
+    frame: (label: string, timestamp: number) => void
+  },
+  clock: ReturnType<typeof createHoldClock>,
+  steps: readonly ScriptStep[],
+): Promise<void> => {
+  for (const step of steps) {
+    if ('frame' in step) {
+      run.frame(step.frame, step.at)
+    } else {
+      run.advance(step.hold)
+      clock.tick()
+    }
+    await settle()
+  }
+}
+
+const SCRIPT: readonly ScriptStep[] = [
+  { frame: 'red', at: 100.5 },
+  { hold: 1_000 },
+  // A busy burst, inside one grid step and across a few.
+  { frame: 'green', at: 101.6 },
+  { frame: 'green-2', at: 101.61 },
+  { frame: 'blue', at: 101.7 },
+  { hold: 1_000 },
+  { hold: 1_000 },
+  { hold: 1_000 },
+  { frame: 'red-again', at: 105 },
+  { hold: 1_000 },
+  { hold: 1_000 },
+]
+
+describe('screencast recorder spooling', () => {
+  it('writes a spool byte-for-byte as the live encoder is given, holds included', async () => {
+    const liveClock = createHoldClock()
+    const live = await startRecorder(
+      { fps: 10 },
+      100,
+      createFakeFfmpeg(),
+      liveClock,
+    )
+    await playScript(live, liveClock, SCRIPT)
+    live.advance(500)
+    await live.recorder.stop()
+
+    const spoolClock = createHoldClock()
+    const spooled = await startSpoolRecorder({ fps: 10 }, undefined, spoolClock)
+    // The spool holds on the same cadence as a live encoder.
+    expect(spoolClock.interval()).toBe(1_000)
+    await playScript(spooled, spoolClock, SCRIPT)
+    spooled.advance(500)
+    await spooled.recorder.stop()
+
+    expect(spooled.bytes().equals(live.bytes())).toBe(true)
+    // Holds are in both: blocks repeat a frame that is still shown.
+    const labels = spooled.frames(10).map((frame) => frame.label)
+    expect(labels.filter((label) => label === 'blue').length).toBeGreaterThan(2)
+    // A spool's byte count includes its hold blocks.
+    expect(spooled.stream.bytesWritten).toBe(live.bytes().length)
+    expect(spooled.spawnProcess).not.toHaveBeenCalled()
+    expect(spooled.recorder.incompleteReason).toBeUndefined()
+    expect(spoolClock.cleared()).toBe(true)
+  })
+
+  it('has the first frame on disk after one hold, without a stop', async () => {
+    const clock = createHoldClock()
+    const run = await startSpoolRecorder({ fps: 10 }, undefined, clock)
+    expect(run.frames(10)).toEqual([])
+
+    run.advance(1_000)
+    clock.tick()
+    await settle()
+    // A worker killed now leaves the first frame, held up to the hold.
+    expect(run.frames(10)).toEqual([{ label: 'start', position: 0 }])
+
+    for (let second = 2; second <= 10; second += 1) {
+      run.advance(1_000)
+      clock.tick()
+    }
+    await settle()
+    // The quiet tail is on disk up to the last hold, half a second behind.
+    expect(run.frames(10).at(-1)).toEqual({ label: 'start', position: 85 })
+    await run.recorder.abort()
+  })
+
+  it('has the newest image on disk one hold after red, green and blue', async () => {
+    const clock = createHoldClock()
+    const run = await startSpoolRecorder({ fps: 10 }, undefined, clock)
+    run.frame('red', 101)
+    run.frame('green', 102)
+    run.frame('blue', 103)
+    await settle()
+    // Blue has no span yet: only the next frame, a hold or stop gives one.
+    expect(run.frames(10).map((frame) => frame.label)).not.toContain('blue')
+
+    run.advance(1_000)
+    clock.tick()
+    await settle()
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 10 }, () => 'start'),
+      ...Array.from({ length: 10 }, () => 'red'),
+      ...Array.from({ length: 10 }, () => 'green'),
+      'blue',
+    ])
+    run.advance(5_000)
+    clock.tick()
+    await settle()
+    expect(run.frames(10).at(-1)).toEqual({ label: 'blue', position: 35 })
+    await run.recorder.abort()
+  })
+
+  it('reports itself as a spool with what its encode needs', async () => {
+    const spool = createFakeSpool()
+    const recorder = await recordScreencast(
+      createPage(startedOnFirstFrame(1), { width: 1920, height: 1080 }),
+      {
+        ...spoolOptions,
+        format: 'mp4',
+        maxWidth: 1280,
+        quality: 24,
+        scale: 0.5,
+      },
+      {
+        clock: createClock(),
+        monotonicNow: () => 0,
+        openSpoolFile: spool.open,
+      },
+    )
+    await recorder.stop()
+
+    expect(spool.open).toHaveBeenCalledExactlyOnceWith('segment.spool.mkv')
+    expect(recorder.output).toEqual({
+      kind: 'spool',
+      spool: {
+        path: 'segment.spool.mkv',
+        settings: {
+          canvas: { width: 1280, height: 720 },
+          format: 'mp4',
+          quality: 24,
+          scale: 0.5,
+        },
+      },
+    })
+    expect(parseMatroskaStream(spool.bytes()).track).toMatchObject({
+      height: 720,
+      width: 1280,
+    })
+    // No encoder ran, so none exited.
+    expect(recorder.ffmpegResult).toEqual({
+      code: null,
+      diagnostic: '',
+      signal: null,
+    })
+  })
+
+  it('carries the device-pixel crop into the spool description', async () => {
+    const recorder = await recordScreencast(
+      createPage(startedOnFirstFrame(1), {
+        devicePixelRatio: 2,
+        width: 640,
+        height: 360,
+      }),
+      { ...spoolOptions, crop: { x: 10, y: 20, width: 300, height: 100 } },
+      {
+        clock: createClock(),
+        monotonicNow: () => 0,
+        openSpoolFile: createFakeSpool().open,
+      },
+    )
+    expect(recorder.output).toMatchObject({
+      spool: {
+        settings: {
+          canvas: { width: 1280, height: 720 },
+          crop: { x: 20, y: 40, width: 600, height: 200 },
+        },
+      },
+    })
+    await recorder.abort()
+  })
+
+  it('reports an encoded output for a live recording', async () => {
+    const run = await startRecorder()
+    expect(run.recorder.output).toEqual({ kind: 'encoded' })
+    await run.recorder.stop()
+  })
+
+  it('ends a stopped spool with the same final fill and end markers as live', async () => {
+    const live = await startRecorder({ fps: 10 }, 100)
+    live.frame('last', 102)
+    live.advance(3_000)
+    await live.recorder.stop()
+
+    const spooled = await startSpoolRecorder({ fps: 10 })
+    spooled.frame('last', 102)
+    spooled.advance(3_000)
+    await spooled.recorder.stop()
+
+    expect(spooled.frames(10)).toEqual([
+      { label: 'start', position: 0 },
+      { label: 'last', position: 20 },
+      { label: 'last', position: 48 },
+      { label: 'last', position: 49 },
+    ])
+    expect(spooled.bytes().equals(live.bytes())).toBe(true)
+    expect(spooled.stream.writableFinished).toBe(true)
+  })
+
+  it('stops capturing with a truthful reason when the spool cannot be written', async () => {
+    const clock = createHoldClock()
+    // The header is the first write; the first frame's block fails.
+    const run = await startSpoolRecorder({ fps: 10 }, createFakeSpool(3), clock)
+    run.frame('a', 101)
+    await vi.waitFor(() => {
+      expect(run.recorder.incompleteReason).toBe(
+        'The frame spool could not be written: ENOSPC: no space left on device, write',
+      )
+    })
+    await settle()
+
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(clock.cleared()).toBe(true)
+    expect(run.recorder.queueStats.pendingBlocks).toBe(0)
+    await expect(run.recorder.stop()).resolves.toBeUndefined()
+    expect(run.recorder.incompleteReason).toMatch(/ENOSPC/u)
+    expect(run.recorder.output.kind).toBe('spool')
+  })
+
+  it('reports a spool that fails to flush when stop ends it', async () => {
+    const spool = createFakeSpool()
+    Object.assign(spool.stream, {
+      _final: (callback: (error?: Error) => void) => {
+        callback(new Error('EIO: i/o error, write'))
+      },
+    })
+    const run = await startSpoolRecorder({ fps: 10 }, spool)
+    run.frame('a', 101)
+
+    await run.recorder.stop()
+
+    expect(run.recorder.incompleteReason).toBe(
+      'The frame spool could not be written: EIO: i/o error, write',
+    )
+  })
+
+  it('bounds the frames waiting for a stalled spool and names it', async () => {
+    const spool = createFakeSpool()
+    spool.stall()
+    const run = await startSpoolRecorder({ fps: 10 }, spool, createClock(), {
+      maxPendingBlocks: 2,
+    })
+    run.frame('a', 101)
+    run.frame('b', 102)
+    run.frame('c', 103)
+    run.frame('d', 104)
+
+    expect(run.recorder.incompleteReason).toBe(
+      'The frame spool fell behind the screencast (2 frames waiting for the frame spool reached the limit of 2); capture stopped after 3.0s to bound memory.',
+    )
+    spool.release()
+    await run.recorder.stop()
+    expect(spanCounts(run.frames(10))).toEqual({ a: 10, b: 10, start: 10 })
+  })
+
+  it.each(['capturing', 'draining', 'ending'] as const)(
+    'aborts a spool while %s, as the stop deadline does, and closes it',
+    async (state) => {
+      const spool = createFakeSpool()
+      const run = await startSpoolRecorder({ fps: 10 }, spool)
+      run.frame('a', 101)
+      let stopping: Promise<void> | undefined
+      if (state !== 'capturing') {
+        spool.stall()
+        run.frame('b', 102)
+        stopping = run.recorder.stop()
+        await settle()
+      }
+      if (state === 'ending') {
+        // Everything was handed over; the file never finishes flushing.
+        Object.assign(spool.stream, {
+          _final: () => {
+            // The flush never completes.
+          },
+        })
+        spool.release()
+        await vi.waitFor(() => {
+          expect(spool.stream.writableEnded).toBe(true)
+        })
+      }
+
+      await run.recorder.abort()
+
+      await expect(stopping ?? Promise.resolve()).resolves.toBeUndefined()
+      expect(spool.stream.destroyed).toBe(true)
+      expect(run.recorder.queueStats).toMatchObject({
+        pendingBlocks: 0,
+        pendingBytes: 0,
+      })
+      expect(run.recorder.incompleteReason).toBeUndefined()
+      expect(run.session.detach).toHaveBeenCalled()
+    },
+  )
+})
+
+describe('screencast recorder deferred startup', () => {
+  it('spawns no encoder and waits only for the spool file to open', async () => {
+    const spool = createFakeSpool()
+    Object.assign(spool.stream, { pending: true })
+    const page = createPage(startedOnFirstFrame(1))
+    const spawnProcess = vi.fn()
+    const starting = recordScreencast(page, spoolOptions, {
+      clock: createClock(),
+      openSpoolFile: spool.open,
+      spawnProcess,
+    })
+    await settle()
+    expect(page.createCDPSession).not.toHaveBeenCalled()
+
+    spool.stream.emit('ready')
+    const recorder = await starting
+    expect(recorder.frameCount).toBe(1)
+    expect(spawnProcess).not.toHaveBeenCalled()
+    await recorder.stop()
+  })
+
+  it('rejects without a CDP session when the spool cannot be opened', async () => {
+    const spool = createFakeSpool()
+    Object.assign(spool.stream, { pending: true })
+    const page = createPage(createFakeSession())
+    const starting = recordScreencast(page, spoolOptions, {
+      openSpoolFile: spool.open,
+    })
+    await vi.waitFor(() => {
+      expect(spool.open).toHaveBeenCalledOnce()
+    })
+    spool.stream.emit(
+      'error',
+      new Error("EEXIST: file already exists, open 'segment.spool.mkv'"),
+    )
+
+    await expect(starting).rejects.toThrow(
+      "The frame spool could not be written: EEXIST: file already exists, open 'segment.spool.mkv'",
+    )
+    expect(page.createCDPSession).not.toHaveBeenCalled()
+    expect(spool.stream.destroyed).toBe(true)
+  })
+
+  it('closes the spool when the screencast cannot start', async () => {
+    const spool = createFakeSpool()
+    const session = createFakeSession()
+    vi.mocked(session.send).mockRejectedValueOnce(new Error('Target closed'))
+
+    await expect(
+      recordScreencast(createPage(session), spoolOptions, {
+        openSpoolFile: spool.open,
+      }),
+    ).rejects.toThrow('Target closed')
+    expect(spool.stream.destroyed).toBe(true)
+    expect(session.detach).toHaveBeenCalled()
+    expect(session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('closes the spool when attachment times out', async () => {
+    vi.useFakeTimers()
+    const spool = createFakeSpool()
+    const page = createPage(createFakeSession())
+    vi.mocked(page.createCDPSession).mockReturnValue(new Promise(() => {}))
+    const starting = recordScreencast(page, spoolOptions, {
+      openSpoolFile: spool.open,
+    })
+    const rejected = expect(starting).rejects.toThrow(
+      'CDP startup timed out after 10000ms',
+    )
+    try {
+      await vi.advanceTimersByTimeAsync(10_001)
+      await rejected
+      expect(spool.stream.destroyed).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+const BUDGET_LIMITS: SpoolLimits = {
+  promoteBytes: 1_000_000,
+  hardCapBytes: 1_000_000,
+  promoteFreeBytes: 0,
+  stopFreeBytes: 0,
+  freeCheckIntervalBytes: 1_000_000,
+}
+
+const createBudget = (
+  limits: Partial<SpoolLimits> = {},
+  freeBytes: () => Promise<number> = async () => Number.MAX_SAFE_INTEGER,
+): SpoolBudget =>
+  new SpoolBudget({ ...BUDGET_LIMITS, ...limits }, { freeBytes })
+
+const LIMIT_REASON =
+  /^The recording's frame spools reached the disk limit of \d+ bytes; capture stopped after \d+\.\ds to bound disk use\.$/u
+
+// The labels shown, in order, once a recording has stopped.
+const shownLabels = (frames: GridFrame[]): string[] => {
+  return [...new Set(shown(frames))]
+}
+
+describe('screencast recorder spool budget', () => {
+  it('stops at the hard cap with every earlier span intact and writes nothing past it', async () => {
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const cap = header + 400
+    const run = await startSpoolRecorder({
+      budget: createBudget({ hardCapBytes: cap }),
+      fps: 10,
+    })
+    const labels = ['start']
+    for (
+      let step = 1;
+      step <= 60 && !run.recorder.incompleteReason;
+      step += 1
+    ) {
+      const label = `f${step.toString().padStart(2, '0')}`
+      run.frame(label, 100 + step / 10)
+      await settle()
+      if (!run.recorder.incompleteReason) {
+        labels.push(label)
+      }
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(labels.length).toBeGreaterThan(3)
+    expect(labels.length).toBeLessThan(40)
+
+    await run.recorder.stop()
+
+    expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    // Every frame accepted before the cap still has its own span, in order.
+    expect(shownLabels(run.frames(10))).toEqual(labels)
+    expect(run.recorder.output.kind).toBe('spool')
+  })
+
+  it('stops a static page whose holds would pass the cap, and still ends the video', async () => {
+    const clock = createHoldClock()
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const cap = header + 350
+    const run = await startSpoolRecorder(
+      { budget: createBudget({ hardCapBytes: cap }), fps: 10 },
+      undefined,
+      clock,
+    )
+    for (
+      let hold = 0;
+      hold < 100 && !run.recorder.incompleteReason;
+      hold += 1
+    ) {
+      run.advance(1_000)
+      clock.tick()
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    expect(clock.cleared()).toBe(true)
+
+    run.advance(2_000)
+    await run.recorder.stop()
+
+    expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    expect(shownLabels(run.frames(10))).toEqual(['start'])
+  })
+
+  it('never lets what stopping writes carry the spool past the cap', async () => {
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    for (const room of [140, 150, 200, 260]) {
+      const cap = header + room
+      const run = await startSpoolRecorder({
+        budget: createBudget({ hardCapBytes: cap }),
+        fps: 10,
+      })
+      for (let step = 1; step <= 30; step += 1) {
+        run.frame(`f${step.toString()}`, 100 + step / 10)
+        await settle()
+      }
+      run.advance(5_000)
+      await run.recorder.stop()
+      expect(run.bytes().length).toBeLessThanOrEqual(cap)
+    }
+  })
+
+  it('asks for promotion at the promote threshold and promotes later segments', async () => {
+    const budget = createBudget({ promoteBytes: 400 })
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    expect(budget.promoted).toBe(false)
+    for (let step = 1; step <= 40; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    expect(header).toBeLessThan(400)
+    expect(budget.promoted).toBe(true)
+    // Until a segment can continue live, it keeps spooling.
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(run.recorder.output.kind).toBe('spool')
+    await run.recorder.stop()
+  })
+
+  it('counts the sealed spools of the recording, so small segments reach the limit together', async () => {
+    const budget = createBudget({ hardCapBytes: 1_200 })
+    const sealedSizes: number[] = []
+    for (let segment = 0; segment < 3; segment += 1) {
+      const run = await startSpoolRecorder({ budget, fps: 10 })
+      run.frame('a', 101)
+      await settle()
+      await run.recorder.stop()
+      sealedSizes.push(run.bytes().length)
+      expect(run.recorder.incompleteReason).toBeUndefined()
+    }
+    const sealed = sealedSizes.reduce((total, size) => total + size, 0)
+    expect(budget.bytes).toBe(sealed)
+    expect(sealed).toBeLessThan(1_200)
+
+    // The fourth segment alone is nowhere near the cap; the recording is.
+    const last = await startSpoolRecorder({ budget, fps: 10 })
+    for (
+      let step = 1;
+      step <= 40 && !last.recorder.incompleteReason;
+      step += 1
+    ) {
+      last.frame(`g${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+    expect(last.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    await last.recorder.stop()
+    expect(budget.bytes).toBeLessThanOrEqual(1_200)
+    expect(last.bytes().length).toBeLessThan(1_200 - sealed + 1)
+  })
+
+  it('stops a spooling segment below the lower free-space floor', async () => {
+    const budget = createBudget(
+      { promoteFreeBytes: 2_000, stopFreeBytes: 500 },
+      async () => 100,
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await vi.waitFor(() => {
+      expect(run.recorder.incompleteReason).toBe(
+        'Free disk space for the frame spool fell to 100 bytes, below the floor of 500 bytes; capture stopped after 0.0s to bound disk use.',
+      )
+    })
+
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(budget.promoted).toBe(true)
+    await run.recorder.stop()
+    expect(shownLabels(run.frames(10))).toEqual(['start'])
+  })
+
+  it('keeps recording when the free space is low but above the lower floor', async () => {
+    const freeBytes = vi.fn(async () => 1_000)
+    const budget = new SpoolBudget(
+      { ...BUDGET_LIMITS, promoteFreeBytes: 2_000, stopFreeBytes: 500 },
+      { freeBytes },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await settle()
+
+    expect(freeBytes).toHaveBeenCalledOnce()
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(budget.promoted).toBe(true)
+    await run.recorder.stop()
+  })
+
+  it('keeps recording when the free space cannot be read', async () => {
+    const budget = createBudget(
+      {
+        freeCheckIntervalBytes: 50,
+        promoteFreeBytes: 2_000,
+        stopFreeBytes: 500,
+      },
+      async () => {
+        throw new Error('statfs failed')
+      },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    for (let step = 1; step <= 20; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    expect(budget.promoted).toBe(false)
+    await run.recorder.stop()
+  })
+
+  it('checks the free space again after each further interval written', async () => {
+    const freeBytes = vi.fn(async () => Number.MAX_SAFE_INTEGER)
+    const budget = new SpoolBudget(
+      { ...BUDGET_LIMITS, freeCheckIntervalBytes: 100 },
+      { freeBytes },
+    )
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    await settle()
+    expect(freeBytes).toHaveBeenCalledOnce()
+    for (let step = 1; step <= 30; step += 1) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+
+    const written = run.bytes().length
+    expect(freeBytes.mock.calls.length).toBeGreaterThan(1)
+    expect(freeBytes.mock.calls.length).toBeLessThanOrEqual(
+      1 + Math.floor(written / 100),
+    )
+    await run.recorder.stop()
+  })
+
+  it('leaves the budget when the segment fails to start', async () => {
+    const budget = createBudget()
+    const spool = createFakeSpool()
+    const session = createFakeSession()
+    vi.mocked(session.send).mockRejectedValueOnce(new Error('Target closed'))
+
+    await expect(
+      recordScreencast(
+        createPage(session),
+        { ...spoolOptions, budget },
+        { openSpoolFile: spool.open },
+      ),
+    ).rejects.toThrow('Target closed')
+
+    // The header was written before the failure; the spool is not kept.
+    expect(budget.bytes).toBe(0)
+  })
+
+  it('does not bound an encoder sink', async () => {
+    const budget = createBudget({ hardCapBytes: 1 })
+    const run = await startRecorder({ fps: 10 })
+    run.frame('a', 101)
+    await settle()
+
+    expect(budget.bytes).toBe(0)
+    expect(run.recorder.incompleteReason).toBeUndefined()
+    await run.recorder.stop()
+  })
+})
+
+// A hold clock whose delays the test ends: the stop's wait for a frame on its
+// way never depends on wall time.
+const createTailClock = () => {
+  const delays = createControlledDelays()
+  const clock = { ...createHoldClock(), delay: delays.delay }
+  return { clock, delays }
+}
+
+describe('screencast recorder tail frame at stop', () => {
+  it('waits a quiet gap after a lone frame on its way, placed by its own timestamp', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    // The page is static for a second, then the test stops right after a
+    // paint whose frame Chrome is still capturing.
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested.map((delay) => delay.milliseconds)).toEqual([
+      TAIL_FRAME_WAIT_MS,
+    ])
+
+    // Painted at 0.9 s, delivered 150 ms later, during the wait. Another
+    // frame may follow it, so the wait goes on for a quiet gap.
+    run.advance(50)
+    run.session.emitFrame('tail', 100.9)
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested.map((delay) => delay.milliseconds)).toEqual([
+      TAIL_FRAME_WAIT_MS,
+      TAIL_FRAME_QUIET_MS,
+    ])
+
+    run.advance(TAIL_FRAME_QUIET_MS)
+    delays.requested[1]?.resolve()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    // Shown from 0.9 s, where it was painted, and held to the stop at 1.15 s.
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'tail',
+      'tail',
+      'tail',
+    ])
+    // The bound's timer is released rather than left to run out.
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+  })
+
+  it('waits for a second frame in flight behind an older paint', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // The pointer moved over the button at 0.9 s; the click's paint at 1 s is
+    // right behind it. Neither delay is expired: two frames end the wait.
+    run.advance(20)
+    run.session.emitFrame('pointer', 100.9)
+    run.advance(16)
+    run.session.emitFrame('paint', 101)
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'pointer',
+      'paint',
+    ])
+    // Every timer of the wait is released.
+    expect(delays.requested.map((delay) => delay.signal?.aborted)).toEqual([
+      true,
+      true,
+    ])
+  })
+
+  it('stops at the second frame without waiting for a third', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(500)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // An animating page: two frames end the wait, and the screencast is
+    // stopped before the next frame Chrome would send.
+    run.frame('first', 100.52)
+    run.frame('second', 100.62)
+    await settle()
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    await stopping
+    run.frame('third', 100.72)
+
+    expect(delays.requested).toHaveLength(2)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'first', 'second'])
+    expect(run.recorder.frameCount).toBe(3)
+  })
+
+  it('counts only frames it captures toward the wait', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // Two events without a timestamp are acknowledged but not captured, so
+    // they neither end the wait nor start its quiet gap.
+    run.advance(10)
+    run.session.emitFrame('missing')
+    run.session.emitFrame('missing')
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    expect(delays.requested).toHaveLength(1)
+
+    // The paint arrives before either timer has run out.
+    run.advance(20)
+    run.session.emitFrame('paint', 100.9)
+    await settle()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+    delays.requested[1]?.resolve()
+    await stopping
+
+    const acks = run.session.sent.filter(
+      (method) => method === 'Page.screencastFrameAck',
+    )
+    // The first frame, both events without a timestamp and the paint.
+    expect(acks).toHaveLength(4)
+    expect(run.session.sent.indexOf('Page.stopScreencast')).toBeGreaterThan(
+      run.session.sent.lastIndexOf('Page.screencastFrameAck'),
+    )
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'paint'])
+    expect(run.recorder.frameCount).toBe(2)
+  })
+
+  it('ends at the bound however slowly frames trickle in', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+
+    // A frame late in the wait starts a quiet gap that would outlast the
+    // bound; the bound ends the wait first.
+    run.advance(100)
+    run.session.emitFrame('slow', 100.95)
+    await settle()
+    run.advance(TAIL_FRAME_WAIT_MS - 100)
+    delays.requested[0]?.resolve()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    expect(delays.requested[1]?.signal?.aborted).toBe(true)
+    expect(shownLabels(run.frames(10))).toEqual(['start', 'slow'])
+  })
+
+  it('waits the whole bound on a page that does not change, then stops', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    run.advance(1_000)
+    const stopped = vi.fn()
+    const stopping = run.recorder.stop().then(stopped)
+    await settle()
+    expect(stopped).not.toHaveBeenCalled()
+    expect(run.session.sent).not.toContain('Page.stopScreencast')
+
+    run.advance(TAIL_FRAME_WAIT_MS)
+    delays.expire()
+    await stopping
+
+    expect(run.session.sent).toContain('Page.stopScreencast')
+    // The final frame is held to where the stop ended, the wait included.
+    expect(spanCounts(run.frames(10))).toEqual({ start: 11 })
+  })
+
+  it('does not wait once overload has stopped capture', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createFakeFfmpeg(),
+      clock,
+      { maxPendingBytes: 20 },
+    )
+    run.frame('next', 101)
+    run.frame('y'.repeat(30), 101.04)
+    expect(run.recorder.incompleteReason).toContain('exceeds 20 bytes')
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+  })
+
+  it('does not wait once the spool budget has stopped capture', async () => {
+    const { clock, delays } = createTailClock()
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const run = await startSpoolRecorder(
+      { budget: createBudget({ hardCapBytes: header + 400 }), fps: 10 },
+      undefined,
+      clock,
+    )
+    for (
+      let step = 1;
+      step <= 60 && !run.recorder.incompleteReason;
+      step += 1
+    ) {
+      run.frame(`f${step.toString()}`, 100 + step / 10)
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+  })
+
+  it('does not wait once the encoder has exited', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createStalledFfmpeg(),
+      clock,
+    )
+    run.frame('a', 101)
+    Object.assign(run.child, { exitCode: 1 })
+    run.child.stdin?.destroy()
+    run.child.emit('exit', 1)
+    run.child.emit('close', 1)
+    await settle()
+
+    await run.recorder.stop()
+
+    expect(delays.requested).toEqual([])
+    expect(run.recorder.incompleteReason).toContain('FFmpeg exited with code 1')
+  })
+
+  it('ends the wait when the encoder exits during it', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder(
+      { fps: 10 },
+      100,
+      createStalledFfmpeg(),
+      clock,
+    )
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    // Never expired: a closed encoder has nowhere to put another frame.
+    Object.assign(run.child, { exitCode: 1 })
+    run.child.stdin?.destroy()
+    run.child.emit('exit', 1)
+    run.child.emit('close', 1)
+    await stopping
+
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+    expect(run.recorder.incompleteReason).toContain('FFmpeg exited with code 1')
+  })
+
+  it('lets an abort during the wait win at once', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    // Never expired: the abort alone ends the wait and the stop.
+    await run.recorder.abort()
+    await stopping
+
+    expect(delays.requested[0]?.signal?.aborted).toBe(true)
+    expect(run.kill).toHaveBeenCalled()
+    expect(run.frames(10)).toEqual([])
+  })
+
+  it.each([
+    ['an abort', (recorder: ScreencastRecorder) => recorder.abort()],
+    [
+      'a stop whose media is thrown away',
+      (recorder: ScreencastRecorder) => recorder.stop({ tailFrame: false }),
+    ],
+  ])('does not wait for %s', async (_name, end) => {
+    const { clock, delays } = createTailClock()
+    const run = await startRecorder({ fps: 10 }, 100, undefined, clock)
+
+    await end(run.recorder)
+
+    expect(delays.requested).toEqual([])
+    expect(run.session.listenerCount('Page.screencastFrame')).toBe(0)
+  })
+
+  it('gives a spool the frame that arrives during the wait', async () => {
+    const { clock, delays } = createTailClock()
+    const run = await startSpoolRecorder({ fps: 10 }, undefined, clock)
+    run.advance(1_000)
+    const stopping = run.recorder.stop()
+    await settle()
+    expect(delays.requested).toHaveLength(1)
+
+    run.advance(50)
+    run.session.emitFrame('tail', 100.9)
+    await settle()
+    // No frame follows within the quiet gap.
+    delays.requested[1]?.resolve()
+    await stopping
+
+    expect(shown(run.frames(10))).toEqual([
+      ...Array.from({ length: 9 }, () => 'start'),
+      'tail',
+      'tail',
+    ])
+    expect(run.recorder.output.kind).toBe('spool')
+  })
+
+  it('stays far inside the engine stop timeout', () => {
+    expect(RECORDER_STOP_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      20 * TAIL_FRAME_WAIT_MS,
+    )
+  })
+})
+
+// A budget that counts how often each registered segment's byte count is read.
+const createCountingBudget = (limits: Partial<SpoolLimits> = {}) => {
+  const budget = createBudget(limits)
+  const reads: number[] = []
+  const begin = budget.beginSegment.bind(budget)
+  vi.spyOn(budget, 'beginSegment').mockImplementation((directory, bytes) => {
+    const index = reads.push(0) - 1
+    return begin(directory, () => {
+      reads[index] = (reads[index] ?? 0) + 1
+      return bytes()
+    })
+  })
+  return { budget, reads }
+}
+
+// Frames a later segment captures, each one a budget check.
+const captureFrames = async (
+  run: Awaited<ReturnType<typeof startSpoolRecorder>>,
+  count: number,
+): Promise<void> => {
+  for (let step = 1; step <= count; step += 1) {
+    run.frame(`g${step.toString()}`, 100 + step / 10)
+    await settle()
+  }
+}
+
+describe('screencast recorder sealed spools', () => {
+  it('seals a stopped spool: later segments count its final bytes without reading it', async () => {
+    const { budget, reads } = createCountingBudget()
+    const first = await startSpoolRecorder({ budget, fps: 10 })
+    first.frame('a', 101)
+    await settle()
+    await first.recorder.stop()
+    const readsAtStop = reads[0]
+
+    const second = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(second, 30)
+    await second.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtStop)
+    expect(reads[1]).toBeGreaterThan(0)
+    expect(budget.bytes).toBe(first.bytes().length + second.bytes().length)
+  })
+
+  it('seals a spool stopped at the hard cap only once stopping has written its last blocks', async () => {
+    const clock = createHoldClock()
+    const header = (await startSpoolRecorder({ fps: 10 })).bytes().length
+    const { budget, reads } = createCountingBudget({
+      hardCapBytes: header + 350,
+    })
+    const run = await startSpoolRecorder({ budget, fps: 10 }, undefined, clock)
+    for (
+      let hold = 0;
+      hold < 100 && !run.recorder.incompleteReason;
+      hold += 1
+    ) {
+      run.advance(1_000)
+      clock.tick()
+      await settle()
+    }
+    expect(run.recorder.incompleteReason).toMatch(LIMIT_REASON)
+    const atLimit = run.bytes().length
+    run.advance(2_000)
+    await run.recorder.stop()
+    const readsAtStop = reads[0]
+
+    // Stopping still wrote the end of the video, and that is counted.
+    expect(run.bytes().length).toBeGreaterThan(atLimit)
+    expect(budget.bytes).toBe(run.bytes().length)
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await later.recorder.stop()
+    expect(reads[0]).toBe(readsAtStop)
+  })
+
+  it('seals an aborted spool', async () => {
+    const { budget, reads } = createCountingBudget()
+    const run = await startSpoolRecorder({ budget, fps: 10 })
+    run.frame('a', 101)
+    await settle()
+    await run.recorder.abort()
+    const total = budget.bytes
+    const readsAtAbort = reads[0]
+
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await later.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtAbort)
+    expect(total).toBeGreaterThan(0)
+    expect(budget.bytes).toBe(total + later.bytes().length)
+  })
+
+  it('seals a spool that could not be written', async () => {
+    const { budget, reads } = createCountingBudget()
+    const run = await startSpoolRecorder(
+      { budget, fps: 10 },
+      createFakeSpool(3),
+      createHoldClock(),
+    )
+    run.frame('a', 101)
+    await vi.waitFor(() => {
+      expect(run.recorder.incompleteReason).toMatch(/ENOSPC/u)
+    })
+    await settle()
+    const readsAtFailure = reads[0]
+
+    const later = await startSpoolRecorder({ budget, fps: 10 })
+    await captureFrames(later, 5)
+    await run.recorder.stop()
+    await later.recorder.stop()
+
+    expect(reads[0]).toBe(readsAtFailure)
   })
 })

@@ -17,6 +17,22 @@ export type SpawnFfmpegProcess = (
   args: string[],
 ) => FfmpegProcess
 
+/** How one FFmpeg run ended, for a caller that needs more than success. */
+export type FfmpegRunResult =
+  | {
+      readonly kind: 'exited'
+      readonly code: number | null
+      /** The end of FFmpeg's error output. */
+      readonly diagnostic: string
+      readonly signal: NodeJS.Signals | null
+    }
+  | { readonly kind: 'spawn-failed'; readonly message: string }
+  | {
+      readonly kind: 'stopped'
+      /** Its own timeout, or a cancellation: `signal`, or every process stopped at shutdown. */
+      readonly reason: 'cancelled' | 'timeout'
+    }
+
 export interface RunFfmpegOptions {
   args: string[]
   available: boolean
@@ -24,7 +40,11 @@ export interface RunFfmpegOptions {
   log: ServiceLogger
   markUnavailable: () => void
   operation: string
+  /** Called once with how the run ended, whether or not it succeeded. */
+  onResult?: (result: FfmpegRunResult) => void
   onStderr?: (output: string) => void
+  /** Cancels the run: checked before the spawn, and stops a running process. */
+  signal?: AbortSignal
   timeoutMs: number
   warnMissing: (reason: string) => void
 }
@@ -77,9 +97,13 @@ export const runFfmpeg = async (
   dependencies: FfmpegRunnerDependencies = {},
 ): Promise<boolean> => {
   if (!options.available) {
-    options.warnMissing(
-      `Skipping ffmpeg ${options.operation} because ffmpeg is unavailable.`,
-    )
+    const message = `Skipping ffmpeg ${options.operation} because ffmpeg is unavailable.`
+    options.warnMissing(message)
+    options.onResult?.({ kind: 'spawn-failed', message })
+    return false
+  }
+  if (options.signal?.aborted) {
+    options.onResult?.({ kind: 'stopped', reason: 'cancelled' })
     return false
   }
 
@@ -101,7 +125,7 @@ export const runFfmpeg = async (
     const stderr = new Utf8TailBuffer(32_768)
     let settled = false
     let timeout: NodeJS.Timeout | undefined
-    let timedOut = false
+    let stopReason: 'cancelled' | 'timeout' | undefined
     let terminationTask: Promise<void> | undefined
     let unregisterProcess = (): void => {}
     let resolveSettlement = (): void => {}
@@ -118,13 +142,23 @@ export const runFfmpeg = async (
       if (timeout) {
         clock.clearTimeout(timeout)
       }
+      options.signal?.removeEventListener('abort', onAbort)
       unregisterProcess()
       resolveSettlement()
       resolve(value)
     }
+    const settleStopped = (): void => {
+      if (!settled) {
+        options.onResult?.({
+          kind: 'stopped',
+          reason: stopReason ?? 'cancelled',
+        })
+      }
+      settle(false)
+    }
     const isSettled = (): boolean => settled
 
-    const terminate = (): Promise<void> => {
+    const terminate = (reason: 'cancelled' | 'timeout' = 'cancelled') => {
       if (settled) {
         return Promise.resolve()
       }
@@ -132,18 +166,23 @@ export const runFfmpeg = async (
         return terminationTask
       }
 
-      timedOut = true
+      stopReason = reason
       terminationTask = terminateFfmpegAfterGrace({
         clock,
         ffmpegProcess: proc,
         isSettled,
-        settle,
+        settle: settleStopped,
         settlement,
         terminateProcessTree,
       })
       return terminationTask
     }
-    unregisterProcess = processRegistry?.register({ terminate }) ?? (() => {})
+    const onAbort = (): void => {
+      void terminate()
+    }
+    unregisterProcess =
+      processRegistry?.register({ terminate: () => terminate() }) ?? (() => {})
+    options.signal?.addEventListener('abort', onAbort, { once: true })
 
     if (options.timeoutMs > 0) {
       timeout = clock.setTimeout(() => {
@@ -151,7 +190,7 @@ export const runFfmpeg = async (
           'warn',
           `[WdioPuppeteerVideoService] ffmpeg ${options.operation} timed out after ${options.timeoutMs.toString()}ms`,
         )
-        void terminate()
+        void terminate('timeout')
       }, options.timeoutMs)
       timeout.unref?.()
     }
@@ -164,8 +203,8 @@ export const runFfmpeg = async (
       if (settled) {
         return
       }
-      if (timedOut) {
-        settle(false)
+      if (stopReason) {
+        settleStopped()
         return
       }
 
@@ -173,18 +212,25 @@ export const runFfmpeg = async (
       settle(false)
     })
 
-    proc.on('close', (code: number | null) => {
+    proc.on('close', (code: number | null, signal?: NodeJS.Signals | null) => {
       if (settled) {
         return
       }
-      if (timedOut) {
-        settle(false)
+      if (stopReason) {
+        settleStopped()
         return
       }
 
+      const output = stderr.finish()
+      options.onResult?.({
+        kind: 'exited',
+        code,
+        diagnostic: output.trim(),
+        signal: signal ?? null,
+      })
       if (code === 0) {
         try {
-          options.onStderr?.(stderr.finish())
+          options.onStderr?.(output)
         } catch (error) {
           options.log('warn', 'Failed to read FFmpeg diagnostics:', error)
           settle(false)
@@ -194,7 +240,7 @@ export const runFfmpeg = async (
         return
       }
 
-      const details = stderr.finish().trim()
+      const details = output.trim()
       const suffix = details ? `: ${details}` : ''
       options.log(
         'warn',
@@ -216,6 +262,10 @@ const reportSpawnFailure = (
     'warn',
     `[WdioPuppeteerVideoService] Failed to spawn ffmpeg for ${options.operation}: ${message}`,
   )
+  options.onResult?.({
+    kind: 'spawn-failed',
+    message: `FFmpeg failed to start: ${message}`,
+  })
 }
 
 interface TerminateFfmpegAfterGraceOptions {

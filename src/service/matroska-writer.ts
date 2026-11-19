@@ -3,7 +3,7 @@
 // frame-rate grid. FFmpeg then decodes and encodes a frame only when the page
 // changed, instead of once per grid position of an unchanged page.
 
-export type MatroskaImageCodec = 'jpeg' | 'png'
+export type MatroskaImageCodec = 'png'
 
 export interface MatroskaTrackOptions {
   readonly codec: MatroskaImageCodec
@@ -65,6 +65,28 @@ const encodeId = (id: number): Buffer => {
   return Buffer.from(bytes)
 }
 
+/** One element of a stream's opening, as this writer writes it. */
+export interface StreamOpeningElement {
+  readonly id: Buffer
+  /** Whether it is written with an unknown size, its children following it. */
+  readonly unknownSize: boolean
+}
+
+/**
+ * The elements every stream this writer produces starts with, in order: the
+ * header, then the first cluster's opening and its first block. Spool
+ * recovery reads a spool against this list, so the two cannot disagree.
+ */
+export const STREAM_OPENING: readonly StreamOpeningElement[] = [
+  { id: encodeId(EBML), unknownSize: false },
+  { id: encodeId(SEGMENT), unknownSize: true },
+  { id: encodeId(INFO), unknownSize: false },
+  { id: encodeId(TRACKS), unknownSize: false },
+  { id: encodeId(CLUSTER), unknownSize: true },
+  { id: encodeId(CLUSTER_TIMESTAMP), unknownSize: false },
+  { id: encodeId(SIMPLE_BLOCK), unknownSize: false },
+]
+
 export const encodeElementSize = (size: number): Buffer => {
   for (let length = 1; length <= 8; length += 1) {
     // The all-ones value of each length is reserved for an unknown size.
@@ -119,9 +141,6 @@ const pngCodecPrivate = (width: number, height: number): Buffer => {
 }
 
 const codecElements = (options: MatroskaTrackOptions): Buffer => {
-  if (options.codec === 'jpeg') {
-    return text(CODEC_ID, 'V_MJPEG')
-  }
   return Buffer.concat([
     text(CODEC_ID, 'V_MS/VFW/FOURCC'),
     element(CODEC_PRIVATE, pngCodecPrivate(options.width, options.height)),

@@ -47,6 +47,13 @@ export const getMergedOutputPath = (
   return path.join(outputDir || DEFAULT_OUTPUT_DIR, filename)
 }
 
+/** Whether a file is a playable video artifact, as opposed to other kept output. */
+export const isVideoArtifactPath = (filePath: string): boolean =>
+  Object.hasOwn(
+    SEGMENT_EXTENSION_TO_FORMAT,
+    path.extname(filePath).toLowerCase(),
+  )
+
 const PART_NUMBER_RE = /_part(\d+)\./
 
 export const extractPartNumber = (filePath: string): number => {

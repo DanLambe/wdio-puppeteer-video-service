@@ -3,6 +3,11 @@ import path from 'node:path'
 import { emptyDir } from 'fs-extra'
 import WdioPuppeteerVideoReporter from '../src/reporter.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../src/types.js'
+import {
+  assertNoSpoolsLeft,
+  captureEncodingSuffix,
+  readCaptureEncoding,
+} from './utils/capture-encoding.js'
 import { requireFixtureBaseUrl } from './utils/fixture-environment.js'
 import { videoServiceModulePath } from './utils/service-module.js'
 import {
@@ -24,6 +29,8 @@ type AdvancedMode =
   | 'retention'
   | 'global-concurrency'
   | 'ffmpeg-failure'
+  | 'failure-burst'
+  | 'tail-frame'
 
 const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
@@ -63,6 +70,12 @@ const toMode = (value: string | undefined): AdvancedMode => {
   if (normalized === 'ffmpeg-failure') {
     return 'ffmpeg-failure'
   }
+  if (normalized === 'failure-burst') {
+    return 'failure-burst'
+  }
+  if (normalized === 'tail-frame') {
+    return 'tail-frame'
+  }
   return 'retry'
 }
 
@@ -92,8 +105,10 @@ const deferredPostProcessWorkers = resolvePositiveInteger(
 )
 const resultsDir = path.resolve(
   process.env.WDIO_RESULTS_DIR ||
-    path.join('tests/results', `advanced-${mode}`),
+    path.join('tests/results', `advanced-${mode}${captureEncodingSuffix()}`),
 )
+// Unset, the service's default; set by the runner to cover each capture mode.
+const captureEncoding = readCaptureEncoding()
 const globalRecordingLockDir = path.join(resultsDir, '.global-recording-locks')
 
 const modeSpecs: Record<AdvancedMode, string[]> = {
@@ -129,6 +144,12 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
   'ffmpeg-failure': [
     path.resolve('tests/advanced/specs/ffmpeg-failure.spec.ts'),
   ],
+  'failure-burst': [
+    path.resolve('tests/advanced/specs/failure-burst-a.spec.ts'),
+    path.resolve('tests/advanced/specs/failure-burst-b.spec.ts'),
+    path.resolve('tests/advanced/specs/failure-burst-c.spec.ts'),
+  ],
+  'tail-frame': [path.resolve('tests/advanced/specs/tail-frame.spec.ts')],
 }
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
@@ -158,6 +179,14 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   ],
   'ffmpeg-failure': [
     'should preserve original media when FFmpeg transcoding fails',
+  ],
+  'failure-burst': ['A', 'B', 'C'].map(
+    (worker) =>
+      `should keep every part when worker ${worker} fails with the others`,
+  ),
+  'tail-frame': [
+    'should film the last paint before a kept test ends',
+    'should film the last paint before recording moves to another tab',
   ],
 }
 
@@ -225,10 +254,21 @@ const createServiceOptions = (overrides: ServiceOptions): ServiceOptions => {
   }
 }
 
+// Modes whose retained videos are the encoder's own WebM, not an H.264 MP4.
+const VP9_MODES: ReadonlySet<AdvancedMode> = new Set<AdvancedMode>([
+  'failure-burst',
+  'ffmpeg-failure',
+  'retry',
+  'tail-frame',
+])
+
 const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   retry: createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
     integrations: { allure: { attach: 'retained' } },
+    // The offline report check plays this run's video in a browser: keep the
+    // WebM the encoder wrote, the default output, rather than a transcode.
+    processing: { format: 'webm', transcode: { enabled: false } },
   }),
   'spec-file-retry': createServiceOptions({
     recording: { attempts: 'retries', retain: 'retries' },
@@ -288,6 +328,21 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
         ffmpegArgs: ['-this-option-does-not-exist'],
       },
     },
+  }),
+  // Three workers fail at once and keep their recordings, which wait for one
+  // post-processing slot: each kept WebM is the encoder's file, not a transcode.
+  'failure-burst': createServiceOptions({
+    recording: { retain: 'failures' },
+    concurrency: {
+      maxPostProcessesPerProcess: 1,
+      maxPostProcessesGlobal: 1,
+      lockDir: globalRecordingLockDir,
+    },
+    processing: { format: 'webm', transcode: { enabled: false } },
+  }),
+  // The runner decodes each part's last frames; the encoder's WebM will do.
+  'tail-frame': createServiceOptions({
+    processing: { format: 'webm', transcode: { enabled: false } },
   }),
 }
 
@@ -430,10 +485,19 @@ const assertExcludeSpecMode = (artifactNames: string[]): void => {
   }
 }
 
+// Only the failed test's three tab segments remain, each transcoded.
 const assertRetentionMode = (artifactNames: string[]): void => {
-  if (artifactNames.length !== 1) {
+  const parts = artifactNames
+    .map(
+      (fileName) =>
+        /^should_retain_an_intentionally_failed_recording_.*_part(\d)\.mp4$/u.exec(
+          fileName,
+        )?.[1] ?? '?',
+    )
+    .sort((left, right) => left.localeCompare(right))
+  if (parts.join() !== '1,2,3') {
     throw new Error(
-      `[wdio:e2e:advanced] retention mode expected only the failed-test artifact but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+      `[wdio:e2e:advanced] retention mode expected only the failed test's three MP4 parts but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
     )
   }
 }
@@ -468,6 +532,24 @@ const assertFfmpegFailureMode = (artifactNames: string[]): void => {
   }
 }
 
+// Every failing worker's three parts are kept as WebM; none is lost.
+const assertFailureBurstMode = (artifactNames: string[]): void => {
+  const parts = ['a', 'b', 'c'].map(
+    (worker) =>
+      artifactNames.filter((fileName) =>
+        new RegExp(
+          `^should_keep_every_part_when_worker_${worker}_fails_with_the_others_.*_part[1-3]\\.webm$`,
+          'u',
+        ).test(fileName),
+      ).length,
+  )
+  if (parts.join() !== '3,3,3' || artifactNames.length !== 9) {
+    throw new Error(
+      `[wdio:e2e:advanced] failure-burst mode expected three WebM parts per worker but found ${artifactNames.length}: ${artifactNames.join(', ')}`,
+    )
+  }
+}
+
 const modeAssertions: Record<
   AdvancedMode,
   (names: string[]) => void | Promise<void>
@@ -485,6 +567,9 @@ const modeAssertions: Record<
   retention: assertRetentionMode,
   'global-concurrency': assertGlobalConcurrencyMode,
   'ffmpeg-failure': assertFfmpegFailureMode,
+  'failure-burst': assertFailureBurstMode,
+  // The runner checks the parts' colors from the manifest.
+  'tail-frame': () => {},
 }
 
 const assertAdvancedModeExpectations = async (
@@ -494,12 +579,18 @@ const assertAdvancedModeExpectations = async (
   await modeAssertions[activeMode](artifactNames)
 }
 
+// Modes whose workers run at once; every other mode runs one.
+const modeInstances: Partial<Record<AdvancedMode, number>> = {
+  'failure-burst': 3,
+  'global-concurrency': 2,
+}
+
 export const config: WebdriverIO.Config = {
   runner: 'local',
   baseUrl: requireFixtureBaseUrl(),
   tsConfigPath: './tsconfig.spec.json',
   specs: modeSpecs[mode],
-  maxInstances: mode === 'global-concurrency' ? 2 : 1,
+  maxInstances: modeInstances[mode] ?? 1,
   capabilities: [
     {
       browserName: 'chrome',
@@ -521,7 +612,22 @@ export const config: WebdriverIO.Config = {
   specFileRetries: mode === 'spec-file-retry' ? 1 : 0,
   specFileRetriesDelay: 0,
   specFileRetriesDeferred: false,
-  services: [[videoServiceModulePath, serviceOptionsByMode[mode]]],
+  services: [
+    [
+      videoServiceModulePath,
+      {
+        ...serviceOptionsByMode[mode],
+        ...(captureEncoding
+          ? {
+              capture: {
+                ...serviceOptionsByMode[mode].capture,
+                encoding: captureEncoding,
+              },
+            }
+          : {}),
+      },
+    ],
+  ],
   framework: 'mocha',
   reporters: [
     'spec',
@@ -564,9 +670,12 @@ export const config: WebdriverIO.Config = {
       expectZeroVideos: modeExpectsNoVideos,
       mergeSegmentsEnabled: mergedArtifactsExpected,
       fileNameStyle,
-      expectedCodec: mode === 'ffmpeg-failure' ? 'vp9' : 'h264',
+      // These modes keep the encoder's WebM (no transcode); `retry` does so
+      // for the offline report's playback check.
+      expectedCodec: VP9_MODES.has(mode) ? 'vp9' : 'h264',
       runLabel: `advanced-${mode}`,
     })
+    await assertNoSpoolsLeft(resultsDir)
 
     if (!expectVideos && !modeExpectsNoVideos) {
       return

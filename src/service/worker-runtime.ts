@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { Frameworks, Services } from '@wdio/types'
 import type { Browser } from 'webdriverio'
 import type {
@@ -12,7 +13,9 @@ import {
   createWorkerCompositionRoot,
   type WorkerCompositionOverrides,
 } from './composition.js'
+import { SPOOL_DIR_NAME } from './constants.js'
 import { ContextFollower } from './context-follower.js'
+import { DeferredEncoder } from './deferred-encode.js'
 import { FfmpegRuntime } from './ffmpeg-runtime.js'
 import { isInternalOperation } from './internal-operation.js'
 import {
@@ -146,6 +149,7 @@ export class WdioPuppeteerVideoWorkerRuntime
     )
     const ffmpegProcessRegistry = composition.createFfmpegProcessRegistry()
     this._ffmpegRuntime = new FfmpegRuntime({
+      clock: composition.clock,
       createPostProcessSlotScheduler: () =>
         composition.createPostProcessSlotScheduler(
           this._options,
@@ -198,6 +202,29 @@ export class WdioPuppeteerVideoWorkerRuntime
       media: this._mediaCoordinator,
       options: this._options,
       recordingSlotScheduler,
+      ...(launcherContext
+        ? {
+            spoolStorage: {
+              directory: path.join(
+                this._options.outputDir,
+                SPOOL_DIR_NAME,
+                launcherContext.runId,
+              ),
+              encoder: new DeferredEncoder({
+                clock: composition.clock,
+                concurrency: this._options.concurrency,
+                ffmpeg: this._ffmpegRuntime,
+                fileSystem: this._fileSystem,
+                log: (level, message, details) => {
+                  this._log(level, message, details)
+                },
+              }),
+              diskSpace: composition.diskSpace,
+              limits: composition.spoolLimits,
+              uuid: composition.uuid,
+            },
+          }
+        : {}),
     })
     recordingController = this._recordingController
     this._contextFollower = new ContextFollower({
@@ -217,7 +244,7 @@ export class WdioPuppeteerVideoWorkerRuntime
             ? { reason: this._recordingDisabledReason }
             : {}),
         }),
-        getRecordedPaths: () => this._captureSession.recordedPaths,
+        getRecordedPaths: () => this._captureSession.filePaths,
         isRecordingActive: () => this._captureSession.isRecordingActive,
         resetRecording: () => this._recordingController.reset(),
         runSerialized: (task) => this._recordingController.runSerialized(task),
@@ -344,11 +371,28 @@ export class WdioPuppeteerVideoWorkerRuntime
       return
     }
     // Wait here, outside every test's timeout, for a just-launched browser to
-    // render.
-    await this._captureEngine.warmUp().catch((error: unknown) => {
+    // render, and look for FFmpeg meanwhile so the first recording finds it
+    // ready.
+    await Promise.all([
+      this._captureEngine.warmUp().catch((error: unknown) => {
+        this._log(
+          'debug',
+          `[WdioPuppeteerVideoService] Browser warm-up skipped: ${normalization.describeError(error)}`,
+        )
+      }),
+      this._prepareFfmpeg(),
+    ])
+  }
+
+  /**
+   * Missing FFmpeg is reported once by the runtime, and each recording start
+   * then finds it unavailable; nothing else changes here.
+   */
+  private async _prepareFfmpeg(): Promise<void> {
+    await this._ffmpegRuntime.ensureReady().catch((error: unknown) => {
       this._log(
-        'debug',
-        `[WdioPuppeteerVideoService] Browser warm-up skipped: ${normalization.describeError(error)}`,
+        'warn',
+        `[WdioPuppeteerVideoService] FFmpeg readiness check failed: ${normalization.describeError(error)}`,
       )
     })
   }
@@ -486,7 +530,7 @@ export class WdioPuppeteerVideoWorkerRuntime
             ) {
               await this._recordingCoordinator.finalizeSpecRecording()
             } else {
-              await this._recordingController.stopRecording()
+              await this._recordingController.finalizeWithoutOutcome()
               await this._recordingController.reset()
             }
           }

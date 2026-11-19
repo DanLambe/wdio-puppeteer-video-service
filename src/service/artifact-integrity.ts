@@ -350,7 +350,11 @@ const parseArtifactLeasePayload = (
   }
 }
 
-const getCollisionPath = (
+/**
+ * The `collisionIndex`th candidate for an artifact path: the path itself
+ * first, then `<name>_run<N>`, keeping any `_part<N>` suffix last.
+ */
+export const getCollisionPath = (
   desiredPath: string,
   collisionIndex: number,
 ): string => {

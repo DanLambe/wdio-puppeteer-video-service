@@ -1,5 +1,6 @@
 import path from 'node:path'
 import type {
+  ResolvedCaptureOptions,
   ResolvedProcessingOptions,
   ResolvedRecordingOptions,
 } from '../types.js'
@@ -190,6 +191,30 @@ export const shouldRetainRecording = (input: {
   }
 }
 
+/** How a segment is captured: encoded as it records, or spooled to disk. */
+export type CaptureMode = 'live' | 'deferred'
+
+/**
+ * Picks how a recording's segments are captured from what is known when it
+ * starts. `'auto'` encodes live only a recording that is kept whatever the
+ * test's outcome, so a recording that may be discarded never pays for it.
+ */
+export const selectCaptureMode = (input: {
+  readonly encoding: ResolvedCaptureOptions['encoding']
+  readonly retain: ResolvedRecordingOptions['retain']
+  readonly retryCount: number
+}): CaptureMode => {
+  if (input.encoding !== 'auto') {
+    return input.encoding
+  }
+  const certainlyKept = shouldRetainRecording({
+    passed: true,
+    retain: input.retain,
+    retryCount: input.retryCount,
+  })
+  return certainlyKept ? 'live' : 'deferred'
+}
+
 export const createCompletedManifestOptions = (input: {
   readonly captureFailed?: boolean
   readonly deferred: boolean
@@ -197,9 +222,21 @@ export const createCompletedManifestOptions = (input: {
   readonly result: CompleteManifestEntryOptions['result']
   readonly paths: readonly string[]
   readonly processing: ResolvedProcessingOptions
+  /** Why processing the kept segments failed; the listed files stay as they are. */
+  readonly processingFailure?: string
   readonly tabs?: CompleteManifestEntryOptions['tabs']
 }): CompleteManifestEntryOptions => {
   const tabs = input.tabs ? { tabs: input.tabs } : {}
+  if (input.processingFailure !== undefined) {
+    return {
+      decision: 'failed',
+      result: input.result,
+      paths: [...input.paths],
+      reason: input.processingFailure,
+      processingOutcome: 'failed',
+      ...tabs,
+    }
+  }
   if (input.captureFailed) {
     // Any retained bytes are listed, but the capture is not a recording.
     return {

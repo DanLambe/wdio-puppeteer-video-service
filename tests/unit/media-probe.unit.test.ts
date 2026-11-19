@@ -29,29 +29,10 @@ describe('media probe', () => {
       width: 1280,
       height: 720,
       durationSeconds: 1.25,
+      containerDurationSeconds: 1.25,
       frameCount: 38,
       pixelFormat: 'yuv420p',
-      frameRate: 30,
     })
-  })
-
-  it.each([
-    [
-      'vp9 (Profile 0), yuv420p(tv, progressive), 1256x508, SAR 1:1 DAR 314:127, 1 fps, 1k tbr, 1k tbn',
-      1,
-    ],
-    ['h264 (High), yuv420p, 1280x720, 29.97 fps, 29.97 tbr, 90k tbn', 29.97],
-  ])('reads the nominal frame rate after %s', (stream, frameRate) => {
-    const output = validProbeOutput.replace(
-      'vp9 (Profile 0), yuv420p, 1280x720, 30 fps',
-      stream,
-    )
-    expect(parseFfmpegProbeOutput(output).frameRate).toBe(frameRate)
-  })
-
-  it('reports no frame rate when FFmpeg prints none', () => {
-    const output = validProbeOutput.replace(', 30 fps', '')
-    expect(parseFfmpegProbeOutput(output)).not.toHaveProperty('frameRate')
   })
 
   it.each([
@@ -63,12 +44,15 @@ describe('media probe', () => {
     expect(parseFfmpegProbeOutput(output).pixelFormat).toBe(pixelFormat)
   })
 
-  it('derives raw WebM duration from the decoded timeline', () => {
+  it('derives a duration-less WebM duration from the decoded timeline', () => {
     const rawWebmOutput = validProbeOutput
       .replace('Duration: 00:00:01.25', 'Duration: N/A')
       .replace('time=00:00:01.25', 'time=00:00:01.10')
 
-    expect(parseFfmpegProbeOutput(rawWebmOutput).durationSeconds).toBe(1.1)
+    const media = parseFfmpegProbeOutput(rawWebmOutput)
+    expect(media.durationSeconds).toBe(1.1)
+    // A player could not size this file: the container declares nothing.
+    expect(media).not.toHaveProperty('containerDurationSeconds')
   })
 
   it('returns decoded media details when FFmpeg succeeds', async () => {

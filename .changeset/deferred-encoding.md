@@ -1,0 +1,7 @@
+---
+'wdio-puppeteer-video-service': patch
+---
+
+New option `capture.encoding` (`'live'`, `'auto'` or `'deferred'`, default `'live'`). With `'deferred'`, no encoder runs while a test runs: its frames are written to disk, deleted unencoded if the recording is discarded while still spooled, and encoded per kept segment when the test ends (a large spool or low disk space can start a live encoder sooner). `'auto'` does this only for recordings that may be discarded, such as passing tests under `retain: 'failures'`, and encodes the rest live. Kept recordings produce the same files and manifest entries as live ones. A kept recording that cannot be encoded keeps its frames as a `.frames.mkv` file, with a warning that says how to convert it, and is reported as incomplete; frames a crashed worker left behind are recovered the same way when the run ends. That recovery only touches spool files a worker named, deletes only a spool it can show holds no image, keeps anything it cannot read that way as a `.frames.mkv` file, and does nothing if the spool directory is a link. A deferred recording that spools more than 256 MiB continues as live encoding mid-recording, one that would pass 1 GiB stops and is reported as incomplete, and low free disk space promotes it and then stops it, so a worker's disk use stays bounded. The default, `'live'`, records as before.
+
+The README's performance tuning section now says when to choose each encoding, with measured numbers.

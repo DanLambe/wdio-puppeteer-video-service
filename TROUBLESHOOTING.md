@@ -127,6 +127,16 @@ a positive duration and at least two frames. That is a test contract rather than
 proof that the file is corrupt — the recording really is that short. Keep the
 window under test open longer if a clip of usable length is expected.
 
+## A video ends just before the test's last change
+
+Chrome captures a frame a little after the page paints it. When a recording or
+a segment ends, the service waits up to 125 ms for a frame that is still on its
+way, which covered the slowest case measured: about 100 ms on a two-CPU
+container whose CPUs were saturated. On a host busier than that, the last change
+before a tab move or the end of a test can still miss its segment; after a tab
+move it shows once recording returns to that tab. Reduce the load per CPU, for
+example with fewer workers, if that last frame matters.
+
 ## The first recording on a fresh runner is late or empty
 
 A browser's first launch on a fresh machine can take seconds to draw anything:
@@ -170,6 +180,18 @@ the same way, such as "Tab 2 · test command" or "Tabs 1 → 2 → 1" for a merg
   a command. One that another service, or a promise the test did not await,
   sends to a tab the test holds moves recording there, even while the test
   works in a different tab. The segment's reason is `command`.
+- **A script on another tab does not move recording.** A
+  `browser.scriptCallFunction()` or `browser.scriptEvaluate()` follows only a
+  context the test holds (from `url()`, `newWindow()`, `frame()` or
+  `browsingContexts()`), a window it has switched to, WebdriverIO's current
+  window, or the recorded tab. A handle known only from
+  `browser.getWindowHandles()` is not enough, because WebdriverIO runs its own
+  setup script in every window a page opens. Call
+  `browser.switchToWindow(handle)` first, or run the script through a held
+  context. Navigation, element commands and input on a listed tab still move
+  recording, and make that tab's later scripts count. With the
+  service's `logLevel: 'trace'` it logs each of these decisions as
+  "Tab decision #n".
 - **The entry is `failed` with `capture-incomplete`.** The test drove a tab
   whose recording could not start. Each tab gets two consecutive attempts; the
   service warns with the tab's id. Segments recorded before and after the gap
@@ -235,7 +257,10 @@ at stop. From `1.0.0-rc.6`, an unchanged page is not re-encoded at all: each
 distinct frame reaches the encoder once and the video holds it, which removed
 stop timeouts from a two-CPU, four-worker reproduction that still hit them in
 `1.0.0-rc.5`. If a stop still times out, the recorder terminates its owned encoder
-tree, closes the file, and preserves partial bytes as an unclean segment. An
+tree and preserves the bytes it had written as an unclean segment. From
+`2.0.0-rc.1` FFmpeg writes the recording file itself, so the service no longer
+waits for a separate file stream after a stop, and the `Timed out waiting for
+recording stream to finish` warning is gone. An
 encoder that exits before the recording stops, whether with an error, a signal
 or exit code 0, is reported with its exit code or signal, and its file is
 likewise kept as an unclean segment rather than processed as a complete
@@ -284,10 +309,72 @@ failure after cleanup.
   `processing.ffmpeg.path`, `FFMPEG_PATH` or wrapper script for options that
   stop FFmpeg early. `SIGKILL` usually means the operating system reclaimed
   memory.
+- `The recording's frame spools reached the disk limit of 1.0 GiB; capture
+  stopped after …s to bound disk use.` A deferred recording spooled the most it
+  may (`capture.encoding: 'deferred'`, [Deferred Encoding](README.md#deferred-encoding))
+  and could not continue as live encoding, usually because FFmpeg could not
+  start or kept exiting (a warning before this one says why). The video covers
+  the time up to that point.
+- `Free disk space for the frame spool fell to … MiB, below the floor of 512.0
+  MiB; capture stopped after …s to bound disk use.` The volume holding
+  `<outputDir>/.wdio-video-spool` ran low while a segment was still spooling.
+  Free space on that volume or point `outputDir` at a larger one. Below 2 GiB a
+  segment normally continues as live encoding first, so this means that could
+  not happen. A video is still written up to that point.
+- `The frame spool could not be written: ENOSPC …`: the disk filled before
+  either limit above was reached, for example because other workers share it.
+  The same fixes apply.
+- `Could not continue the recording of … as live encoding: …`: a spool that
+  grew large could not start an encoder, or the encoder exited while the spool
+  was replayed into it. The recording keeps spooling and is encoded when its
+  test ends; this is a warning, not a failure, unless the disk limits above
+  follow.
 - `Discarded recording was incomplete (…)`: retention discarded a passing test's
   video, but its capture had already failed for one of the reasons above. The
   manifest records the failure without segments, so the cause stays visible even
   though no video is kept.
+
+## A deferred recording left a `.frames.mkv` file
+
+With `capture.encoding: 'deferred'` or `'auto'`, a kept recording's frames are
+encoded when its test ends. When that fails, its frames are kept as
+`<outputDir>/<test>_part<N>.frames.mkv` and one warning says why, for example:
+
+- `no post-processing capacity was available in time`: other workers held every
+  post-processing slot (`concurrency.maxPostProcessesPerProcess`,
+  `maxPostProcessesGlobal`) for longer than the wait allowed. Raise the limits,
+  run fewer workers, or use `postProcessStartMode: 'blocking'`.
+- `the deferred-encode budget of …s ran out`: the recording's encodes took
+  longer than twice its length (at least 30 seconds, at most 5 minutes),
+  slot waits included. The host is overloaded; run fewer workers or bound the
+  frame size with `capture.maxWidth`.
+- `the encode reached processing.ffmpeg.timeoutMs`: raise that timeout, or set
+  it to `0` to remove it.
+- `FFmpeg exited with code … while encoding the frame spool: …` or `FFmpeg
+  failed to start: …`: the end of FFmpeg's own message follows. Check free disk
+  space, `processing.ffmpeg.path` and `FFMPEG_PATH`.
+- `the encode was cancelled at shutdown`: the worker ended while encoding.
+
+The warning ends with a command that converts the file, which you can run as is:
+
+```bash
+ffmpeg -i "videos/<test>_part1.frames.mkv" -pix_fmt yuv420p "videos/<test>_part1.converted.webm"
+```
+
+The manifest entry is `failed` with reason `capture-incomplete`; any other
+parts of the recording are still listed and attached. If the warning says the
+frames `could not be moved … and stay at` a path under `.wdio-video-spool`,
+convert that file instead; it is not deleted for you.
+
+A `.frames.mkv` file with no test warning of this kind means a worker crashed or
+was killed while it recorded. At the end of the run the launcher recovers the
+frames it left in `.wdio-video-spool` as `.frames.mkv` files and logs one
+warning naming them; the recovered recording stops at its last held image, and
+the same command converts it. A spool the launcher could not move is named in a
+separate warning and stays where it is, with its directory. Files in the spool
+directory that a worker did not name are never moved or deleted, and a spool
+directory that is a link or junction is not recovered at all: the launcher
+warns that it is not a plain directory.
 
 ## The static report shows ambiguous-test-outcome or unmatched-test-outcome
 

@@ -119,32 +119,62 @@ export default class WdioPuppeteerVideoLauncher
     this._prepared = false
     const runId = this._runId
     const manifestRunContext = this._manifestRunContext
+    // The first error raised is the one thrown: later steps still run, and a
+    // failure of theirs is logged but never replaces it.
+    let failure: { readonly error: unknown } | undefined
     try {
-      if (!manifestRunContext) {
-        return
+      if (manifestRunContext) {
+        await this._completeManifest(manifestRunContext, exitCode)
       }
-      const manifest = await this._runManifestTask(
-        'aggregate manifest journals',
-        () =>
-          this._composition.aggregateManifestRun(manifestRunContext, exitCode),
-      )
-      if (!manifest) {
-        return
-      }
-      await this._runManifestTask('generate the static video report', () =>
-        this._composition.generateVideoReportForRun({
-          outputDir: manifestRunContext.outputDir,
-          runId: manifestRunContext.runId,
-          manifest,
-        }),
-      )
-    } finally {
-      this._manifestRunContext = undefined
-      this._runId = undefined
-      if (runId) {
-        await this._cleanupGlobalSlots(runId)
-      }
+    } catch (error) {
+      failure = { error }
     }
+    this._manifestRunContext = undefined
+    this._runId = undefined
+    if (runId) {
+      try {
+        await this._recoverSpools(runId)
+      } catch (error) {
+        failure ??= { error }
+      }
+      await this._cleanupGlobalSlots(runId)
+    }
+    if (failure) {
+      throw failure.error
+    }
+  }
+
+  private async _completeManifest(
+    manifestRunContext: ManifestRunContext,
+    exitCode: number,
+  ): Promise<void> {
+    const manifest = await this._runManifestTask(
+      'aggregate manifest journals',
+      () =>
+        this._composition.aggregateManifestRun(manifestRunContext, exitCode),
+    )
+    if (!manifest) {
+      return
+    }
+    await this._runManifestTask('generate the static video report', () =>
+      this._composition.generateVideoReportForRun({
+        outputDir: manifestRunContext.outputDir,
+        runId: manifestRunContext.runId,
+        manifest,
+      }),
+    )
+  }
+
+  private async _recoverSpools(runId: string): Promise<void> {
+    await this._runManifestTask('recover orphaned frame spools', () =>
+      this._composition.recoverOrphanedSpools({
+        log: (level, message, details) => {
+          this._log(level, message, details)
+        },
+        outputDir: this._options.outputDir,
+        runId,
+      }),
+    )
   }
 
   private async _cleanupGlobalSlots(runId: string): Promise<void> {

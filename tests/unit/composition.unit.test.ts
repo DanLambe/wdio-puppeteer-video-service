@@ -1,6 +1,7 @@
 import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  nodeDiskSpace,
   nodeFileSystem,
   nodeProcess,
   systemClock,
@@ -11,6 +12,7 @@ import {
 } from '../../src/service/composition.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
 import type { ScreencastRecorder } from '../../src/service/screencast-recorder.js'
+import { DEFAULT_SPOOL_LIMITS } from '../../src/service/spool-budget.js'
 
 describe('launcher and worker composition roots', () => {
   it('composes immutable launcher dependencies with narrow overrides', () => {
@@ -32,21 +34,32 @@ describe('launcher and worker composition roots', () => {
     expect(root.writeLog).toBe(writeLog)
   })
 
+  it('defaults the spool budget to the system disk and the default limits', () => {
+    const root = createWorkerCompositionRoot()
+
+    expect(root.diskSpace).toBe(nodeDiskSpace)
+    expect(root.spoolLimits).toBe(DEFAULT_SPOOL_LIMITS)
+  })
+
   it('composes explicit worker boundaries and grouped component options', async () => {
     const clock = { ...systemClock }
     const fileSystem = { ...nodeFileSystem }
     const processBoundary = { ...nodeProcess }
     const uuid = vi.fn(() => 'fixed-uuid')
+    const diskSpace = { freeBytes: vi.fn(async () => 1) }
+    const spoolLimits = { ...DEFAULT_SPOOL_LIMITS, promoteBytes: 7 }
     const puppeteerBrowser = { connected: true } as PuppeteerBrowser
     const connectPuppeteer = vi.fn(async () => puppeteerBrowser)
-    const recorder = { destroyed: false } as ScreencastRecorder
+    const recorder = { frameCount: 0 } as unknown as ScreencastRecorder
     const startScreencast = vi.fn(async () => recorder)
     const runFfmpeg = vi.fn(async () => true)
     const writeLog = vi.fn()
     const root = createWorkerCompositionRoot({
       clock,
       fileSystem,
+      diskSpace,
       process: processBoundary,
+      spoolLimits,
       uuid,
       connectPuppeteer,
       startScreencast,
@@ -69,6 +82,8 @@ describe('launcher and worker composition roots', () => {
     expect(root.fileSystem).toBe(fileSystem)
     expect(root.process).toBe(processBoundary)
     expect(root.uuid()).toBe('fixed-uuid')
+    expect(root.diskSpace).toBe(diskSpace)
+    expect(root.spoolLimits).toBe(spoolLimits)
     expect(root.writeLog).toBe(writeLog)
     await expect(root.connectPuppeteer({} as never, 100)).resolves.toBe(
       puppeteerBrowser,

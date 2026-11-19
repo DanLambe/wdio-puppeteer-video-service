@@ -42,7 +42,7 @@ export interface BenchmarkOptions {
   readonly encoders: number
 }
 
-// Mirrors `createFfmpegArguments` in src/service/screencast-recorder.ts. The
+// Mirrors `createFfmpegArguments` in src/service/screencast-arguments.ts. The
 // input and filter stages stay identical so the encoder is the only variable.
 export const buildEncoderArguments = (
   settings: EncoderSettings,

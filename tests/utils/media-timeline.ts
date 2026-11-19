@@ -20,6 +20,8 @@ export interface DecodedTimeline {
   /** Decoded frames, each with its own timestamp; no frames are invented. */
   readonly frames: number
   readonly spans: ColorSpan[]
+  /** Each decoded frame's timestamp in seconds, from the first. */
+  readonly timestamps: number[]
 }
 
 const run = (ffmpegPath: string, args: string[]) => {
@@ -120,7 +122,65 @@ export const decodeColorTimeline = (
       start: Number(span.start.toFixed(3)),
       end: Number(span.end.toFixed(3)),
     })),
+    timestamps: timestamps.map((timestamp) =>
+      Number((timestamp - origin).toFixed(3)),
+    ),
   }
+}
+
+/**
+ * The container's own duration in seconds, as `ffmpeg -i` reports it, or
+ * `undefined` for `Duration: N/A`: a file a player cannot size.
+ */
+export const readContainerDuration = (
+  ffmpegPath: string,
+  filePath: string,
+): number | undefined => {
+  // `-i` alone exits 1 for want of an output; its report is all that is read.
+  const report = spawnSync(ffmpegPath, ['-hide_banner', '-i', filePath], {
+    encoding: 'utf8',
+  }).stderr
+  const duration = /Duration: (?:N\/A|(\d+):(\d+):([\d.]+))/u.exec(report)
+  if (!duration) {
+    throw new Error(`FFmpeg reported no duration line: ${report}`)
+  }
+  if (duration[1] === undefined) {
+    return undefined
+  }
+  return (
+    Number(duration[1]) * 3_600 + Number(duration[2]) * 60 + Number(duration[3])
+  )
+}
+
+/**
+ * The color of the first frame at or after `seconds`, found by seeking the
+ * input as a player does rather than decoding from the start. A held frame
+ * repeats about once a second, so inside a hold this is the frame shown.
+ */
+export const decodeColorAt = (
+  ffmpegPath: string,
+  filePath: string,
+  seconds: number,
+): FrameColor => {
+  const pixel = run(ffmpegPath, [
+    '-v',
+    'error',
+    '-ss',
+    seconds.toFixed(3),
+    '-i',
+    filePath,
+    '-frames:v',
+    '1',
+    '-vf',
+    'scale=1:1:flags=area,format=rgb24',
+    '-f',
+    'rawvideo',
+    '-',
+  ]).stdout
+  if (pixel.length < 3) {
+    throw new Error(`No frame decoded at ${seconds.toString()}s`)
+  }
+  return classify(pixel[0] ?? 0, pixel[1] ?? 0, pixel[2] ?? 0)
 }
 
 /** A solid-color PNG of the given size, drawn by FFmpeg. */

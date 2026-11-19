@@ -14,6 +14,7 @@ import type {
 } from './manifest-runtime.js'
 import { describeError } from './normalization.js'
 import { PARALLEL_MODE_UNSUPPORTED_REASON } from './parallel-mode.js'
+import { isVideoArtifactPath } from './paths.js'
 import type {
   RecordingEntity,
   RecordingEntityOutcome,
@@ -54,6 +55,11 @@ export interface RecordingMediaFinalization {
   readonly captureFailure?: string
   readonly deferred: boolean
   readonly paths: readonly string[]
+  /**
+   * Why processing the kept segments failed. The paths are then the files on
+   * disk, processed or not, and the entry is recorded as failed.
+   */
+  readonly processingFailure?: { readonly error: unknown }
   /** Tabs of the retained segments, keyed by part number. */
   readonly tabs?: ReadonlyMap<number, SegmentTab>
 }
@@ -387,9 +393,11 @@ export class WorkerRecordingCoordinator
     })
     let allureError: Error | undefined
     let captureFailure: string | undefined
+    let processingFailure: { readonly error: unknown } | undefined
     try {
       const finalized = await this.actions.finalizeMedia(passed, keepArtifacts)
       captureFailure = finalized.captureFailure
+      processingFailure = finalized.processingFailure
       await this.manifest?.completeCurrent(
         createCompletedManifestOptions({
           captureFailed: captureFailure !== undefined,
@@ -398,11 +406,15 @@ export class WorkerRecordingCoordinator
           result,
           paths: finalized.paths,
           processing: this.options.processing,
+          ...(processingFailure
+            ? { processingFailure: describeError(processingFailure.error) }
+            : {}),
           ...(finalized.tabs ? { tabs: finalized.tabs } : {}),
         }),
       )
+      // Media that failed processing is still the test's evidence.
       const allureResult = await this.allure?.attachRetainedVideos(
-        finalized.paths,
+        finalized.paths.filter(isVideoArtifactPath),
         passed,
       )
       allureError = allureResult?.error
@@ -416,12 +428,17 @@ export class WorkerRecordingCoordinator
           processingOutcome: 'failed',
         })
         .catch(() => undefined)
-      throw error
+      // A later reporting error never hides why processing failed.
+      throw processingFailure ? processingFailure.error : error
     } finally {
       await this.actions.resetRecording()
       this.activeRecordingRetryCount = 0
     }
 
+    if (processingFailure) {
+      // Thrown by processing itself, as before the entry was reported.
+      throw processingFailure.error
+    }
     // Already warned when the segment stopped; the partial file stays
     // attached and in the manifest for diagnosis.
     if (captureFailure && this.options.failurePolicy === 'error') {

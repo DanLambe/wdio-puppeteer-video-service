@@ -1,5 +1,3 @@
-import type { WriteStream } from 'node:fs'
-import { createWriteStream } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import fs from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -8,11 +6,18 @@ import { isProcessAlive } from './retry-state.js'
 export interface ClockBoundary {
   clearInterval(timer: NodeJS.Timeout): void
   clearTimeout(timer: NodeJS.Timeout): void
-  delay(milliseconds: number): Promise<void>
+  /** Resolves after `milliseconds`, or early, quietly, once `signal` aborts. */
+  delay(milliseconds: number, signal?: AbortSignal): Promise<void>
   now(): number
   queueMicrotask(callback: () => void): void
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout
   setTimeout(callback: () => void, milliseconds: number): NodeJS.Timeout
+}
+
+/** Free space on the volume that holds a directory. */
+export interface DiskSpaceBoundary {
+  /** Bytes available to this process; rejects when they cannot be read. */
+  freeBytes(directory: string): Promise<number>
 }
 
 export interface FileStatsBoundary {
@@ -24,7 +29,6 @@ export interface FileStatsBoundary {
 }
 
 export interface FileSystemBoundary {
-  createWriteStream(filePath: string, flags: string): WriteStream
   mkdir(dirPath: string): Promise<void>
   openExclusive(filePath: string): Promise<FileHandle>
   readText(filePath: string): Promise<string>
@@ -46,8 +50,10 @@ export const systemClock: ClockBoundary = {
   clearTimeout(timer): void {
     clearTimeout(timer)
   },
-  async delay(milliseconds): Promise<void> {
-    await delay(milliseconds)
+  async delay(milliseconds, signal): Promise<void> {
+    // Node rejects the wait only when it is aborted, which ends it early by
+    // design rather than failing it.
+    await delay(milliseconds, undefined, { signal }).catch(() => undefined)
   },
   now(): number {
     return Date.now()
@@ -64,9 +70,6 @@ export const systemClock: ClockBoundary = {
 }
 
 export const nodeFileSystem: FileSystemBoundary = {
-  createWriteStream(filePath, flags): WriteStream {
-    return createWriteStream(filePath, { flags })
-  },
   async mkdir(dirPath): Promise<void> {
     await fs.mkdir(dirPath, { recursive: true })
   },
@@ -81,6 +84,13 @@ export const nodeFileSystem: FileSystemBoundary = {
   },
   async unlink(filePath): Promise<void> {
     await fs.unlink(filePath)
+  },
+}
+
+export const nodeDiskSpace: DiskSpaceBoundary = {
+  async freeBytes(directory): Promise<number> {
+    const stats = await fs.statfs(directory)
+    return Number(stats.bavail) * Number(stats.bsize)
   },
 }
 

@@ -10,12 +10,16 @@ export interface MediaProbeResult {
   codec: string
   width: number
   height: number
+  /** The container's duration, or the decode time when it has none. */
   durationSeconds: number
+  /**
+   * The duration the container itself declares, which players size their
+   * timeline from; absent when FFmpeg reports `Duration: N/A`.
+   */
+  containerDurationSeconds?: number
   frameCount: number
   /** Decoded pixel format, such as `yuv420p`, when FFmpeg reports one. */
   pixelFormat?: string
-  /** The stream's nominal frames per second, when FFmpeg reports them. */
-  frameRate?: number
 }
 
 export interface MediaProbeOptions {
@@ -50,30 +54,38 @@ const parseContainer = (output: string): MediaContainer => {
   throw new Error(`Unable to determine media container from FFmpeg output`)
 }
 
-const parseDurationSeconds = (output: string): number => {
+const toSeconds = (match: RegExpExecArray | RegExpMatchArray): number => {
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  const seconds = Number(match[3])
+  return hours * 3600 + minutes * 60 + seconds
+}
+
+const parseContainerDuration = (output: string): number | undefined => {
   const metadataDuration = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(
     output,
   )
+  return metadataDuration ? toSeconds(metadataDuration) : undefined
+}
+
+const parseDurationSeconds = (output: string): number => {
+  const containerDuration = parseContainerDuration(output)
+  if (containerDuration !== undefined) {
+    return containerDuration
+  }
   const decodedTimestamps = [
     ...output.matchAll(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/g),
   ]
-  const durationMatch = metadataDuration ?? decodedTimestamps.at(-1)
-  if (!durationMatch) {
+  const lastDecoded = decodedTimestamps.at(-1)
+  if (!lastDecoded) {
     throw new Error('Unable to determine media duration from FFmpeg output')
   }
-
-  const hours = Number(durationMatch[1])
-  const minutes = Number(durationMatch[2])
-  const seconds = Number(durationMatch[3])
-  return hours * 3600 + minutes * 60 + seconds
+  return toSeconds(lastDecoded)
 }
 
 const parseVideoStream = (
   output: string,
-): Pick<
-  MediaProbeResult,
-  'codec' | 'width' | 'height' | 'pixelFormat' | 'frameRate'
-> => {
+): Pick<MediaProbeResult, 'codec' | 'width' | 'height' | 'pixelFormat'> => {
   const videoLine = output
     .split(/\r?\n/u)
     .find((line) => line.includes('Video:'))
@@ -90,15 +102,11 @@ const parseVideoStream = (
   const pixelFormat = /Video:\s*[^,]+,\s*([a-z0-9_]+)/u.exec(
     videoLine ?? '',
   )?.[1]
-  const frameRate = Number(
-    /,\s*(\d+(?:\.\d+)?)\s*fps\b/u.exec(videoLine ?? '')?.[1],
-  )
   return {
     codec: codecMatch[1]?.toLowerCase() ?? '',
     width: Number(dimensionsMatch[1]),
     height: Number(dimensionsMatch[2]),
     ...(pixelFormat ? { pixelFormat } : {}),
-    ...(frameRate > 0 ? { frameRate } : {}),
   }
 }
 
@@ -124,10 +132,14 @@ const parseFrameCount = (output: string): number => {
 }
 
 export const parseFfmpegProbeOutput = (output: string): MediaProbeResult => {
+  const containerDurationSeconds = parseContainerDuration(output)
   return {
     container: parseContainer(output),
     ...parseVideoStream(output),
     durationSeconds: parseDurationSeconds(output),
+    ...(containerDurationSeconds === undefined
+      ? {}
+      : { containerDurationSeconds }),
     frameCount: parseFrameCount(output),
   }
 }

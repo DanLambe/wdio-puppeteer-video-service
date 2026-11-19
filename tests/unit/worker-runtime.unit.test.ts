@@ -33,10 +33,10 @@ const createHarness = () => {
     .mockImplementation(async () => {
       events.push('release')
     })
-  const stop = vi
-    .spyOn(RecordingController.prototype, 'stopRecording')
+  const finalizeKept = vi
+    .spyOn(RecordingController.prototype, 'finalizeWithoutOutcome')
     .mockImplementation(async () => {
-      events.push('stop')
+      events.push('finalize-kept')
     })
   const reset = vi
     .spyOn(RecordingController.prototype, 'reset')
@@ -62,6 +62,9 @@ const createHarness = () => {
   const ownsResources = vi
     .spyOn(RecordingController.prototype, 'ownsResources', 'get')
     .mockReturnValue(false)
+  const ensureReady = vi
+    .spyOn(FfmpegRuntime.prototype, 'ensureReady')
+    .mockResolvedValue(true)
   const coordinator: WorkerRecordingCoordinatorPort = {
     framework: 'mocha',
     isSpecScope: false,
@@ -94,13 +97,14 @@ const createHarness = () => {
     terminate,
     resume,
     release,
-    stop,
+    finalizeKept,
     reset,
     flushMedia,
     flushManifest,
     active,
     slug,
     ownsResources,
+    ensureReady,
     writeLog,
   }
 }
@@ -181,9 +185,9 @@ describe('worker runtime hook sequencing', () => {
   })
 
   it.each([
-    { specScope: false, slug: 'test', expected: ['stop', 'reset'] },
+    { specScope: false, slug: 'test', expected: ['finalize-kept', 'reset'] },
     { specScope: true, slug: 'spec', expected: ['spec'] },
-    { specScope: true, slug: '', expected: ['stop', 'reset'] },
+    { specScope: true, slug: '', expected: ['finalize-kept', 'reset'] },
   ])(
     'finalizes active capture for scope=$specScope slug=$slug',
     async ({ specScope, slug, expected }) => {
@@ -336,6 +340,81 @@ describe('worker runtime hook sequencing', () => {
     expect(warmUp).toHaveBeenCalledOnce()
   })
 
+  it('looks for FFmpeg after the session reset, alongside the browser warm-up', async () => {
+    const harness = createHarness()
+    const order: string[] = []
+    const warmUpDone = Promise.withResolvers<void>()
+    vi.spyOn(FfmpegRuntime.prototype, 'resetForSession').mockImplementation(
+      () => {
+        order.push('reset')
+      },
+    )
+    vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp').mockImplementation(
+      async () => {
+        order.push('warm-up start')
+        await warmUpDone.promise
+        order.push('warm-up end')
+      },
+    )
+    const ffmpegDone = Promise.withResolvers<boolean>()
+    harness.ensureReady.mockImplementation(async () => {
+      order.push('ffmpeg start')
+      const ready = await ffmpegDone.promise
+      order.push('ffmpeg end')
+      return ready
+    })
+
+    let started = false
+    const initialization = initializeWorker(harness.worker).then(() => {
+      started = true
+    })
+    await vi.waitFor(() => {
+      expect(order).toEqual(['reset', 'warm-up start', 'ffmpeg start'])
+    })
+    warmUpDone.resolve()
+    await vi.waitFor(() => {
+      expect(order).toContain('warm-up end')
+    })
+    expect(started).toBe(false)
+    ffmpegDone.resolve(true)
+    await initialization
+
+    expect(order.at(-1)).toBe('ffmpeg end')
+    expect(harness.ensureReady).toHaveBeenCalledOnce()
+  })
+
+  it('leaves recording enabled and quiet when FFmpeg is missing at session start', async () => {
+    const harness = createHarness()
+    harness.ensureReady.mockResolvedValue(false)
+
+    await expect(initializeWorker(harness.worker)).resolves.toBeUndefined()
+
+    // The runtime's own warning is the only report; recording starts still ask
+    // the runtime, which answers from the finished check.
+    expect(harness.writeLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'warn',
+      expect.stringContaining('Recording disabled for this worker'),
+      undefined,
+    )
+  })
+
+  it('does not fail the session when the FFmpeg check throws', async () => {
+    const harness = createHarness()
+    harness.ensureReady.mockRejectedValue(new Error('version hook failed'))
+
+    await expect(initializeWorker(harness.worker)).resolves.toBeUndefined()
+
+    expect(harness.writeLog).toHaveBeenCalledWith(
+      expect.anything(),
+      'warn',
+      expect.stringContaining(
+        'FFmpeg readiness check failed: version hook failed',
+      ),
+      undefined,
+    )
+  })
+
   it('starts the session when the browser warm-up fails', async () => {
     vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp').mockRejectedValue(
       new Error('execute failed'),
@@ -345,8 +424,9 @@ describe('worker runtime hook sequencing', () => {
     await expect(initializeWorker(harness.worker)).resolves.toBeUndefined()
   })
 
-  it('does not warm up a browser that cannot record', async () => {
+  it('does not warm up or look for FFmpeg in a browser that cannot record', async () => {
     const warmUp = vi.spyOn(PuppeteerCaptureEngine.prototype, 'warmUp')
+    const ensureReady = vi.spyOn(FfmpegRuntime.prototype, 'ensureReady')
     const mkdir = vi.fn(async () => {
       throw new Error('read-only file system')
     })
@@ -369,6 +449,7 @@ describe('worker runtime hook sequencing', () => {
     } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2])
 
     expect(warmUp).not.toHaveBeenCalled()
+    expect(ensureReady).not.toHaveBeenCalled()
   })
 
   it('rejects multiremote capture without touching output files or capture commands', async () => {
@@ -378,6 +459,7 @@ describe('worker runtime hook sequencing', () => {
       RecordingController.prototype,
       'beforeWindowCommand',
     )
+    const ensureReady = vi.spyOn(FfmpegRuntime.prototype, 'ensureReady')
     const worker = new WdioPuppeteerVideoWorkerRuntime(
       {},
       undefined,
@@ -397,6 +479,7 @@ describe('worker runtime hook sequencing', () => {
 
     expect(mkdir).not.toHaveBeenCalled()
     expect(beforeWindow).not.toHaveBeenCalled()
+    expect(ensureReady).not.toHaveBeenCalled()
     expect(writeLog).toHaveBeenCalledWith(
       'warn',
       'warn',

@@ -14,6 +14,7 @@ import type {
 } from '../types.js'
 import {
   CI_TRANSCODE_FFMPEG_ARGS,
+  DEFAULT_CAPTURE_ENCODING,
   DEFAULT_MAX_FILENAME_LENGTH,
   DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
   DEFAULT_RECORDING_START_TIMEOUT_MS,
@@ -92,6 +93,7 @@ export const resolveServiceConfiguration = (
       framePriming: capture.framePriming ?? profile !== 'ci',
       connectionTimeoutMs:
         capture.connectionTimeoutMs ?? DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS,
+      encoding: capture.encoding ?? DEFAULT_CAPTURE_ENCODING,
       ...(capture.crop ? { crop: capture.crop } : {}),
     },
     processing: {

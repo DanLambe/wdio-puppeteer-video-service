@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   describeError,
   getEffectiveMaxFilenameLength,
-  isBenignStreamWriteError,
   normalizeMergeOptions,
   normalizePatternList,
   normalizeTranscodeOptions,
@@ -66,29 +65,6 @@ describe('normalization helpers', () => {
     ).toEqual({
       deleteSegments: true,
     })
-  })
-
-  it('classifies only known stream-shutdown errors as benign', () => {
-    expect(
-      isBenignStreamWriteError({
-        name: 'Error',
-        message: 'broken pipe',
-        code: 'EPIPE',
-      }),
-    ).toBe(true)
-    expect(
-      isBenignStreamWriteError({
-        name: 'Error',
-        message: 'Cannot call write after a stream was destroyed',
-      }),
-    ).toBe(true)
-    expect(
-      isBenignStreamWriteError({
-        name: 'Error',
-        message: 'permission denied',
-        code: 'EACCES',
-      }),
-    ).toBe(false)
   })
 
   it('normalizes pattern lists and removes invalid or duplicate values', () => {

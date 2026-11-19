@@ -1,7 +1,7 @@
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { PassThrough } from 'node:stream'
 import type { Page, Viewport } from 'puppeteer-core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -10,7 +10,10 @@ import {
   nodeFileSystem,
   systemClock,
 } from '../../src/service/boundaries.js'
-import type { StartScreencastOptions } from '../../src/service/capture.js'
+import {
+  type StartScreencastOptions,
+  startScreencast,
+} from '../../src/service/capture.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type { ActiveSegment } from '../../src/service/constants.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
@@ -20,12 +23,19 @@ import {
   PuppeteerCaptureEngine,
 } from '../../src/service/puppeteer-capture-engine.js'
 import type {
+  ScreencastOutput,
   ScreencastQueueStats,
   ScreencastRecorder,
 } from '../../src/service/screencast-recorder.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  SpoolBudget,
+} from '../../src/service/spool-budget.js'
+import type { PromotionPlan } from '../../src/service/spool-promotion.js'
 
-type FakeRecorder = PassThrough & {
+interface FakeRecorder {
   abort: ReturnType<typeof vi.fn<() => Promise<void>>>
+  output: ScreencastOutput
   ffmpegResult: {
     code: number | null
     diagnostic: string
@@ -36,6 +46,16 @@ type FakeRecorder = PassThrough & {
   queueStats: ScreencastQueueStats
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>
 }
+
+// FFmpeg writes the segment file itself; the engine never streams into it.
+const encode = async (filePath: string, bytes: string): Promise<void> => {
+  await fs.appendFile(filePath, bytes)
+}
+
+const lockedError = (code: string): NodeJS.ErrnoException =>
+  Object.assign(new Error(`${code}: resource busy or locked, unlink`), {
+    code,
+  })
 
 const idleQueueStats: ScreencastQueueStats = {
   highWaterBlocks: 0,
@@ -53,20 +73,15 @@ const createTempDir = async (): Promise<string> => {
   return tempDir
 }
 
-const createRecorder = (): FakeRecorder => {
-  const recorder = new PassThrough() as FakeRecorder
-  recorder.abort = vi.fn(async () => {
-    recorder.destroy()
-  })
-  recorder.frameCount = 1
-  recorder.ffmpegResult = { code: 0, diagnostic: '', signal: null }
-  recorder.incompleteReason = undefined
-  recorder.queueStats = idleQueueStats
-  recorder.stop = vi.fn(async () => {
-    recorder.end()
-  })
-  return recorder
-}
+const createRecorder = (): FakeRecorder => ({
+  abort: vi.fn(async () => {}),
+  frameCount: 1,
+  output: { kind: 'encoded' as const },
+  ffmpegResult: { code: 0, diagnostic: '', signal: null },
+  incompleteReason: undefined,
+  queueStats: idleQueueStats,
+  stop: vi.fn(async () => {}),
+})
 
 const createHarness = (
   options: {
@@ -75,6 +90,7 @@ const createHarness = (
     fileSystem?: FileSystemBoundary
     framePriming?: boolean
     recorder?: FakeRecorder
+    reserveOutput?: (plannedPath: string) => Promise<string>
     sessionToken?: string
   } = {},
 ) => {
@@ -148,6 +164,7 @@ const createHarness = (
     onProtocolChanged: (protocol) => {
       protocols.push(protocol)
     },
+    ...(options.reserveOutput ? { reserveOutput: options.reserveOutput } : {}),
     session,
     startScreencast,
     uuid: () => {
@@ -348,7 +365,27 @@ describe('Puppeteer capture engine', () => {
     expect(harness.markerIds[0]).toContain('wdio-video-pending-')
   })
 
-  it('streams a segment to disk and returns a clean stopped capture', async () => {
+  it('gives the encoder an absolute path for a relative output directory', async () => {
+    const tempDir = await createTempDir()
+    const absolutePath = path.join(tempDir, 'capture.webm')
+    const relativePath = path.relative(process.cwd(), absolutePath)
+    const harness = createHarness()
+
+    await expect(startCapture(harness, relativePath)).resolves.toEqual({
+      started: true,
+    })
+    expect(harness.startScreencast).toHaveBeenCalledWith(
+      harness.page,
+      expect.objectContaining({ outputPath: absolutePath }),
+    )
+    await encode(absolutePath, 'recorded-bytes')
+    const stopped = await harness.engine.stopCapture()
+
+    // The segment keeps the path it was planned with.
+    expect(stopped.segment?.recordingPath).toBe(relativePath)
+  })
+
+  it('has the encoder write its reserved segment file and returns a clean stopped capture', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness()
@@ -356,12 +393,20 @@ describe('Puppeteer capture engine', () => {
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
     })
-    harness.recorder.write('recorded-bytes')
+    // The encoder gets the path itself: a file it can seek in carries the
+    // recording's duration and seek index.
+    expect(harness.startScreencast).toHaveBeenCalledWith(
+      harness.page,
+      expect.objectContaining({ format: 'webm', outputPath }),
+    )
+    await encode(outputPath, 'recorded-bytes')
     const stopped = await harness.engine.stopCapture()
 
     expect(stopped.streamOk).toBe(true)
     expect(stopped.segment?.recordingPath).toBe(outputPath)
     expect(harness.session.hasCapture).toBe(false)
+    // A kept segment waits for a frame still on its way.
+    expect(harness.recorder.stop).toHaveBeenCalledWith({})
     await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe(
       'recorded-bytes',
     )
@@ -387,9 +432,18 @@ describe('Puppeteer capture engine', () => {
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
     })
-    harness.recorder.write('partial-bytes')
+    await encode(outputPath, 'partial-bytes')
+    // FFmpeg holds the file open until it has closed; Windows cannot delete
+    // it before then.
+    const aborted = Promise.withResolvers<void>()
+    harness.recorder.abort.mockReturnValue(aborted.promise)
 
-    const stopped = await harness.engine.stopCapture({ discard: true })
+    const stopping = harness.engine.stopCapture({ discard: true })
+    await vi.waitFor(() => expect(harness.recorder.abort).toHaveBeenCalled())
+    await new Promise((resolve) => setImmediate(resolve))
+    await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe('partial-bytes')
+    aborted.resolve()
+    const stopped = await stopping
 
     // Retention already decided nothing will read this file. A graceful stop
     // would drain whatever is still queued, flush, and finish writing bytes
@@ -398,7 +452,11 @@ describe('Puppeteer capture engine', () => {
     expect(harness.recorder.abort).toHaveBeenCalledOnce()
     expect(harness.recorder.stop).not.toHaveBeenCalled()
     // A healthy discard is not a failure, and the abort is not one either.
-    expect(stopped).toEqual({ segment: undefined, streamOk: true })
+    expect(stopped).toEqual({
+      capturedSeconds: expect.any(Number),
+      segment: undefined,
+      streamOk: true,
+    })
     expect(harness.session.hasCapture).toBe(false)
     await expect(fs.access(outputPath)).rejects.toThrow()
     expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
@@ -426,7 +484,6 @@ describe('Puppeteer capture engine', () => {
         // the abort notices the exit its close event has not reported yet.
         harness.recorder.abort.mockImplementation(async () => {
           harness.recorder.incompleteReason = reason
-          harness.recorder.destroy()
         })
       } else {
         harness.recorder.incompleteReason = reason
@@ -435,6 +492,7 @@ describe('Puppeteer capture engine', () => {
       await expect(
         harness.engine.stopCapture({ discard: true }),
       ).resolves.toEqual({
+        capturedSeconds: expect.any(Number),
         incompleteReason: reason,
         segment: undefined,
         streamOk: true,
@@ -460,7 +518,7 @@ describe('Puppeteer capture engine', () => {
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
     })
-    harness.recorder.write('recorded-bytes')
+    await encode(outputPath, 'recorded-bytes')
 
     const stopped = await harness.engine.stopCapture({ discard: false })
 
@@ -472,7 +530,7 @@ describe('Puppeteer capture engine', () => {
     )
   })
 
-  it('clears and unreferences stream timeouts after clean completion', async () => {
+  it('clears and unreferences the stop deadline after clean completion', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const timers: Array<{ unref: ReturnType<typeof vi.fn> }> = []
@@ -489,14 +547,14 @@ describe('Puppeteer capture engine', () => {
     const harness = createHarness({ clock })
 
     await startCapture(harness, outputPath)
-    harness.recorder.write('recorded-bytes')
+    await encode(outputPath, 'recorded-bytes')
     await expect(harness.engine.stopCapture()).resolves.toMatchObject({
       streamOk: true,
     })
 
     // The page lookup's deadlines (listing pages, reading one marker) and the
-    // two stream timeouts.
-    expect(timers).toHaveLength(4)
+    // recorder's stop deadline. Nothing waits on a write stream any more.
+    expect(timers).toHaveLength(3)
     expect(timers.every((timer) => timer.unref.mock.calls.length === 1)).toBe(
       true,
     )
@@ -524,7 +582,6 @@ describe('Puppeteer capture engine', () => {
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
     })
-    harness.recorder.end()
     await harness.engine.stopCapture()
 
     expect(
@@ -546,7 +603,6 @@ describe('Puppeteer capture engine', () => {
     await expect(startCapture(harness, outputPath)).resolves.toEqual({
       started: true,
     })
-    harness.recorder.end()
     await harness.engine.stopCapture()
 
     expect(frames.warmups()).toBe(2)
@@ -637,6 +693,7 @@ describe('Puppeteer capture engine', () => {
     // The encoder exited cleanly with the frames it accepted, but the capture
     // is still incomplete: never transcode or merge it as a whole recording.
     await expect(harness.engine.stopCapture()).resolves.toEqual({
+      capturedSeconds: expect.any(Number),
       incompleteReason: reason,
       segment: expect.objectContaining({ outputPath, transcode: false }),
       streamOk: false,
@@ -679,9 +736,7 @@ describe('Puppeteer capture engine', () => {
       started: true,
     })
     // The advancing clock only drives startup; release the segment directly.
-    const { segment } = harness.session.detachCapture()
-    harness.recorder.end()
-    await segment?.writeStreamDone
+    harness.session.detachCapture()
 
     expect(harness.logs).toContainEqual({
       level: 'debug',
@@ -692,31 +747,39 @@ describe('Puppeteer capture engine', () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness()
+    // As when FFmpeg cannot open the output: the recorder has already
+    // released its encoder when startup rejects.
     harness.startScreencast.mockRejectedValueOnce(
-      new Error('screencast unavailable'),
+      new Error(
+        'FFmpeg exited with code 1 during screencast startup: Error opening output file',
+      ),
     )
 
     await expect(startCapture(harness, outputPath)).rejects.toThrow(
-      'screencast unavailable',
+      'Error opening output file',
     )
 
     expect(harness.recorder.stop).not.toHaveBeenCalled()
+    expect(harness.session.hasCapture).toBe(false)
     await expect(fs.stat(outputPath)).rejects.toThrow()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
   })
 
   it('releases a partially created segment and its reserved file exactly once', async () => {
     const outputPath = path.join(await createTempDir(), 'partial.webm')
     const unlink = vi.fn(nodeFileSystem.unlink)
-    const harness = createHarness({ fileSystem: { ...nodeFileSystem, unlink } })
-    vi.spyOn(harness.recorder, 'pipe').mockImplementation(() => {
-      throw new Error('pipe failed')
+    const harness = createHarness({
+      fileSystem: { ...nodeFileSystem, unlink },
+      framePriming: true,
+    })
+    // Startup fails after the encoder is running: frame priming throws.
+    vi.mocked(harness.page.viewport).mockImplementation(() => {
+      throw new Error('priming failed')
     })
     await expect(startCapture(harness, outputPath)).rejects.toThrow(
-      'pipe failed',
+      'priming failed',
     )
     expect(harness.recorder.stop).toHaveBeenCalledOnce()
-    expect(harness.recorder.destroyed).toBe(true)
-    expect(harness.recorder.listenerCount('error')).toBe(0)
     expect(harness.session.hasCapture).toBe(false)
     expect(unlink).toHaveBeenCalledExactlyOnceWith(outputPath)
     await harness.engine.resetRecording()
@@ -741,35 +804,46 @@ describe('Puppeteer capture engine', () => {
     expect(harness.startScreencast).not.toHaveBeenCalled()
   })
 
-  it('cleans recorder and reservation state when piping fails', async () => {
+  it('removes a failed start file only once its encoder has stopped', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
-    const harness = createHarness()
-    vi.spyOn(harness.recorder, 'pipe').mockImplementation(() => {
-      const error = new Error('pipe closed') as NodeJS.ErrnoException
-      error.code = 'EPIPE'
-      throw error
+    const harness = createHarness({ framePriming: true })
+    vi.mocked(harness.page.viewport).mockImplementation(() => {
+      throw new Error('priming failed')
     })
+    const stopped = Promise.withResolvers<void>()
+    harness.recorder.stop.mockReturnValue(stopped.promise)
 
-    await expect(startCapture(harness, outputPath)).rejects.toThrow(
-      'pipe closed',
+    const starting = startCapture(harness, outputPath).catch(
+      (error: unknown) => error,
     )
+    await vi.waitFor(() => expect(harness.recorder.stop).toHaveBeenCalled())
+    await encode(outputPath, 'encoder-still-writing')
+    await new Promise((resolve) => setImmediate(resolve))
+    // FFmpeg still owns the file; on Windows it could not be deleted yet.
+    await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe(
+      'encoder-still-writing',
+    )
+    stopped.resolve()
 
-    expect(harness.recorder.stop).toHaveBeenCalledOnce()
-    expect(harness.recorder.destroyed).toBe(true)
+    expect(await starting).toMatchObject({ message: 'priming failed' })
     expect(harness.session.hasCapture).toBe(false)
     await expect(fs.stat(outputPath)).rejects.toThrow()
   })
 
-  it('marks a segment unclean when its stream reports EPIPE', async () => {
+  it('keeps the file an encoder failed to finish as unclean media', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness()
     await startCapture(harness, outputPath)
-    harness.recorder.write('recoverable-media')
-    const error = new Error('broken pipe') as NodeJS.ErrnoException
-    error.code = 'EPIPE'
-    harness.session.activeSegment?.onWriteStreamError(error)
+    await encode(outputPath, 'recoverable-media')
+    // FFmpeg's own write failure, such as a full disk, replaces the stream
+    // error Node used to report.
+    harness.recorder.ffmpegResult = {
+      code: 1,
+      diagnostic: 'Error writing trailer: No space left on device',
+      signal: null,
+    }
 
     const stopped = await harness.engine.stopCapture()
 
@@ -783,116 +857,48 @@ describe('Puppeteer capture engine', () => {
     await expect(fs.readFile(outputPath, 'utf8')).resolves.toBe(
       'recoverable-media',
     )
-  })
-
-  it('reports non-benign stream and recorder errors once per segment', async () => {
-    const tempDir = await createTempDir()
-    const outputPath = path.join(tempDir, 'capture.webm')
-    const harness = createHarness()
-    await startCapture(harness, outputPath)
-    harness.recorder.write('recoverable-media')
-    const writeError = new Error('disk unavailable') as NodeJS.ErrnoException
-    writeError.code = 'EIO'
-    harness.session.activeSegment?.onWriteStreamError(writeError)
-    harness.session.activeSegment?.onWriteStreamError(writeError)
-    harness.session.activeSegment?.onRecorderError(new Error('target lost'))
-    harness.session.activeSegment?.onRecorderError(new Error('duplicate'))
-
-    await harness.engine.stopCapture()
-
-    expect(
-      harness.logs.filter(({ message }) =>
-        message.includes('Recording stream error: disk unavailable'),
-      ),
-    ).toHaveLength(1)
-    expect(
-      harness.logs.filter(({ message }) =>
-        message.includes('Recorder stream error: target lost'),
-      ),
-    ).toHaveLength(1)
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message:
+          '[WdioPuppeteerVideoService] FFmpeg exited with code 1 while recording: Error writing trailer: No space left on device',
+      },
+    ])
   })
 
   it('returns an empty result when no capture is attached', async () => {
     const harness = createHarness()
 
     await expect(harness.engine.stopCapture()).resolves.toEqual({
+      capturedSeconds: 0,
       segment: undefined,
       streamOk: false,
     })
   })
 
-  it('contains a rejected stream completion after an earlier write error', async () => {
-    const harness = createHarness()
-    const writeStreamDone = Promise.reject(new Error('stream failed'))
-    const recorder = {
-      destroyed: false,
-      destroy: vi.fn(),
-      ffmpegResult: { code: 0, diagnostic: '' },
-      frameCount: 1,
-      off: vi.fn(),
-      queueStats: idleQueueStats,
-      stop: vi.fn(async () => {}),
-    } as unknown as ScreencastRecorder
-    const segment = {
-      onRecorderError: vi.fn(),
-      onWriteStreamError: vi.fn(),
-      outputFormat: 'webm',
-      outputPath: 'capture.webm',
-      recordingFormat: 'webm',
-      recordingPath: 'capture.webm',
-      transcode: false,
-      transcodeOptions: { deleteOriginal: true },
-      writeStream: { off: vi.fn() },
-      writeStreamDone,
-      writeStreamErrored: true,
-    } as unknown as ActiveSegment
-    harness.session.beginRecording('write-error')
-    harness.session.attachCapture({
-      recorder,
-      segment,
-      windowHandle: undefined,
-    })
-
-    await expect(harness.engine.stopCapture()).resolves.toMatchObject({
-      streamOk: false,
-    })
-  })
-
-  it('aborts a stalled recorder and preserves the flushed file as unclean', async () => {
+  it('aborts a stalled recorder and preserves the written file as unclean', async () => {
     vi.useFakeTimers()
-    const harness = createHarness()
+    const unlink = vi.fn(async () => {})
+    const harness = createHarness({
+      fileSystem: { ...nodeFileSystem, unlink },
+    })
     const stop = vi.fn(() => new Promise<void>(() => {}))
-    const destroy = vi.fn()
-    const { promise: writeStreamDone, resolve: finishFile } =
-      Promise.withResolvers<void>()
     const recorder = {
-      abort: vi.fn(async () => {
-        recorder.destroy()
-      }),
-      destroyed: false,
-      destroy() {
-        recorder.destroyed = true
-        destroy()
-      },
+      abort: vi.fn(async () => {}),
+      output: { kind: 'encoded' as const },
       ffmpegResult: { code: null, diagnostic: '', signal: 'SIGKILL' },
       frameCount: 1,
-      off: vi.fn(),
       queueStats: idleQueueStats,
       stop,
     } as unknown as ScreencastRecorder
-    const segment = {
-      onRecorderError: vi.fn(),
-      onWriteStreamError: vi.fn(),
+    const segment: ActiveSegment = {
       outputFormat: 'mp4',
       outputPath: 'capture.mp4',
       recordingFormat: 'webm',
       recordingPath: 'capture.webm',
       transcode: true,
       transcodeOptions: { deleteOriginal: true },
-      writeStream: { destroyed: false, end: vi.fn(finishFile), off: vi.fn() },
-      writeStreamDone,
-      writeStreamErrored: false,
-    } as unknown as ActiveSegment
+    }
     harness.session.beginRecording('timeout')
     harness.session.attachCapture({
       recorder,
@@ -911,9 +917,9 @@ describe('Puppeteer capture engine', () => {
       },
     })
     expect(stop).toHaveBeenCalledOnce()
-    expect(destroy).toHaveBeenCalledOnce()
     expect(recorder.abort).toHaveBeenCalledOnce()
-    expect(segment.writeStream.end).toHaveBeenCalledOnce()
+    // What the killed encoder had written stays for diagnosis.
+    expect(unlink).not.toHaveBeenCalled()
     // One readable line per timeout; the logger receives no Error to print a
     // stack for. The abort's own SIGKILL is not reported as an encoder failure.
     expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
@@ -925,96 +931,122 @@ describe('Puppeteer capture engine', () => {
     ])
   })
 
-  it('destroys a write stream that exceeds the bounded completion timeout', async () => {
-    vi.useFakeTimers()
-    const harness = createHarness()
-    let rejectCompletion: ((error: Error) => void) | undefined
-    const writeStreamDone = new Promise<void>((_resolve, reject) => {
-      rejectCompletion = reject
-    })
-    const writeStream = {
-      destroyed: false,
-      destroy(error: Error) {
-        writeStream.destroyed = true
-        rejectCompletion?.(error)
-      },
-      off: vi.fn(),
-    }
-    const recorder = {
-      destroyed: false,
-      destroy: vi.fn(),
-      ffmpegResult: { code: 0, diagnostic: '' },
-      frameCount: 1,
-      off: vi.fn(),
-      queueStats: idleQueueStats,
-      stop: vi.fn(async () => {}),
-    } as unknown as ScreencastRecorder
-    const segment = {
-      onRecorderError: vi.fn(),
-      onWriteStreamError: vi.fn(),
-      outputFormat: 'mp4',
-      outputPath: 'capture.mp4',
-      recordingFormat: 'webm',
-      recordingPath: 'capture.webm',
-      transcode: true,
-      transcodeOptions: { deleteOriginal: true },
-      writeStream,
-      writeStreamDone,
-      writeStreamErrored: false,
-    } as unknown as ActiveSegment
-    harness.session.beginRecording('timeout')
-    harness.session.attachCapture({
-      recorder,
-      segment,
-      windowHandle: undefined,
-    })
-
-    const stopTask = harness.engine.stopCapture()
-    await vi.advanceTimersByTimeAsync(30_000)
-    await expect(stopTask).resolves.toMatchObject({
-      segment: {
-        outputFormat: 'webm',
-        outputPath: 'capture.webm',
-        transcode: false,
-        writeStreamErrored: true,
-        writeStreamErrorMessage: expect.stringContaining(
-          'Timed out waiting for recording stream',
-        ),
-      },
-      streamOk: false,
-    })
-    expect(writeStream.destroyed).toBe(true)
-  })
-
   it('resets attached partial capture idempotently', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const harness = createHarness()
     await startCapture(harness, outputPath)
-    harness.recorder.write('partial-media')
+    await encode(outputPath, 'partial-media')
 
     await harness.engine.resetRecording()
     await harness.engine.resetRecording()
 
     expect(harness.session.isRecordingActive).toBe(false)
     expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    // Its media is removed, so no frame on its way is waited for.
+    expect(harness.recorder.stop).toHaveBeenCalledWith({ tailFrame: false })
     await expect(fs.stat(outputPath)).rejects.toThrow()
   })
 
-  it('contains best-effort partial-file cleanup failures during reset', async () => {
+  it('reports a partial file it cannot remove during reset', async () => {
     const tempDir = await createTempDir()
     const outputPath = path.join(tempDir, 'capture.webm')
     const unlink = vi.fn(async () => {
-      throw new Error('file remains locked')
+      throw new Error('file system unavailable')
     })
     const harness = createHarness({
       fileSystem: { ...nodeFileSystem, unlink },
     })
     await startCapture(harness, outputPath)
 
-    await expect(harness.engine.resetRecording()).resolves.toBeUndefined()
+    await expect(harness.engine.resetRecording()).resolves.toEqual({})
 
-    expect(unlink).toHaveBeenCalledWith(outputPath)
+    // Not a lock, so there is nothing to wait for.
+    expect(unlink).toHaveBeenCalledExactlyOnceWith(outputPath)
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message: `[WdioPuppeteerVideoService] Could not remove the unused recording file ${outputPath}: file system unavailable`,
+      },
+    ])
+  })
+
+  it.each(['EBUSY', 'EPERM', 'EACCES'])(
+    'retries a discarded file that Windows still reports %s for',
+    async (code) => {
+      const tempDir = await createTempDir()
+      const outputPath = path.join(tempDir, 'capture.webm')
+      let attempts = 0
+      const unlink = vi.fn(async (filePath: string) => {
+        attempts += 1
+        if (attempts <= 2) {
+          throw lockedError(code)
+        }
+        await nodeFileSystem.unlink(filePath)
+      })
+      const delay = vi.fn(async () => {})
+      const harness = createHarness({
+        clock: { ...systemClock, delay },
+        fileSystem: { ...nodeFileSystem, unlink },
+      })
+      await startCapture(harness, outputPath)
+      await encode(outputPath, 'discarded-media')
+
+      await expect(
+        harness.engine.stopCapture({ discard: true }),
+      ).resolves.toEqual({
+        capturedSeconds: expect.any(Number),
+        segment: undefined,
+        streamOk: true,
+      })
+
+      expect(unlink).toHaveBeenCalledTimes(3)
+      expect(delay.mock.calls).toEqual([[50], [50]])
+      await expect(fs.stat(outputPath)).rejects.toThrow()
+      expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+    },
+  )
+
+  it('gives up on a file that stays locked after a bounded number of attempts', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const unlink = vi.fn(async () => {
+      throw lockedError('EBUSY')
+    })
+    const delay = vi.fn(async () => {})
+    const harness = createHarness({
+      clock: { ...systemClock, delay },
+      fileSystem: { ...nodeFileSystem, unlink },
+    })
+    await startCapture(harness, outputPath)
+
+    await harness.engine.stopCapture({ discard: true })
+
+    expect(unlink).toHaveBeenCalledTimes(10)
+    expect(delay).toHaveBeenCalledTimes(9)
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message: `[WdioPuppeteerVideoService] Could not remove the unused recording file ${outputPath}: EBUSY: resource busy or locked, unlink`,
+      },
+    ])
+  })
+
+  it('treats a discarded file that is already gone as removed', async () => {
+    const tempDir = await createTempDir()
+    const outputPath = path.join(tempDir, 'capture.webm')
+    const unlink = vi.fn(async () => {
+      throw lockedError('ENOENT')
+    })
+    const harness = createHarness({
+      fileSystem: { ...nodeFileSystem, unlink },
+    })
+    await startCapture(harness, outputPath)
+
+    await harness.engine.stopCapture({ discard: true })
+
+    expect(unlink).toHaveBeenCalledOnce()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
   })
 
   it('coordinates close and switch window segment transitions', async () => {
@@ -1198,7 +1230,6 @@ describe('browser warm-up', () => {
     expect(Reflect.has(globalThis, PAGE_MARKER_PROPERTY)).toBe(false)
     await startCapture(harness, path.join(tempDir, 'capture.webm'))
     expect(harness.connectPuppeteer).toHaveBeenCalledOnce()
-    harness.recorder.end()
     await harness.engine.stopCapture()
   })
 
@@ -1277,5 +1308,442 @@ describe('browser warm-up', () => {
     ).resolves.toEqual({ started: false })
     expect(harness.connectPuppeteer).toHaveBeenCalledTimes(2)
     expect(harness.failures).toHaveLength(1)
+  })
+})
+
+describe('Puppeteer capture engine, deferred capture', () => {
+  const spoolSettings = {
+    canvas: { height: 600, width: 800 },
+    format: 'webm' as const,
+    quality: 30,
+    scale: 1,
+  }
+
+  const spoolPathIn = (tempDir: string): string =>
+    path.join(tempDir, 'spool', 'run', 'checkout_part1.u.mkv')
+
+  // A deferred start: the output is planned, nothing is reserved at it, and
+  // the recorder spools to its own new file.
+  const startSpooled = async (
+    harness: ReturnType<typeof createHarness>,
+    tempDir: string,
+    budget?: SpoolBudget,
+  ) => {
+    const plannedPath = path.join(tempDir, 'checkout_part1.webm')
+    const spoolPath = spoolPathIn(tempDir)
+    harness.recorder.output = {
+      kind: 'spool',
+      spool: { path: spoolPath, settings: spoolSettings },
+    }
+    harness.session.beginRecording('checkout')
+    const result = await harness.engine.startCapture({
+      createOutput: async () => ({
+        outputFormat: 'webm',
+        outputPath: plannedPath,
+        recordingFormat: 'webm',
+        recordingPath: plannedPath,
+        transcodeEnabled: false,
+      }),
+      ffmpegPath: 'ffmpeg.exe',
+      spoolPath,
+      ...(budget ? { budget } : {}),
+      transcodeOptions: { deleteOriginal: true },
+    })
+    return { plannedPath, result, spoolPath }
+  }
+
+  it('spools to a new file in a created directory and reserves no output', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath, result, spoolPath } = await startSpooled(
+      harness,
+      tempDir,
+    )
+
+    expect(result).toEqual({ started: true })
+    const options = harness.startScreencast.mock.calls[0]?.[1]
+    expect(options).toMatchObject({ spoolPath: path.resolve(spoolPath) })
+    expect(options).not.toHaveProperty('outputPath')
+    await expect(fs.stat(path.dirname(spoolPath))).resolves.toBeDefined()
+    await expect(fs.access(plannedPath)).rejects.toThrow()
+  })
+
+  it("starts a spooled capture under the recording's budget, and a live one without", async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const budget = new SpoolBudget(DEFAULT_SPOOL_LIMITS, {
+      freeBytes: async () => 0,
+    })
+    await startSpooled(harness, tempDir, budget)
+
+    expect(harness.startScreencast.mock.calls[0]?.[1]).toMatchObject({ budget })
+
+    const live = createHarness()
+    await startCapture(live, path.join(tempDir, 'capture.webm'))
+    expect(live.startScreencast.mock.calls[0]?.[1]).not.toHaveProperty('budget')
+  })
+
+  it('returns a stopped spool without reading an encoder result', async () => {
+    const tempDir = await createTempDir()
+    let now = 1_000
+    const clock = { ...systemClock, now: () => now }
+    const harness = createHarness({ clock })
+    const { spoolPath } = await startSpooled(harness, tempDir)
+    Object.defineProperty(harness.recorder, 'ffmpegResult', {
+      get: () => {
+        throw new Error('a spool has no encoder result')
+      },
+    })
+    now += 2_500
+
+    await expect(harness.engine.stopCapture()).resolves.toEqual({
+      capturedSeconds: 2.5,
+      segment: expect.objectContaining({ transcode: false }),
+      spool: { path: spoolPath, settings: spoolSettings },
+      streamOk: true,
+    })
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('reports a spool that received no frames as unclean', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startSpooled(harness, tempDir)
+    harness.recorder.frameCount = 0
+
+    const stopped = await harness.engine.stopCapture()
+
+    expect(stopped.streamOk).toBe(false)
+    expect(stopped.spool).toBeDefined()
+    expect(harness.logs.map(({ message }) => message)).toContainEqual(
+      expect.stringContaining('delivered no frames'),
+    )
+  })
+
+  it('aborts and deletes a discarded spool, never the planned output', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath, spoolPath } = await startSpooled(harness, tempDir)
+    // Another recording's file may sit at a planned, unreserved path.
+    await fs.writeFile(plannedPath, 'someone else')
+    await fs.writeFile(spoolPath, 'frames')
+
+    await expect(
+      harness.engine.stopCapture({ discard: true }),
+    ).resolves.toEqual({
+      capturedSeconds: expect.any(Number),
+      segment: undefined,
+      streamOk: true,
+    })
+
+    expect(harness.recorder.abort).toHaveBeenCalledOnce()
+    expect(harness.recorder.stop).not.toHaveBeenCalled()
+    await expect(fs.access(spoolPath)).rejects.toThrow()
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+  })
+
+  // A segment whose spool was promoted: the recorder reports an encoded file
+  // at the path its promotion reserved, which collision handling may have
+  // renamed.
+  const promoteTo = async (
+    harness: ReturnType<typeof createHarness>,
+    tempDir: string,
+  ) => {
+    const reserved = path.join(tempDir, 'checkout_part1_run2.webm')
+    await fs.writeFile(reserved, '')
+    harness.recorder.output = { kind: 'encoded', outputPath: reserved }
+    return reserved
+  }
+
+  const promotionPlanOf = (
+    harness: ReturnType<typeof createHarness>,
+  ): PromotionPlan | undefined => {
+    const options = harness.startScreencast.mock.calls[0]?.[1] as
+      | (StartScreencastOptions & { promotion?: PromotionPlan })
+      | undefined
+    return options?.promotion
+  }
+
+  it('hands a promoted segment on as a live one at its reserved path', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    const segment = harness.session.activeSegment
+    if (!segment) {
+      throw new Error('no segment')
+    }
+    segment.transcode = true
+    segment.outputFormat = 'mp4'
+    const reserved = await promoteTo(harness, tempDir)
+
+    const stopped = await harness.engine.stopCapture()
+
+    expect(stopped.spool).toBeUndefined()
+    expect(stopped.streamOk).toBe(true)
+    expect(stopped.segment).toMatchObject({
+      outputPath: path.join(tempDir, 'checkout_part1_run2.mp4'),
+      recordingPath: reserved,
+    })
+    expect(stopped.segment?.recordingPath).not.toBe(plannedPath)
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('checks a promoted segment encoder exit as a live segment', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+    harness.recorder.ffmpegResult = {
+      code: 1,
+      diagnostic: 'disk full',
+      signal: null,
+    }
+
+    const stopped = await harness.engine.stopCapture()
+
+    expect(stopped.streamOk).toBe(false)
+    expect(stopped.segment).toMatchObject({
+      recordingPath: reserved,
+      transcode: false,
+    })
+    expect(harness.logs.map(({ message }) => message)).toContainEqual(
+      expect.stringContaining('FFmpeg exited with code 1 while recording'),
+    )
+  })
+
+  it('deletes the output of a discarded recording that promoted', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { spoolPath } = await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+
+    await harness.engine.stopCapture({ discard: true })
+
+    expect(harness.recorder.abort).toHaveBeenCalledOnce()
+    await expect(fs.access(reserved)).rejects.toThrow()
+    await expect(fs.access(spoolPath)).rejects.toThrow()
+  })
+
+  it('removes the output of a promoted segment when the recording is reset', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    await startSpooled(harness, tempDir)
+    const reserved = await promoteTo(harness, tempDir)
+
+    await expect(harness.engine.resetRecording()).resolves.toEqual({})
+
+    await expect(fs.access(reserved)).rejects.toThrow()
+  })
+
+  it('removes the output a promotion reserved when the start fails afterwards', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    harness.session.beginRecording('checkout')
+    // A capture is already attached, so attaching this one fails.
+    await startCapture(harness, path.join(tempDir, 'first.webm'))
+    const reserved = await promoteTo(harness, tempDir)
+
+    await expect(
+      harness.engine.startCapture({
+        createOutput: async () => ({
+          outputFormat: 'webm',
+          outputPath: path.join(tempDir, 'second.webm'),
+          recordingFormat: 'webm',
+          recordingPath: path.join(tempDir, 'second.webm'),
+          transcodeEnabled: false,
+        }),
+        ffmpegPath: 'ffmpeg.exe',
+        spoolPath: spoolPathIn(tempDir),
+        transcodeOptions: { deleteOriginal: true },
+      }),
+    ).rejects.toThrow('Cannot attach more than one capture segment')
+
+    await expect(fs.access(reserved)).rejects.toThrow()
+  })
+
+  it('gives a spooled capture the means to promote it: reserve, remove, warn', async () => {
+    const tempDir = await createTempDir()
+    const reserveOutput = vi.fn(async (planned: string) => {
+      await fs.writeFile(planned, '')
+      return planned
+    })
+    const harness = createHarness({ reserveOutput })
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    const plan = promotionPlanOf(harness)
+
+    expect(plan).toMatchObject({ ffmpegPath: 'ffmpeg.exe', plannedPath })
+    await expect(plan?.reserveOutput(plannedPath)).resolves.toBe(plannedPath)
+    expect(reserveOutput).toHaveBeenCalledWith(plannedPath)
+    await plan?.remove(plannedPath, 'unused promoted recording output')
+    await expect(fs.access(plannedPath)).rejects.toThrow()
+    plan?.warn('promotion failed')
+    expect(harness.logs).toContainEqual({
+      level: 'warn',
+      message: 'promotion failed',
+    })
+  })
+
+  it('reserves a promoted output the way a live start does by default', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath } = await startSpooled(harness, tempDir)
+    await fs.writeFile(plannedPath, 'someone else')
+
+    const reserved = await promotionPlanOf(harness)?.reserveOutput(plannedPath)
+
+    expect(reserved).not.toBe(plannedPath)
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(await fs.readFile(reserved ?? '', 'utf8')).toBe('')
+  })
+
+  // The real capture, recorder and spool sink behind the engine, over a page
+  // whose CDP session the test controls.
+  const useRealScreencast = (
+    harness: ReturnType<typeof createHarness>,
+    send: (method: string) => Promise<unknown>,
+  ) => {
+    const session = Object.assign(new EventEmitter(), {
+      detach: vi.fn(async () => {}),
+      send: vi.fn(send),
+    })
+    const page = Object.assign(new EventEmitter(), {
+      createCDPSession: vi.fn(async () => session),
+      evaluate: async () => ({ devicePixelRatio: 1, height: 64, width: 64 }),
+      setViewport: async () => {},
+      viewport: () => ({ height: 64, width: 64 }),
+    })
+    harness.startScreencast.mockImplementation(
+      async (_page, options) =>
+        (await startScreencast(page as unknown as Page, options)) as never,
+    )
+    return page
+  }
+
+  it('keeps a file already at the spool path when the exclusive open is refused', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const page = useRealScreencast(harness, async () => ({}))
+    const spoolPath = spoolPathIn(tempDir)
+    const plannedPath = path.join(tempDir, 'checkout_part1.webm')
+    await fs.mkdir(path.dirname(spoolPath), { recursive: true })
+    await fs.writeFile(spoolPath, 'frames of another recording')
+    await fs.writeFile(plannedPath, 'someone else')
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow('EEXIST')
+
+    await expect(fs.readFile(spoolPath, 'utf8')).resolves.toBe(
+      'frames of another recording',
+    )
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(page.createCDPSession).not.toHaveBeenCalled()
+    expect(harness.session.hasCapture).toBe(false)
+  })
+
+  it('removes a spool its own startup created when the screencast then fails', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    useRealScreencast(harness, async (method) => {
+      if (method === 'Page.startScreencast') {
+        throw new Error('Target closed')
+      }
+      return {}
+    })
+    const plannedPath = path.join(tempDir, 'checkout_part1.webm')
+    await fs.writeFile(plannedPath, 'someone else')
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow(
+      'Target closed',
+    )
+
+    // The spool had its Matroska header and nothing else.
+    await expect(fs.access(spoolPathIn(tempDir))).rejects.toThrow()
+    await expect(fs.readFile(plannedPath, 'utf8')).resolves.toBe('someone else')
+    expect(harness.logs.filter(({ level }) => level === 'warn')).toEqual([])
+  })
+
+  it('removes nothing when the spool directory cannot be created', async () => {
+    const tempDir = await createTempDir()
+    const unlink = vi.fn(async () => {})
+    const harness = createHarness({
+      fileSystem: {
+        ...nodeFileSystem,
+        mkdir: async () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+        },
+        unlink,
+      },
+    })
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow('EACCES')
+
+    expect(harness.startScreencast).not.toHaveBeenCalled()
+    expect(unlink).not.toHaveBeenCalled()
+  })
+
+  it('owns, and removes, a spool once its recorder started and the start then failed', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    vi.spyOn(harness.session, 'attachCapture').mockImplementation(() => {
+      throw new Error('attach refused')
+    })
+    const spoolPath = spoolPathIn(tempDir)
+    harness.startScreencast.mockImplementation(async () => {
+      await fs.mkdir(path.dirname(spoolPath), { recursive: true })
+      await fs.writeFile(spoolPath, 'header')
+      return harness.recorder as never
+    })
+
+    await expect(startSpooled(harness, tempDir)).rejects.toThrow(
+      'attach refused',
+    )
+
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    await expect(fs.access(spoolPath)).rejects.toThrow()
+  })
+
+  it('stops an attached spool on reset and hands it back undeleted', async () => {
+    const tempDir = await createTempDir()
+    const harness = createHarness()
+    const { plannedPath, spoolPath } = await startSpooled(harness, tempDir)
+    await fs.writeFile(spoolPath, 'frames')
+
+    await expect(harness.engine.resetRecording()).resolves.toEqual({
+      spooled: {
+        plannedPath,
+        spool: { path: spoolPath, settings: spoolSettings },
+      },
+    })
+
+    expect(harness.recorder.stop).toHaveBeenCalledOnce()
+    expect(harness.session.isRecordingActive).toBe(false)
+    await expect(fs.readFile(spoolPath, 'utf8')).resolves.toBe('frames')
+  })
+
+  it('deletes a held spool it is asked to discard, retrying a locked file', async () => {
+    const tempDir = await createTempDir()
+    const spoolPath = path.join(tempDir, 'held.mkv')
+    await fs.writeFile(spoolPath, 'frames')
+    let attempts = 0
+    const harness = createHarness({
+      fileSystem: {
+        ...nodeFileSystem,
+        unlink: async (filePath) => {
+          attempts += 1
+          if (attempts === 1) {
+            throw lockedError('EBUSY')
+          }
+          await fs.unlink(filePath)
+        },
+      },
+    })
+
+    await harness.engine.discardSpool({
+      path: spoolPath,
+      settings: spoolSettings,
+    })
+
+    expect(attempts).toBe(2)
+    await expect(fs.access(spoolPath)).rejects.toThrow()
   })
 })

@@ -15,6 +15,10 @@ import type {
   ScreencastRecorder,
   ScreencastRecorderOptions,
 } from '../../src/service/screencast-recorder.js'
+import {
+  DEFAULT_SPOOL_LIMITS,
+  SpoolBudget,
+} from '../../src/service/spool-budget.js'
 
 const createRecorder = (): ScreencastRecorder => {
   return { id: 'recorder' } as unknown as ScreencastRecorder
@@ -63,7 +67,12 @@ describe('Puppeteer screencast capture controls', () => {
     await expect(
       startScreencast(
         page,
-        { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        {
+          capture,
+          format: 'webm',
+          ffmpegPath: 'ffmpeg.exe',
+          outputPath: 'segment.webm',
+        },
         record,
       ),
     ).resolves.toBe(recorder)
@@ -77,6 +86,8 @@ describe('Puppeteer screencast capture controls', () => {
       ffmpegPath: 'ffmpeg.exe',
       format: 'webm',
       fps: 24,
+      // The encoder writes the reserved segment file itself.
+      outputPath: 'segment.webm',
       quality: 18,
       scale: 0.5,
       speed: 1.5,
@@ -85,6 +96,66 @@ describe('Puppeteer screencast capture controls', () => {
     expect(record.mock.invocationCallOrder[0]).toBeLessThan(
       setViewport.mock.invocationCallOrder[1] ?? Number.MAX_SAFE_INTEGER,
     )
+  })
+
+  it('spools to the given file instead of encoding when asked', async () => {
+    const recorder = createRecorder()
+    const record = vi.fn(
+      async (_page: Page, _options: ScreencastRecorderOptions) => recorder,
+    )
+    const capture = resolveServiceConfiguration({
+      capture: { fps: 24, maxWidth: 1280, maxHeight: 720 },
+    }).options.capture
+    const page = { viewport: () => null } as unknown as Page
+
+    await startScreencast(
+      page,
+      {
+        capture,
+        format: 'mp4',
+        ffmpegPath: 'ffmpeg.exe',
+        spoolPath: 'segment.spool.mkv',
+      },
+      record,
+    )
+
+    // Nothing names a segment file: it is written when the spool is encoded.
+    expect(record).toHaveBeenCalledWith(page, {
+      ffmpegPath: 'ffmpeg.exe',
+      format: 'mp4',
+      fps: 24,
+      maxHeight: 720,
+      maxWidth: 1280,
+      quality: capture.quality,
+      scale: capture.scale,
+      speed: capture.speed,
+      spoolPath: 'segment.spool.mkv',
+    })
+  })
+
+  it("hands the recording's spool budget to the recorder", async () => {
+    const recorder = createRecorder()
+    const record = vi.fn(
+      async (_page: Page, _options: ScreencastRecorderOptions) => recorder,
+    )
+    const capture = resolveServiceConfiguration({}).options.capture
+    const budget = new SpoolBudget(DEFAULT_SPOOL_LIMITS, {
+      freeBytes: async () => 0,
+    })
+
+    await startScreencast(
+      { viewport: () => null } as unknown as Page,
+      {
+        budget,
+        capture,
+        format: 'webm',
+        ffmpegPath: 'ffmpeg',
+        spoolPath: 'segment.spool.mkv',
+      },
+      record,
+    )
+
+    expect(record.mock.calls[0]?.[1]).toMatchObject({ budget })
   })
 
   it('restores native viewport mode when screencast initialization fails', async () => {
@@ -97,7 +168,12 @@ describe('Puppeteer screencast capture controls', () => {
     await expect(
       startScreencast(
         page,
-        { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        {
+          capture,
+          format: 'webm',
+          ffmpegPath: 'ffmpeg.exe',
+          outputPath: 'segment.webm',
+        },
         async () => {
           throw new Error('capture failed')
         },
@@ -119,7 +195,12 @@ describe('Puppeteer screencast capture controls', () => {
     let settled = false
     const starting = startScreencast(
       { setViewport, viewport: () => null } as unknown as Page,
-      { capture, format: 'webm', ffmpegPath: 'ffmpeg' },
+      {
+        capture,
+        format: 'webm',
+        ffmpegPath: 'ffmpeg',
+        outputPath: 'segment.webm',
+      },
       record,
     ).catch((error: unknown) => {
       settled = true
@@ -152,6 +233,7 @@ describe('Puppeteer screencast capture controls', () => {
           format: 'webm',
           ffmpegPath: 'ffmpeg.exe',
           onViewportRestoreError,
+          outputPath: 'segment.webm',
         },
         async () => recorder,
       ),
@@ -198,7 +280,12 @@ describe('Puppeteer screencast capture controls', () => {
       let started = false
       const starting = startScreencast(
         page as unknown as Page,
-        { capture: explicitViewport, format: 'webm', ffmpegPath: 'ffmpeg' },
+        {
+          capture: explicitViewport,
+          format: 'webm',
+          ffmpegPath: 'ffmpeg',
+          outputPath: 'segment.webm',
+        },
         async () => {
           order.push('record')
           return recorder
@@ -246,6 +333,7 @@ describe('Puppeteer screencast capture controls', () => {
           clock: fakeTimerClock(),
           format: 'webm',
           ffmpegPath: 'ffmpeg',
+          outputPath: 'segment.webm',
         },
         async () => recorder,
       ).then((value) => {
@@ -274,7 +362,12 @@ describe('Puppeteer screencast capture controls', () => {
           : explicitViewport
       const starting = startScreencast(
         page as unknown as Page,
-        { capture, format: 'webm', ffmpegPath: 'ffmpeg' },
+        {
+          capture,
+          format: 'webm',
+          ffmpegPath: 'ffmpeg',
+          outputPath: 'segment.webm',
+        },
         async () => {
           if (!starts) {
             throw new Error('screencast failed')
@@ -307,7 +400,12 @@ describe('Puppeteer screencast capture controls', () => {
       await expect(
         startScreencast(
           { viewport: () => null, setViewport } as unknown as Page,
-          { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+          {
+            capture,
+            format: 'webm',
+            ffmpegPath: 'ffmpeg.exe',
+            outputPath: 'segment.webm',
+          },
           async () => {
             throw failure
           },
@@ -332,7 +430,12 @@ describe('Puppeteer screencast capture controls', () => {
     await expect(
       startScreencast(
         { viewport: () => null } as unknown as Page,
-        { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+        {
+          capture,
+          format: 'webm',
+          ffmpegPath: 'ffmpeg.exe',
+          outputPath: 'segment.webm',
+        },
         async () => {
           throw failure
         },
@@ -347,7 +450,12 @@ describe('Puppeteer screencast capture controls', () => {
 
     await startScreencast(
       { setViewport, viewport: () => null } as unknown as Page,
-      { capture, format: 'webm', ffmpegPath: 'ffmpeg.exe' },
+      {
+        capture,
+        format: 'webm',
+        ffmpegPath: 'ffmpeg.exe',
+        outputPath: 'segment.webm',
+      },
       async () => recorder,
     )
 

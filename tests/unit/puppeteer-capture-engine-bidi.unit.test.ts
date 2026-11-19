@@ -16,6 +16,12 @@ import {
   PuppeteerCaptureEngine,
 } from '../../src/service/puppeteer-capture-engine.js'
 
+// A virtual timer: an immediate that an `unref()` cannot detach from the loop.
+interface VirtualTimer {
+  readonly immediate: NodeJS.Immediate
+  unref(): VirtualTimer
+}
+
 const tempDirs: string[] = []
 
 afterEach(async () => {
@@ -45,6 +51,7 @@ const createRecorder = () => {
   const recorder = new PassThrough() as PassThrough & Record<string, unknown>
   Object.assign(recorder, {
     abort: vi.fn(async () => recorder.destroy()),
+    output: { kind: 'encoded' as const },
     ffmpegResult: { code: 0, diagnostic: '', signal: null },
     frameCount: 1,
     incompleteReason: undefined,
@@ -238,7 +245,7 @@ describe('PuppeteerCaptureEngine in WebDriver BiDi sessions', () => {
     const clock: ClockBoundary = {
       ...createClock(),
       clearTimeout: (timer) => {
-        clearImmediate(timer as unknown as NodeJS.Immediate)
+        clearImmediate((timer as unknown as VirtualTimer).immediate)
       },
       delay: async (milliseconds) => {
         now += milliseconds
@@ -246,10 +253,14 @@ describe('PuppeteerCaptureEngine in WebDriver BiDi sessions', () => {
       now: () => now,
       setTimeout: (callback: () => void, milliseconds: number) => {
         const due = now + milliseconds
-        return setImmediate(() => {
+        const immediate = setImmediate(() => {
           now = Math.max(now, due)
           callback()
-        }) as unknown as NodeJS.Timeout
+        })
+        // The page lookup unrefs its timers, and an unref'd immediate runs
+        // only when something else wakes the event loop: stay ref'd.
+        const timer: VirtualTimer = { immediate, unref: () => timer }
+        return timer as unknown as NodeJS.Timeout
       },
     }
     const late = createPage('other-target')

@@ -1,10 +1,8 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter, once } from 'node:events'
-import { createWriteStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { finished } from 'node:stream/promises'
 import type { CDPSession, Page } from 'puppeteer-core'
 import { expect, it } from 'vitest'
 import { nodeProcess } from '../../src/service/boundaries.js'
@@ -16,10 +14,11 @@ import {
 
 // A real, self-expiring process substitutes for an encoder that never exits
 // after EOF. It ignores SIGTERM on Linux, so cleanup must force termination.
+// Like FFmpeg, it writes the output file it is given itself.
 const encoderProgram = `
 process.on('SIGTERM', () => {})
 process.stdin.resume()
-process.stdout.write('preserved-partial-media')
+require('node:fs').writeFileSync(process.env.ENCODER_OUTPUT, 'preserved-partial-media')
 process.send('ready')
 setTimeout(() => process.exit(0), 20000)
 `
@@ -31,8 +30,6 @@ it.each(['cdp-stop', 'encoder-exit'])(
       path.join(os.tmpdir(), 'video-shutdown-'),
     )
     const outputPath = path.join(directory, 'partial.webm')
-    const output = createWriteStream(outputPath)
-    const outputDone = finished(output)
     let child: ChildProcess | undefined
     let ready: Promise<unknown> | undefined
     let recorder: ScreencastRecorder | undefined
@@ -70,14 +67,16 @@ it.each(['cdp-stop', 'encoder-exit'])(
           ffmpegPath: process.execPath,
           format: 'webm',
           fps: 10,
+          outputPath,
           quality: 30,
           scale: 1,
           speed: 1,
         },
         {
-          spawnProcess: () => {
+          spawnProcess: (_command, args) => {
             child = spawn(process.execPath, ['-e', encoderProgram], {
-              stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+              env: { ...process.env, ENCODER_OUTPUT: args.at(-1) },
+              stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
               detached: process.platform !== 'win32',
               windowsHide: true,
             })
@@ -86,13 +85,9 @@ it.each(['cdp-stop', 'encoder-exit'])(
           },
         },
       )
-      recorder.pipe(output)
       await ready
       const pid = child?.pid
       expect(pid).toBeDefined()
-      await expect
-        .poll(async () => (await fs.stat(outputPath)).size)
-        .toBeGreaterThan(0)
 
       const stopping = recorder.stop()
       await expect.poll(() => stopRequested).toBe(true)
@@ -101,12 +96,9 @@ it.each(['cdp-stop', 'encoder-exit'])(
       }
       // Matches engine cancellation after its deadline; no five-second sleep
       // is needed to test the real OS cleanup that follows the timer.
-      recorder.destroy()
       await recorder.abort()
-      output.end()
 
       await stopping
-      await outputDone
       await expect.poll(() => nodeProcess.isAlive(pid as number)).toBe(false)
       expect(session.listenerCount('Page.screencastFrame')).toBe(0)
       expect(await fs.readFile(outputPath, 'utf8')).toBe(
@@ -116,9 +108,7 @@ it.each(['cdp-stop', 'encoder-exit'])(
       if (child && child.exitCode === null && child.signalCode === null) {
         await terminateFfmpegProcessTree(child, true)
       }
-      recorder?.destroy()
-      output.destroy()
-      await outputDone.catch(() => undefined)
+      await recorder?.abort()
       await fs.rm(directory, { recursive: true, force: true })
     }
   },

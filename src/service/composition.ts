@@ -5,7 +5,9 @@ import type { ResolvedWdioPuppeteerVideoServiceOptions } from '../types.js'
 import { AllureVideoIntegration } from './allure-integration.js'
 import {
   type ClockBoundary,
+  type DiskSpaceBoundary,
   type FileSystemBoundary,
+  nodeDiskSpace,
   nodeFileSystem,
   nodeProcess,
   type ProcessBoundary,
@@ -34,6 +36,8 @@ import {
   RecordingSlotScheduler,
 } from './recording-slots.js'
 import type { ScreencastRecorder } from './screencast-recorder.js'
+import { DEFAULT_SPOOL_LIMITS, type SpoolLimits } from './spool-budget.js'
+import { recoverOrphanedSpools } from './spool-recovery.js'
 import {
   createWorkerRecordingCoordinator,
   type RecordingCoordinatorFactory,
@@ -55,6 +59,8 @@ export type WorkerFfmpegRunner = (
 
 export interface WorkerCompositionOverrides {
   readonly clock?: ClockBoundary
+  readonly diskSpace?: DiskSpaceBoundary
+  readonly spoolLimits?: SpoolLimits
   readonly fileSystem?: FileSystemBoundary
   readonly process?: ProcessBoundary
   readonly uuid?: UuidFactory
@@ -68,6 +74,8 @@ export interface WorkerCompositionOverrides {
 
 export interface WorkerCompositionRoot {
   readonly clock: ClockBoundary
+  readonly diskSpace: DiskSpaceBoundary
+  readonly spoolLimits: SpoolLimits
   readonly fileSystem: FileSystemBoundary
   readonly process: ProcessBoundary
   readonly uuid: UuidFactory
@@ -119,6 +127,8 @@ export const createWorkerCompositionRoot = (
 
   return Object.freeze({
     clock,
+    diskSpace: overrides.diskSpace ?? nodeDiskSpace,
+    spoolLimits: overrides.spoolLimits ?? DEFAULT_SPOOL_LIMITS,
     fileSystem,
     process: processBoundary,
     uuid: overrides.uuid ?? randomUUID,
@@ -185,6 +195,7 @@ export interface LauncherCompositionOverrides {
   readonly cleanupGlobalSlotRunDirectory?: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext?: typeof createManifestRunContext
   readonly generateVideoReportForRun?: typeof generateVideoReportForRun
+  readonly recoverOrphanedSpools?: typeof recoverOrphanedSpools
   readonly uuid?: UuidFactory
   readonly writeLog?: typeof writeLog
 }
@@ -194,6 +205,7 @@ export interface LauncherCompositionRoot {
   readonly cleanupGlobalSlotRunDirectory: typeof cleanupGlobalSlotRunDirectory
   readonly createManifestRunContext: typeof createManifestRunContext
   readonly generateVideoReportForRun: typeof generateVideoReportForRun
+  readonly recoverOrphanedSpools: typeof recoverOrphanedSpools
   readonly uuid: UuidFactory
   readonly writeLog: typeof writeLog
 }
@@ -210,6 +222,8 @@ export const createLauncherCompositionRoot = (
       overrides.createManifestRunContext ?? createManifestRunContext,
     generateVideoReportForRun:
       overrides.generateVideoReportForRun ?? generateVideoReportForRun,
+    recoverOrphanedSpools:
+      overrides.recoverOrphanedSpools ?? recoverOrphanedSpools,
     uuid: overrides.uuid ?? randomUUID,
     writeLog: overrides.writeLog ?? writeLog,
   })

@@ -2,10 +2,12 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  type FfmpegVersionProbe,
   getFfmpegCandidates,
   probeDirectMp4Support,
+  probeFfmpegVersion,
   readFfmpegVersion,
-  resolveAvailableFfmpegPath,
+  resolveFfmpeg,
 } from '../../src/service/ffmpeg.js'
 
 class FakeProbeProcess extends EventEmitter {
@@ -32,35 +34,96 @@ describe('ffmpeg helpers', () => {
     expect(new Set(candidates).size).toBe(candidates.length)
   })
 
-  it('returns the first available ffmpeg candidate', async () => {
-    const isExecutable = vi.fn(async (candidate: string) => {
-      return candidate === '/second/ffmpeg'
+  it('returns the first candidate that runs, with its version, probing each once', async () => {
+    const probe = vi.fn(
+      async (candidate: string): Promise<FfmpegVersionProbe> =>
+        candidate === '/second/ffmpeg'
+          ? { ran: true, version: '7.1' }
+          : { ran: false, version: undefined },
+    )
+
+    const resolved = await resolveFfmpeg(
+      ['/first/ffmpeg', '/second/ffmpeg', '/third/ffmpeg'],
+      probe,
+    )
+
+    expect(resolved).toEqual({ path: '/second/ffmpeg', version: '7.1' })
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(probe).toHaveBeenNthCalledWith(1, '/first/ffmpeg')
+    expect(probe).toHaveBeenNthCalledWith(2, '/second/ffmpeg')
+  })
+
+  it('accepts a candidate that runs but reports no recognizable version', async () => {
+    await expect(
+      resolveFfmpeg(['/custom/ffmpeg'], async () => ({
+        ran: true,
+        version: undefined,
+      })),
+    ).resolves.toEqual({ path: '/custom/ffmpeg', version: undefined })
+  })
+
+  it('returns undefined when no ffmpeg candidate runs', async () => {
+    const resolved = await resolveFfmpeg(
+      ['/first/ffmpeg', '/second/ffmpeg'],
+      async () => ({ ran: false, version: undefined }),
+    )
+
+    expect(resolved).toBeUndefined()
+  })
+
+  it('uses the real version probe when none is supplied', async () => {
+    await expect(resolveFfmpeg([process.execPath])).resolves.toBeUndefined()
+  })
+
+  it('learns availability and version from one -version spawn', async () => {
+    const probeProcess = new FakeProbeProcess()
+    const spawnProcess = vi.fn(
+      (_command: string, _args: string[]) => probeProcess,
+    )
+    const probeTask = probeFfmpegVersion('/custom/ffmpeg', spawnProcess)
+    probeProcess.stdout?.write('ffmpeg version n7.1-12 Copyright\n')
+    probeProcess.emit('close', 0)
+
+    await expect(probeTask).resolves.toEqual({ ran: true, version: 'n7.1-12' })
+    expect(spawnProcess).toHaveBeenCalledOnce()
+    expect(spawnProcess).toHaveBeenCalledWith('/custom/ffmpeg', ['-version'])
+  })
+
+  it('treats a clean exit without a version line as a runnable binary', async () => {
+    const probeProcess = new FakeProbeProcess()
+    const probeTask = probeFfmpegVersion('ffmpeg', () => probeProcess)
+    probeProcess.stdout?.write('custom build\n')
+    probeProcess.emit('close', 0)
+
+    await expect(probeTask).resolves.toEqual({ ran: true, version: undefined })
+  })
+
+  it('reports a failed, errored, or timed-out probe as not runnable', async () => {
+    const failedProcess = new FakeProbeProcess()
+    const failedTask = probeFfmpegVersion('ffmpeg', () => failedProcess)
+    failedProcess.emit('close', 1)
+    await expect(failedTask).resolves.toEqual({
+      ran: false,
+      version: undefined,
     })
 
-    const resolvedPath = await resolveAvailableFfmpegPath(
-      ['/first/ffmpeg', '/second/ffmpeg', '/third/ffmpeg'],
-      isExecutable,
-    )
+    const erroredProcess = new FakeProbeProcess()
+    const erroredTask = probeFfmpegVersion('ffmpeg', () => erroredProcess)
+    erroredProcess.emit('error', new Error('spawn ENOENT'))
+    await expect(erroredTask).resolves.toEqual({
+      ran: false,
+      version: undefined,
+    })
 
-    expect(resolvedPath).toBe('/second/ffmpeg')
-    expect(isExecutable).toHaveBeenCalledTimes(2)
-    expect(isExecutable).toHaveBeenNthCalledWith(1, '/first/ffmpeg')
-    expect(isExecutable).toHaveBeenNthCalledWith(2, '/second/ffmpeg')
-  })
-
-  it('returns undefined when no ffmpeg candidate is executable', async () => {
-    const resolvedPath = await resolveAvailableFfmpegPath(
-      ['/first/ffmpeg', '/second/ffmpeg'],
-      async () => false,
-    )
-
-    expect(resolvedPath).toBeUndefined()
-  })
-
-  it('uses the real executable probe boundary when no predicate is supplied', async () => {
-    await expect(
-      resolveAvailableFfmpegPath([process.execPath]),
-    ).resolves.toBeUndefined()
+    vi.useFakeTimers()
+    const timedOutProcess = new FakeProbeProcess()
+    const timedOutTask = probeFfmpegVersion('ffmpeg', () => timedOutProcess)
+    await vi.runAllTimersAsync()
+    await expect(timedOutTask).resolves.toEqual({
+      ran: false,
+      version: undefined,
+    })
+    expect(timedOutProcess.kill).toHaveBeenCalled()
   })
 
   it('reads the FFmpeg version from its first output line', async () => {

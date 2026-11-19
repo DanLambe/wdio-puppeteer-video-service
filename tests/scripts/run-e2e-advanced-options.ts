@@ -1,10 +1,24 @@
 import { spawn } from 'node:child_process'
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { isVideoManifest } from '../../src/manifest.js'
+import { readFfmpegVersion } from '../../src/service/ffmpeg.js'
+import { resolveTimestampPassthroughArgs } from '../../src/service/post-process.js'
 import { assertAllureVideoAttachments } from '../utils/allure-assertions.js'
+import {
+  assertSpoolDirectoryRemoved,
+  captureEncodingSuffix,
+} from '../utils/capture-encoding.js'
 import { assertManifestMediaDimensions } from '../utils/manifest-media-assertions.js'
+import { decodeColorTimeline } from '../utils/media-timeline.js'
 import { assertOfflineReportInBrowser } from '../utils/offline-report-browser.js'
+import { segmentPartNumber, terminalColor } from '../utils/segment-colors.js'
+import {
+  findTabProvenanceProblems,
+  readEntryTabs,
+  type TabStep,
+  toTabSteps,
+} from '../utils/tab-provenance.js'
 import { assertStaticVideoReport } from '../utils/video-artifact-assertions.js'
 import { waitForChildProcess } from './child-process.js'
 import { type E2eEnvironment, startE2eEnvironment } from './e2e-environment.js'
@@ -25,10 +39,18 @@ type AdvancedMode =
   | 'retention'
   | 'global-concurrency'
   | 'ffmpeg-failure'
+  | 'failure-burst'
+  | 'tail-frame'
 
-const assertDiscardedRetentionEntry = async (
-  resultsDir: string,
-): Promise<void> => {
+// Each test moves tab twice: part 1 on the first tab, part 2 on the second,
+// part 3 back on the first.
+const RETAINED_TAB_STEPS = JSON.stringify([
+  [1, 'start'],
+  [2, 'switch-to-window'],
+  [1, 'switch-to-window'],
+])
+
+const assertRetentionEntries = async (resultsDir: string): Promise<void> => {
   const manifestValue: unknown = JSON.parse(
     await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
   )
@@ -37,9 +59,10 @@ const assertDiscardedRetentionEntry = async (
       '[e2e:advanced] retention mode produced an invalid manifest',
     )
   }
-  const discardedEntry = manifestValue.runs
-    .flatMap((run) => run.entries)
-    .find((entry) => entry.test?.name === 'should discard a passing recording')
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  const discardedEntry = entries.find(
+    (entry) => entry.test?.name === 'should discard a passing recording',
+  )
   if (
     discardedEntry?.capture.decision !== 'discarded' ||
     discardedEntry.capture.segments.length !== 0 ||
@@ -50,6 +73,186 @@ const assertDiscardedRetentionEntry = async (
       '[e2e:advanced] passing retention entry should be discarded without published media or post-processing',
     )
   }
+
+  // A kept multi-tab recording lists each transcoded part with its tab, as
+  // when every segment was transcoded at its tab move.
+  const retainedEntry = entries.find(
+    (entry) =>
+      entry.test?.name === 'should retain an intentionally failed recording',
+  )
+  const segments = retainedEntry?.capture.segments ?? []
+  const parts = segments.map((segment) =>
+    /_part(\d+)\.mp4$/u.exec(segment.path),
+  )
+  if (
+    retainedEntry?.capture.decision !== 'recorded' ||
+    retainedEntry.processing.outcome !== 'completed' ||
+    retainedEntry.processing.operation !== 'transcode' ||
+    parts.map((part) => part?.[1]).join() !== '1,2,3' ||
+    segments.some((segment) => segment.mimeType !== 'video/mp4') ||
+    JSON.stringify(toTabSteps(readEntryTabs(retainedEntry))) !==
+      RETAINED_TAB_STEPS ||
+    findTabProvenanceProblems(retainedEntry).length > 0
+  ) {
+    throw new Error(
+      `[e2e:advanced] failing retention entry should keep three transcoded parts with their tabs, got ${JSON.stringify(retainedEntry?.capture)}`,
+    )
+  }
+}
+
+// Every failing worker's recording is kept whole: three WebM parts with their
+// tabs, recorded, and never left as frames.
+const assertFailureBurstEntries = async (resultsDir: string): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] failure-burst mode produced an invalid manifest',
+    )
+  }
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  if (entries.length !== 3) {
+    throw new Error(
+      `[e2e:advanced] failure-burst mode expected three entries, got ${entries.length.toString()}`,
+    )
+  }
+  for (const entry of entries) {
+    const parts = entry.capture.segments.map(
+      (segment) => /_part(\d+)\.webm$/u.exec(segment.path)?.[1],
+    )
+    if (
+      entry.capture.decision !== 'recorded' ||
+      entry.result !== 'failed' ||
+      parts.join() !== '1,2,3' ||
+      JSON.stringify(toTabSteps(readEntryTabs(entry))) !== RETAINED_TAB_STEPS ||
+      findTabProvenanceProblems(entry).length > 0
+    ) {
+      throw new Error(
+        `[e2e:advanced] failure-burst entry should keep three WebM parts with their tabs, got ${JSON.stringify(entry.capture)}`,
+      )
+    }
+  }
+  if (['auto', 'deferred'].includes(process.env.WDIO_CAPTURE_ENCODING ?? '')) {
+    await assertEncodesOneAtATime(
+      resultsDir,
+      entries.flatMap((entry) =>
+        entry.capture.segments.map(({ path }) => path),
+      ),
+    )
+  }
+}
+
+/**
+ * A spooled part's file is created when its encode reserves it and last
+ * written when FFmpeg finishes, so with one post-processing slot no two of
+ * those spans overlap, across workers. Skipped where the file system keeps no
+ * creation time.
+ */
+const assertEncodesOneAtATime = async (
+  resultsDir: string,
+  paths: readonly string[],
+): Promise<void> => {
+  const spans = (
+    await Promise.all(
+      paths.map(async (segmentPath) => {
+        const stats = await stat(path.join(resultsDir, segmentPath))
+        return {
+          end: stats.mtimeMs,
+          path: segmentPath,
+          start: stats.birthtimeMs,
+        }
+      }),
+    )
+  ).sort((left, right) => left.start - right.start)
+  if (spans.some((span) => span.start <= 0)) {
+    console.log(
+      '[e2e:advanced] failure-burst: no file creation times; encode order not checked.',
+    )
+    return
+  }
+  for (const [index, span] of spans.entries()) {
+    const previous = spans[index - 1]
+    if (previous && span.start < previous.end) {
+      throw new Error(
+        `[e2e:advanced] failure-burst encodes overlapped: ${span.path} was reserved before ${previous.path} was written`,
+      )
+    }
+  }
+  console.log(
+    `[e2e:advanced] failure-burst: ${spans.length.toString()} encodes ran one at a time.`,
+  )
+}
+
+// The part of each tail-frame test that stops right after its red tab turns
+// green, and the tab it records.
+const TAIL_FRAME_PARTS: ReadonlyArray<
+  readonly [title: string, part: number, tab: TabStep]
+> = [
+  ['should film the last paint before a kept test ends', 1, [1, 'start']],
+  [
+    'should film the last paint before recording moves to another tab',
+    3,
+    [1, 'command'],
+  ],
+]
+
+// Chrome delivers the frame of a paint a little after the click that caused
+// it returns: a part that stops straight away must still end on that paint.
+const assertTailFrameEntries = async (
+  resultsDir: string,
+  ffmpegPath: string | undefined,
+): Promise<void> => {
+  if (!ffmpegPath) {
+    throw new Error(
+      '[e2e:advanced] tail-frame mode decodes its parts: no FFmpeg',
+    )
+  }
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] tail-frame mode produced an invalid manifest',
+    )
+  }
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  const passthrough = resolveTimestampPassthroughArgs(
+    await readFfmpegVersion(ffmpegPath),
+  )
+  const problems: string[] = []
+  for (const [title, part, tab] of TAIL_FRAME_PARTS) {
+    const segment = entries
+      .find((entry) => entry.test?.name === title)
+      ?.capture.segments.find(
+        (candidate) => segmentPartNumber(candidate.path) === part,
+      )
+    if (!segment) {
+      problems.push(`"${title}" has no part ${part.toString()}`)
+      continue
+    }
+    const [step] = toTabSteps([segment.tab])
+    const { spans } = decodeColorTimeline(
+      ffmpegPath,
+      path.join(resultsDir, segment.path),
+      30,
+      passthrough,
+    )
+    // Each page is a solid color, so only startup frames before its first
+    // paint may be neutral: the final decoded span itself must be green.
+    const last = terminalColor(spans)
+    if (JSON.stringify(step) !== JSON.stringify(tab) || last !== 'green') {
+      problems.push(
+        `"${title}" part ${part.toString()} on tab ${JSON.stringify(step)} ends on ${last}: ${JSON.stringify(spans)}`,
+      )
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[e2e:advanced] tail-frame parts should end on the last paint: ${problems.join('; ')}`,
+    )
+  }
+  console.log('[e2e:advanced] tail-frame: every part ends on its last paint.')
 }
 
 const requestedMode = process.argv[2] || 'all'
@@ -61,6 +264,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'global-concurrency',
       'ffmpeg-failure',
       'retention',
+      'failure-burst',
     ]
   }
   if (mode === 'all') {
@@ -80,6 +284,8 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'retention',
       'global-concurrency',
       'ffmpeg-failure',
+      'failure-burst',
+      'tail-frame',
     ]
   }
 
@@ -98,7 +304,9 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
     mode === 'exclude-tag' ||
     mode === 'retention' ||
     mode === 'global-concurrency' ||
-    mode === 'ffmpeg-failure'
+    mode === 'ffmpeg-failure' ||
+    mode === 'failure-burst' ||
+    mode === 'tail-frame'
   ) {
     return [mode]
   }
@@ -109,7 +317,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, or ffmpeg-failure.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, failure-burst, or tail-frame. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
   )
   process.exit(1)
 }
@@ -120,7 +328,10 @@ const runMode = async (
 ): Promise<void> => {
   const nodeCommand = process.execPath
   const wdioCliPath = path.resolve('node_modules/@wdio/cli/bin/wdio.js')
-  const resultsDir = path.resolve('tests/results', `advanced-${mode}`)
+  const resultsDir = path.resolve(
+    'tests/results',
+    `advanced-${mode}${captureEncodingSuffix()}`,
+  )
   const isTagFilterMode = mode === 'include-tag' || mode === 'exclude-tag'
   const configPath = path.resolve(
     isTagFilterMode
@@ -144,20 +355,35 @@ const runMode = async (
     child,
     (code) => `[e2e:advanced] ${mode} run failed with code ${code}`,
     5 * 60_000,
-    mode === 'retention' ? [1] : [0],
+    mode === 'retention' || mode === 'failure-burst' ? [1] : [0],
   )
+  await assertSpoolDirectoryRemoved(resultsDir)
 
   if (mode === 'retention') {
-    await assertDiscardedRetentionEntry(resultsDir)
+    await assertRetentionEntries(resultsDir)
   }
-  if (mode === 'retry' || mode === 'deferred-merge') {
+  if (mode === 'failure-burst') {
+    await assertFailureBurstEntries(resultsDir)
+  }
+  if (mode === 'tail-frame') {
+    await assertTailFrameEntries(
+      resultsDir,
+      environment.ffmpegDetection.resolvedPath,
+    )
+  }
+  if (
+    mode === 'retry' ||
+    mode === 'deferred-merge' ||
+    mode === 'retention' ||
+    mode === 'failure-burst'
+  ) {
     await assertManifestMediaDimensions(
       resultsDir,
       environment.ffmpegDetection.resolvedPath,
     )
   }
 
-  if (mode === 'global-concurrency') {
+  if (mode === 'global-concurrency' || mode === 'failure-burst') {
     // Config onComplete runs before launcher services, so verify final cleanup here.
     const remainingRuns = await readdir(
       path.join(resultsDir, '.global-recording-locks'),

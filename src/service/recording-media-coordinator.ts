@@ -81,8 +81,9 @@ export class RecordingMediaCoordinator {
     this.tasks.push(task)
   }
 
+  /** Deletes every file of the recording, finalized or still held. */
   async deleteRecordedSegments(): Promise<void> {
-    const filesToDelete = [...this.captureSession.recordedPaths]
+    const filesToDelete = [...this.captureSession.filePaths]
     await Promise.all(
       filesToDelete.map((file) =>
         this.fileSystem.unlink(file).catch(() => {
@@ -92,6 +93,7 @@ export class RecordingMediaCoordinator {
     )
     this.dropTasksForPaths(filesToDelete)
     this.captureSession.clearRecordedPaths()
+    this.captureSession.clearHeldSegments()
   }
 
   queueDeferredMerge(): void {
@@ -203,10 +205,8 @@ export class RecordingMediaCoordinator {
     }
   }
 
-  async finalizeSegment(
-    segment: ActiveSegment,
-    options: Readonly<{ keepArtifacts?: boolean }> = {},
-  ): Promise<void> {
+  /** Processes a stopped segment of a recording that is being kept. */
+  async finalizeSegment(segment: ActiveSegment): Promise<void> {
     let recordedSize: number
     try {
       const stats = await this.fileSystem.stat(segment.recordingPath)
@@ -236,12 +236,8 @@ export class RecordingMediaCoordinator {
       return
     }
 
-    if (!segment.transcode || options.keepArtifacts === false) {
-      this.captureSession.addRecordedPath(
-        options.keepArtifacts === false
-          ? segment.recordingPath
-          : segment.outputPath,
-      )
+    if (!segment.transcode) {
+      this.captureSession.addRecordedPath(segment.outputPath)
       return
     }
 
@@ -489,7 +485,8 @@ export class RecordingMediaCoordinator {
       .catch(() => undefined)
   }
 
-  private async findExisting(paths: readonly string[]): Promise<string[]> {
+  /** The given files that are on disk, in the given order. */
+  async findExisting(paths: readonly string[]): Promise<string[]> {
     const found = await Promise.all(
       paths.map(async (filePath) =>
         this.fileSystem

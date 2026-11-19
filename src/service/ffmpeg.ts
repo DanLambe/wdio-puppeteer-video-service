@@ -60,46 +60,78 @@ export const getFfmpegCandidates = (
   return uniqueCandidates
 }
 
-const canExecuteFfmpeg = async (ffmpegPath: string): Promise<boolean> => {
-  return await new Promise<boolean>((resolve) => {
-    const proc = spawn(ffmpegPath, ['-version'], {
-      stdio: ['ignore', 'ignore', 'ignore'],
-      windowsHide: true,
-    })
+export interface FfmpegVersionProbe {
+  /** The binary started and `-version` exited with status 0. */
+  readonly ran: boolean
+  readonly version: string | undefined
+}
+
+export interface ResolvedFfmpeg {
+  readonly path: string
+  readonly version: string | undefined
+}
+
+const spawnVersionProbeProcess: SpawnProbeProcess = (command, args) =>
+  spawn(command, args, {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+  })
+
+/**
+ * Run `ffmpeg -version` once. It tells both whether the binary runs and which
+ * version it is, so availability and version cost one spawn.
+ */
+export const probeFfmpegVersion = async (
+  ffmpegPath: string,
+  spawnProcess: SpawnProbeProcess = spawnVersionProbeProcess,
+): Promise<FfmpegVersionProbe> => {
+  return await new Promise<FfmpegVersionProbe>((resolve) => {
+    const proc = spawnProcess(ffmpegPath, ['-version'])
+    let stdout = ''
     let settled = false
-    const settle = (available: boolean) => {
+    const settle = (result: FfmpegVersionProbe): void => {
       if (settled) {
         return
       }
-
       settled = true
-      resolve(available)
+      resolve(result)
     }
-
     const timer = setTimeout(() => {
       proc.kill()
-      settle(false)
+      settle({ ran: false, version: undefined })
     }, FFMPEG_CHECK_TIMEOUT_MS)
 
+    proc.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
     proc.on('error', () => {
       clearTimeout(timer)
-      settle(false)
+      settle({ ran: false, version: undefined })
     })
-
     proc.on('close', (code) => {
       clearTimeout(timer)
-      settle(code === 0)
+      if (code !== 0) {
+        settle({ ran: false, version: undefined })
+        return
+      }
+      const firstLine = stdout.split(/\r?\n/u)[0]?.trim()
+      const match = firstLine?.match(/^ffmpeg version\s+(\S+)/iu)
+      settle({ ran: true, version: match?.[1] })
     })
   })
 }
 
-export const resolveAvailableFfmpegPath = async (
+/** The first candidate that runs, with the version it reported. */
+export const resolveFfmpeg = async (
   candidates: string[],
-  isExecutable: (ffmpegPath: string) => Promise<boolean> = canExecuteFfmpeg,
-): Promise<string | undefined> => {
+  probe: (
+    ffmpegPath: string,
+  ) => Promise<FfmpegVersionProbe> = probeFfmpegVersion,
+): Promise<ResolvedFfmpeg | undefined> => {
   for (const candidate of candidates) {
-    if (await isExecutable(candidate)) {
-      return candidate
+    const result = await probe(candidate)
+    if (result.ran) {
+      return { path: candidate, version: result.version }
     }
   }
 
@@ -108,46 +140,9 @@ export const resolveAvailableFfmpegPath = async (
 
 export const readFfmpegVersion = async (
   ffmpegPath: string,
-  spawnProcess: SpawnProbeProcess = (command, args) =>
-    spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    }),
+  spawnProcess?: SpawnProbeProcess,
 ): Promise<string | undefined> => {
-  return await new Promise<string | undefined>((resolve) => {
-    const proc = spawnProcess(ffmpegPath, ['-version'])
-    let stdout = ''
-    let settled = false
-    const settle = (version: string | undefined): void => {
-      if (settled) {
-        return
-      }
-      settled = true
-      resolve(version)
-    }
-    const timer = setTimeout(() => {
-      proc.kill()
-      settle(undefined)
-    }, FFMPEG_CHECK_TIMEOUT_MS)
-
-    proc.stdout?.on('data', (chunk) => {
-      stdout += chunk.toString('utf8')
-    })
-    proc.on('error', () => {
-      clearTimeout(timer)
-      settle(undefined)
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        settle(undefined)
-        return
-      }
-      const firstLine = stdout.split(/\r?\n/u)[0]?.trim()
-      const match = firstLine?.match(/^ffmpeg version\s+(\S+)/iu)
-      settle(match?.[1])
-    })
-  })
+  return (await probeFfmpegVersion(ffmpegPath, spawnProcess)).version
 }
 
 const spawnDirectMp4ProbeProcess: SpawnProbeProcess = (

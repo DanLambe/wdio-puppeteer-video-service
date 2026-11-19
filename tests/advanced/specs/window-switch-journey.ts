@@ -1,4 +1,11 @@
-export const runWindowSwitchingJourney = async (): Promise<void> => {
+export interface WindowSwitchingJourneyOptions {
+  /** Runs once the test drives another tab, with how many segments stopped. */
+  readonly afterTabMove?: (stoppedSegments: number) => Promise<void>
+}
+
+export const runWindowSwitchingJourney = async (
+  options: WindowSwitchingJourneyOptions = {},
+): Promise<void> => {
   await browser.url('/windows')
   const link = await $('=Click Here').getElement()
   await link.click()
@@ -19,10 +26,12 @@ export const runWindowSwitchingJourney = async (): Promise<void> => {
 
   await browser.switchToWindow(newHandle)
   await expect($('h3')).toHaveText('New Window')
+  await options.afterTabMove?.(1)
   await browser.pause(900)
 
   await browser.closeWindow()
   await browser.switchToWindow(originalHandle)
   await expect($('h3')).toHaveText('Opening a new window')
+  await options.afterTabMove?.(2)
   await browser.pause(900)
 }

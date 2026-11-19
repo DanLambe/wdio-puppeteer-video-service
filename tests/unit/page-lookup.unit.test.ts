@@ -221,13 +221,18 @@ describe('Puppeteer page lookup by CDP target id', () => {
 
   // Timers fire once pending work has run, and move the clock to their due
   // time, so a test can read how long a lookup would have taken.
+  interface VirtualTimer {
+    readonly immediate: NodeJS.Immediate
+    unref(): VirtualTimer
+  }
+
   const createVirtualClock = () => {
     const { clock } = createClock()
     let now = 0
     const virtual: ClockBoundary = {
       ...clock,
       clearTimeout: (timer) => {
-        clearImmediate(timer as unknown as NodeJS.Immediate)
+        clearImmediate((timer as unknown as VirtualTimer).immediate)
       },
       delay: async (milliseconds) => {
         now += milliseconds
@@ -235,10 +240,14 @@ describe('Puppeteer page lookup by CDP target id', () => {
       now: () => now,
       setTimeout: (callback: () => void, milliseconds: number) => {
         const due = now + milliseconds
-        const timer = setImmediate(() => {
+        const immediate = setImmediate(() => {
           now = Math.max(now, due)
           callback()
         })
+        // The lookup unrefs its timers. An unref'd immediate runs only when
+        // something else wakes the event loop, so with nothing else pending
+        // it waited for Vitest's 5 s timeout. A virtual timer stays ref'd.
+        const timer: VirtualTimer = { immediate, unref: () => timer }
         return timer as unknown as NodeJS.Timeout
       },
     }

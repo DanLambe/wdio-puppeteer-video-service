@@ -1,5 +1,4 @@
-import type { WriteStream } from 'node:fs'
-import type { LogLevel, OutputFormat } from '../types.js'
+import type { CaptureEncoding, LogLevel, OutputFormat } from '../types.js'
 
 export interface ResolvedTranscodeOptions {
   readonly deleteOriginal: boolean
@@ -15,12 +14,6 @@ export interface ActiveSegment {
   recordingFormat: OutputFormat
   transcode: boolean
   transcodeOptions: ResolvedTranscodeOptions
-  writeStream: WriteStream
-  writeStreamDone: Promise<void>
-  writeStreamErrored: boolean
-  writeStreamErrorMessage?: string
-  onWriteStreamError: (error: NodeJS.ErrnoException) => void
-  onRecorderError: (error: unknown) => void
 }
 
 export interface DeferredTranscodeTask {
@@ -79,7 +72,10 @@ export const ACTIVE_PAGE_TIMEOUT_MS = 2_000
 export const ACTIVE_PAGE_POLL_MS = 50
 export const SEGMENT_SWITCH_DELAY_MS = 50
 export const RECORDER_STOP_TIMEOUT_MS = 5_000
-export const WRITE_STREAM_TIMEOUT_MS = 30_000
+// A file FFmpeg has just closed can stay locked on Windows for a moment, as
+// when a scanner opens it. Deleting a discarded recording retries this often.
+export const RECORDING_UNLINK_ATTEMPTS = 10
+export const RECORDING_UNLINK_RETRY_MS = 50
 export const FFMPEG_CHECK_TIMEOUT_MS = 5_000
 export const FFMPEG_TERMINATION_GRACE_MS = 1_000
 export const FFMPEG_TERMINATION_HELPER_TIMEOUT_MS = 500
@@ -94,8 +90,13 @@ export const GLOBAL_RECORDING_SLOT_POLL_MS = 100
 export const GLOBAL_RECORDING_SLOT_TIMEOUT_MS = 120_000
 export const DEFAULT_RECORDING_START_TIMEOUT_MS = 2_500
 export const DEFAULT_PUPPETEER_CONNECTION_TIMEOUT_MS = 10_000
+// The one place `capture.encoding` defaults.
+export const DEFAULT_CAPTURE_ENCODING: CaptureEncoding = 'live'
 export const GLOBAL_RECORDING_SLOT_INVALID_STALE_MS = 5_000
 export const GLOBAL_RECORDING_SLOT_DIR_NAME = '.wdio-video-global-slots'
+// Under `outputDir`, one subdirectory per WDIO run holds deferred segments'
+// frames until each is encoded or discarded.
+export const SPOOL_DIR_NAME = '.wdio-video-spool'
 export const DEFAULT_OUTPUT_DIR = 'videos'
 export const SERVICE_LOG_PREFIX = '[WdioPuppeteerVideoService]'
 
