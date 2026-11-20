@@ -565,24 +565,31 @@ describe('cancelling a slot wait', () => {
   })
 
   it('never asks for a slot once the wait is cancelled', async () => {
-    const state = createInProcessRecordingSlotState()
-    const openExclusive = vi.fn(nodeFileSystem.openExclusive)
-    const scheduler = new RecordingSlotScheduler(
-      { maxConcurrentRecordings: 1, maxGlobalRecordings: 1, runId: 'run' },
-      noopLogger,
-      {
-        fileSystem: { ...nodeFileSystem, openExclusive },
-        inProcessState: state,
-      },
-    )
-    const controller = new AbortController()
-    controller.abort()
+    await withTempDir(async (tempDir) => {
+      const state = createInProcessRecordingSlotState()
+      const openExclusive = vi.fn(nodeFileSystem.openExclusive)
+      const scheduler = new RecordingSlotScheduler(
+        {
+          globalRecordingLockDir: tempDir,
+          maxConcurrentRecordings: 1,
+          maxGlobalRecordings: 1,
+          runId: 'run',
+        },
+        noopLogger,
+        {
+          fileSystem: { ...nodeFileSystem, openExclusive },
+          inProcessState: state,
+        },
+      )
+      const controller = new AbortController()
+      controller.abort()
 
-    await expect(
-      scheduler.acquire({ signal: controller.signal }),
-    ).resolves.toBe(false)
-    expect(state.activeSlots).toBe(0)
-    expect(openExclusive).not.toHaveBeenCalled()
+      await expect(
+        scheduler.acquire({ signal: controller.signal }),
+      ).resolves.toBe(false)
+      expect(state.activeSlots).toBe(0)
+      expect(openExclusive).not.toHaveBeenCalled()
+    })
   })
 
   it('removes a cancelled in-process waiter so a freed slot is never taken for it', async () => {
