@@ -118,6 +118,56 @@ class registration is rejected before browser startup because it cannot load
 the launcher. Configuration is validated during plugin initialization. Unknown
 keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
+### Running on GitHub Actions
+
+The `ci` profile suits a standard hosted runner (see
+[Parallel Performance Tuning](#parallel-performance-tuning)), and the reporter
+adds a report you can open from the downloaded artifact:
+
+```typescript
+import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
+
+const outputDir = 'videos'
+
+export const config: WebdriverIO.Config = {
+  services: [
+    [
+      'puppeteer-video',
+      {
+        outputDir,
+        profile: process.env.CI ? 'ci' : 'default',
+        // For a suite that mostly passes, see "Choosing the capture encoding":
+        // capture: { encoding: 'auto' },
+      },
+    ],
+  ],
+  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir }]],
+}
+```
+
+FFmpeg must be available to the job ([Prerequisites](#prerequisites)), for
+example from the runner's package manager. Upload `outputDir` in a step of its
+own with a status condition, so a failing test step does not skip it:
+
+```yaml
+- name: Install FFmpeg
+  run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+- name: Run tests
+  run: npx wdio run wdio.conf.ts
+- name: Upload videos
+  if: ${{ !cancelled() }}
+  uses: actions/upload-artifact@v4
+  with:
+    name: test-videos
+    path: videos/
+    if-no-files-found: ignore
+    retention-days: 7
+```
+
+The directory holds the kept videos, `manifest.json` and `video-report.html`,
+which links the videos by relative path, so the downloaded artifact opens
+offline. The service removes its own working files when the run ends.
+
 ## Prerequisites
 
 - Node.js 24 is certified. Newer versions are permitted by the package engine range and supported on a best-effort basis.
