@@ -954,3 +954,101 @@ describe('report model and HTML renderer', () => {
 
 const digestOf = (content: string): string =>
   `sha256-${createHash('sha256').update(content, 'utf8').digest('base64')}`
+
+describe('report navigation for larger suites', () => {
+  const mediaItem = (
+    index: number,
+    overrides: Partial<ReportModel['items'][number]> = {},
+  ): ReportModel['items'][number] => ({
+    id: `item-${index.toString()}`,
+    status: 'failed',
+    spec: 'tests/specs/Checkout.ts',
+    browser: 'chrome 140',
+    testName: `Pays By Card ${index.toString()}`,
+    attempt: 1,
+    retried: false,
+    durationMs: 25,
+    media: [
+      {
+        path: `video-${index.toString()}.webm`,
+        href: `./video-${index.toString()}.webm`,
+        mimeType: 'video/webm',
+        size: 1024 * 1024,
+        available: true,
+      },
+    ],
+    ...overrides,
+  })
+  const modelOf = (
+    items: ReportModel['items'],
+    extra: Partial<ReportModel> = {},
+  ): ReportModel => ({
+    runId: 'navigation',
+    generatedAt: completedAt,
+    diagnostics: [],
+    items,
+    ...extra,
+  })
+
+  it('summarizes the retained videos and links the manifest', () => {
+    const html = renderStaticVideoReport(
+      modelOf(
+        [
+          mediaItem(1),
+          mediaItem(2),
+          mediaItem(3, {
+            media: [
+              {
+                path: 'gone.webm',
+                href: './gone.webm',
+                mimeType: 'video/webm',
+                size: 5,
+                available: false,
+              },
+            ],
+          }),
+        ],
+        { manifestFileName: 'manifest.json' },
+      ),
+    )
+
+    expect(html).toContain(
+      '<span class="summary summary-videos">videos: 2 (2.0 MiB)</span>',
+    )
+    expect(html).toContain(
+      '<a class="summary summary-link" href="./manifest.json">manifest.json</a>',
+    )
+    expect(renderStaticVideoReport(modelOf([mediaItem(1)]))).not.toContain(
+      'manifest.json',
+    )
+  })
+
+  it('makes every card searchable by its test, spec, browser and errors', () => {
+    const html = renderStaticVideoReport(
+      modelOf([
+        mediaItem(1, {
+          fullName: 'Checkout <Card>',
+          errors: [{ message: 'Expected TOTAL', stack: 'at secret-stack' }],
+        }),
+      ]),
+    )
+
+    expect(html).toContain('<input type="search" id="search-filter"')
+    expect(html).toContain(
+      'data-search="pays by card 1 checkout &lt;card&gt; tests/specs/checkout.ts chrome 140 expected total"',
+    )
+    expect(html).not.toMatch(/data-search="[^"]*secret-stack/u)
+  })
+
+  it('loads video metadata only on demand in a report with many videos', () => {
+    const items = (count: number) =>
+      Array.from({ length: count }, (_, index) => mediaItem(index))
+
+    expect(renderStaticVideoReport(modelOf(items(20)))).toContain(
+      '<video controls preload="metadata">',
+    )
+    const large = renderStaticVideoReport(modelOf(items(21)))
+    expect(large).toContain('<video controls preload="none">')
+    expect(large).not.toContain('preload="metadata"')
+  })
+})

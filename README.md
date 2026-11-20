@@ -668,8 +668,10 @@ video.
 Skipped tests and tests without retained video remain visible. Tests of a
 worker the service does not record, such as Firefox in a mixed-browser suite,
 are listed with `capture: skipped` and the reason, without a diagnostic. The report has
-status, spec, browser, and retry filters, inline playback, diagnostics, and
-error details. When a recording used more than one segment, each video is
+status, spec, browser, and retry filters, a search box over test names, specs,
+browsers and error messages, a count and total size of its videos, a link to
+`manifest.json`, inline playback, diagnostics, and error details. In a report
+with more than 20 videos, each loads only when played. When a recording used more than one segment, each video is
 labelled with its tab, such as "Tab 2 · test command". A merged video lists its
 tab sequence, such as "Tabs 1 → 2 → 1".
 

@@ -276,7 +276,9 @@ export const assertStaticVideoReport = async (options: {
     'spec-filter',
     'browser-filter',
     'retry-filter',
-    '<video controls preload="metadata">',
+    'search-filter',
+    // `none` once a report holds more than 20 videos.
+    '<video controls preload="',
   ]
   for (const markup of requiredMarkup) {
     if (!report.includes(markup)) {

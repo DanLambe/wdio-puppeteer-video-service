@@ -1000,9 +1000,10 @@ describe('static report generation', () => {
       outputDir,
       runId,
     })
-    expect(await fs.readFile(invalidManifest?.path ?? '', 'utf8')).toContain(
-      'invalid-manifest',
-    )
+    const invalidHtml = await fs.readFile(invalidManifest?.path ?? '', 'utf8')
+    expect(invalidHtml).toContain('invalid-manifest')
+    // Only a manifest the report could read is linked.
+    expect(invalidHtml).not.toContain('href="./manifest.json"')
 
     await fs.writeFile(path.join(outputDir, 'manifest.json'), '{', 'utf8')
     const corruptManifest = await generateVideoReportForRun({
@@ -1086,6 +1087,7 @@ const assertOfflineFilterScript = (html: string): void => {
     ['#spec-filter', createFilter('spec')],
     ['#browser-filter', createFilter('browser')],
     ['#retry-filter', createFilter('retry')],
+    ['#search-filter', { ...createFilter('search'), value: '' }],
   ])
   const cards = [
     {
@@ -1094,6 +1096,7 @@ const assertOfflineFilterScript = (html: string): void => {
         spec: 'one.ts',
         browser: 'chrome',
         retried: 'false',
+        search: 'opens checkout one.ts chrome',
       },
       hidden: false,
     },
@@ -1103,6 +1106,7 @@ const assertOfflineFilterScript = (html: string): void => {
         spec: 'two.ts',
         browser: 'edge',
         retried: 'true',
+        search: 'pays by card two.ts edge expected total',
       },
       hidden: false,
     },
@@ -1122,6 +1126,19 @@ const assertOfflineFilterScript = (html: string): void => {
   listeners.get('status')?.()
   expect(cards.map((card) => card.hidden)).toEqual([true, false])
   expect(empty.hidden).toBe(true)
+
+  const searchFilter = filters.get('#search-filter')
+  if (!searchFilter) {
+    throw new TypeError('Expected search filter')
+  }
+  statusFilter.value = 'all'
+  searchFilter.value = '  Checkout '
+  listeners.get('search')?.()
+  expect(cards.map((card) => card.hidden)).toEqual([false, true])
+  searchFilter.value = 'nothing matches'
+  listeners.get('search')?.()
+  expect(cards.map((card) => card.hidden)).toEqual([true, true])
+  expect(empty.hidden).toBe(false)
 }
 
 // The service never runs for a browser it cannot record, so in a suite that

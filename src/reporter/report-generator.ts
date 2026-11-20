@@ -63,13 +63,30 @@ export const generateVideoReportForRun = async (
   })
   const reportFileName = fragments[0]?.reportFileName ?? 'video-report.html'
   const reportPath = path.join(outputDir, reportFileName)
-  await writeReportAtomically(reportPath, renderStaticVideoReport(model))
+  // Only a manifest the report could read, and that is on disk beside it.
+  const linksManifest =
+    resolvedManifest.manifest !== undefined &&
+    (await isFile(path.join(outputDir, MANIFEST_FILE_NAME)))
+  await writeReportAtomically(
+    reportPath,
+    renderStaticVideoReport(
+      linksManifest
+        ? { ...model, manifestFileName: MANIFEST_FILE_NAME }
+        : model,
+    ),
+  )
   return {
     path: reportPath,
     itemCount: model.items.length,
     diagnosticCount: model.diagnostics.length,
   }
 }
+
+const isFile = async (filePath: string): Promise<boolean> =>
+  fs
+    .stat(filePath)
+    .then((stats) => stats.isFile())
+    .catch(() => false)
 
 const resolveManifest = async (
   outputDir: string,

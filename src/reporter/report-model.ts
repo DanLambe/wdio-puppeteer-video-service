@@ -58,6 +58,8 @@ export interface ReportModel {
   readonly generatedAt: string
   readonly items: ReportItem[]
   readonly diagnostics: ReporterDiagnostic[]
+  /** The manifest beside the report, linked from it. */
+  readonly manifestFileName?: string
 }
 
 export const createReportModel = async (options: {
