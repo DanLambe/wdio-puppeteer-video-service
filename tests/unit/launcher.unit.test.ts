@@ -496,6 +496,7 @@ describe('WdioPuppeteerVideoLauncher', () => {
         hydratedRetryAttempt = session.specFileRetryAttempt
       },
       endEntity: vi.fn(async () => {}),
+      finalizeInterruptedRecording: vi.fn(async () => {}),
       finalizeSpecRecording: vi.fn(async () => {}),
       resetWorkerState: vi.fn(),
     }

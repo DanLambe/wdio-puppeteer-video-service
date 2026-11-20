@@ -238,6 +238,8 @@ export class WdioPuppeteerVideoWorkerRuntime
       actions: {
         finalizeMedia: (passed, keepArtifacts) =>
           this._recordingController.finalizeMedia(passed, keepArtifacts),
+        finalizeMediaWithoutOutcome: () =>
+          this._recordingController.finalizeWithoutOutcome(),
         getAvailability: () => ({
           available: this._canUseRecordingHooks(),
           ...(this._recordingDisabledReason
@@ -530,8 +532,9 @@ export class WdioPuppeteerVideoWorkerRuntime
             ) {
               await this._recordingCoordinator.finalizeSpecRecording()
             } else {
-              await this._recordingController.finalizeWithoutOutcome()
-              await this._recordingController.reset()
+              // Its entry lists the kept media; a result that arrives after a
+              // reload is added to that entry.
+              await this._recordingCoordinator.finalizeInterruptedRecording()
             }
           }
 

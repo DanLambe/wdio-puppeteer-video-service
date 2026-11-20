@@ -69,6 +69,8 @@ export interface WorkerRecordingActions {
     passed: boolean,
     keepArtifacts: boolean,
   ): Promise<RecordingMediaFinalization>
+  /** Ends a recording before its outcome is known, keeping its media. */
+  finalizeMediaWithoutOutcome(): Promise<RecordingMediaFinalization>
   getAvailability(): RecordingAvailability
   getRecordedPaths(): readonly string[]
   isRecordingActive(): boolean
@@ -101,8 +103,30 @@ export interface WorkerRecordingCoordinatorPort {
   beginWorker(specPaths: readonly string[]): void
   configureSession(session: RecordingCoordinatorSession): void
   endEntity(outcome: RecordingEntityOutcome): Promise<void>
+  /**
+   * Ends a test-scoped recording whose result has not arrived, as when the
+   * session reloads or the worker ends mid test. Its media is kept, and its
+   * entry lists it; a result that arrives later is added to that entry. Runs
+   * inside a serialized recording task.
+   */
+  finalizeInterruptedRecording(): Promise<void>
   finalizeSpecRecording(): Promise<void>
   resetWorkerState(): void
+}
+
+/** How a recording ends: with its entity's outcome, or before it arrives. */
+type RecordingFinalizationMode =
+  | {
+      readonly kind: 'outcome'
+      readonly passed: boolean
+      readonly result: ManifestResult
+    }
+  | { readonly kind: 'interrupted' }
+
+interface FinalizationFailures {
+  allureError?: Error | undefined
+  captureFailure?: string | undefined
+  processingFailure?: { readonly error: unknown } | undefined
 }
 
 export class WorkerRecordingCoordinator
@@ -150,36 +174,18 @@ export class WorkerRecordingCoordinator
     this.resetEntityState()
   }
 
+  // The manifest has one current entry, and media finalization reports to it.
+  // A framework can time out a completion hook while its finalization still
+  // runs, then start the next entity, so every step that reads or moves the
+  // current entry runs in the recording's serialized order: an entity's entry
+  // is completed before the next one begins.
   async beginEntity(entity: RecordingEntity): Promise<void> {
     if (this.testsOverlap) {
       await this.recordParallelEntity(entity)
       return
     }
-    const manifestEntryAlreadyActive =
-      this.isSpecScope && !!this.manifest?.currentEntryId
-    await this.manifest?.beginEntity({
-      test: entity.manifestTest,
-      scope: this.options.recording.scope,
-      specPaths: [...this.specPaths],
-    })
-
-    const eligibility = evaluateRecordingEligibility(
-      entity,
-      this.actions.getAvailability(),
-      this.options.recording.filters,
-      this.patternRegexCache,
-    )
-    if (!eligibility.eligible) {
-      await this.completeSkippedEntity(
-        entity,
-        eligibility.reason,
-        manifestEntryAlreadyActive,
-      )
-      return
-    }
-
     await this.actions.runSerialized(async () => {
-      await this.startEligibleEntity(entity, manifestEntryAlreadyActive)
+      await this.beginSerializedEntity(entity)
     })
   }
 
@@ -188,32 +194,23 @@ export class WorkerRecordingCoordinator
       // Overlapping tests cannot be told apart here, so no result is recorded.
       return
     }
-    // WDIO reports passed=false for runtime skips; they are not test failures.
-    const nonFailing = outcome.passed || outcome.manifestResult === 'skipped'
-    let manifestFailure: { readonly error: unknown } | undefined
-    try {
-      await this.manifest?.recordResult(outcome.manifestResult)
-    } catch (error) {
-      manifestFailure = { error }
-    }
+    await this.actions.runSerialized(async () => {
+      await this.endSerializedEntity(outcome)
+    })
+  }
 
-    if (this.isSpecScope) {
-      if (!nonFailing) {
-        this.specHadFailure = true
-      }
-    } else {
-      await this.finalizeIfRecording(nonFailing, outcome.manifestResult)
-    }
-
-    if (manifestFailure) {
-      throw manifestFailure.error
-    }
+  async finalizeInterruptedRecording(): Promise<void> {
+    await this.finalizeRecording({ kind: 'interrupted' })
   }
 
   async finalizeSpecRecording(): Promise<void> {
     // Manifest results were accumulated per entity; do not overwrite all-skipped
     // specs with the non-failing boolean used for retention and Allure.
-    await this.finalizeCurrentRecording(!this.specHadFailure, 'unknown')
+    await this.finalizeRecording({
+      kind: 'outcome',
+      passed: !this.specHadFailure,
+      result: 'unknown',
+    })
   }
 
   resetWorkerState(): void {
@@ -245,6 +242,61 @@ export class WorkerRecordingCoordinator
         result: entity.manifestResultWhenSkipped,
       },
     )
+  }
+
+  private async beginSerializedEntity(entity: RecordingEntity): Promise<void> {
+    const manifestEntryAlreadyActive =
+      this.isSpecScope && !!this.manifest?.currentEntryId
+    await this.manifest?.beginEntity({
+      test: entity.manifestTest,
+      scope: this.options.recording.scope,
+      specPaths: [...this.specPaths],
+    })
+
+    const eligibility = evaluateRecordingEligibility(
+      entity,
+      this.actions.getAvailability(),
+      this.options.recording.filters,
+      this.patternRegexCache,
+    )
+    if (!eligibility.eligible) {
+      await this.completeSkippedEntity(
+        entity,
+        eligibility.reason,
+        manifestEntryAlreadyActive,
+      )
+      return
+    }
+    await this.startEligibleEntity(entity, manifestEntryAlreadyActive)
+  }
+
+  private async endSerializedEntity(
+    outcome: RecordingEntityOutcome,
+  ): Promise<void> {
+    // WDIO reports passed=false for runtime skips; they are not test failures.
+    const nonFailing = outcome.passed || outcome.manifestResult === 'skipped'
+    let manifestFailure: { readonly error: unknown } | undefined
+    try {
+      await this.manifest?.recordResult(outcome.manifestResult)
+    } catch (error) {
+      manifestFailure = { error }
+    }
+
+    if (this.isSpecScope) {
+      if (!nonFailing) {
+        this.specHadFailure = true
+      }
+    } else {
+      await this.finalizeRecording({
+        kind: 'outcome',
+        passed: nonFailing,
+        result: outcome.manifestResult,
+      })
+    }
+
+    if (manifestFailure) {
+      throw manifestFailure.error
+    }
   }
 
   private resetEntityState(): void {
@@ -366,58 +418,60 @@ export class WorkerRecordingCoordinator
     })
   }
 
-  private async finalizeIfRecording(
-    passed: boolean,
-    result: ManifestResult,
-  ): Promise<void> {
-    if (!this.actions.isRecordingActive()) {
-      return
-    }
-    await this.actions.runSerialized(async () => {
-      await this.finalizeCurrentRecording(passed, result)
-    })
-  }
-
-  private async finalizeCurrentRecording(
-    passed: boolean,
-    result: ManifestResult,
+  /**
+   * Finalizes the active recording and completes its manifest entry. With an
+   * outcome, retention decides what is kept and the kept videos go to Allure;
+   * a recording interrupted before its outcome keeps its media.
+   */
+  private async finalizeRecording(
+    mode: RecordingFinalizationMode,
   ): Promise<void> {
     if (!this.actions.isRecordingActive()) {
       return
     }
 
-    const keepArtifacts = shouldRetainRecording({
-      passed,
-      retain: this.options.recording.retain,
-      retryCount: this.activeRecordingRetryCount,
-    })
-    let allureError: Error | undefined
-    let captureFailure: string | undefined
-    let processingFailure: { readonly error: unknown } | undefined
+    const outcome = mode.kind === 'outcome' ? mode : undefined
+    const result = outcome?.result ?? 'unknown'
+    const keepArtifacts =
+      outcome === undefined ||
+      shouldRetainRecording({
+        passed: outcome.passed,
+        retain: this.options.recording.retain,
+        retryCount: this.activeRecordingRetryCount,
+      })
+    const failures: FinalizationFailures = {}
     try {
-      const finalized = await this.actions.finalizeMedia(passed, keepArtifacts)
-      captureFailure = finalized.captureFailure
-      processingFailure = finalized.processingFailure
+      const finalized = outcome
+        ? await this.actions.finalizeMedia(outcome.passed, keepArtifacts)
+        : await this.actions.finalizeMediaWithoutOutcome()
+      failures.captureFailure = finalized.captureFailure
+      failures.processingFailure = finalized.processingFailure
       await this.manifest?.completeCurrent(
         createCompletedManifestOptions({
-          captureFailed: captureFailure !== undefined,
+          captureFailed: finalized.captureFailure !== undefined,
           deferred: finalized.deferred,
           keepArtifacts,
           result,
           paths: finalized.paths,
           processing: this.options.processing,
-          ...(processingFailure
-            ? { processingFailure: describeError(processingFailure.error) }
+          ...(finalized.processingFailure
+            ? {
+                processingFailure: describeError(
+                  finalized.processingFailure.error,
+                ),
+              }
             : {}),
           ...(finalized.tabs ? { tabs: finalized.tabs } : {}),
         }),
       )
-      // Media that failed processing is still the test's evidence.
-      const allureResult = await this.allure?.attachRetainedVideos(
-        finalized.paths.filter(isVideoArtifactPath),
-        passed,
-      )
-      allureError = allureResult?.error
+      if (outcome) {
+        // Media that failed processing is still the test's evidence.
+        const allureResult = await this.allure?.attachRetainedVideos(
+          finalized.paths.filter(isVideoArtifactPath),
+          outcome.passed,
+        )
+        failures.allureError = allureResult?.error
+      }
     } catch (error) {
       await this.manifest
         ?.completeCurrent({
@@ -429,23 +483,31 @@ export class WorkerRecordingCoordinator
         })
         .catch(() => undefined)
       // A later reporting error never hides why processing failed.
-      throw processingFailure ? processingFailure.error : error
+      throw failures.processingFailure
+        ? failures.processingFailure.error
+        : error
     } finally {
       await this.actions.resetRecording()
       this.activeRecordingRetryCount = 0
     }
+    this.throwFinalizationFailure(failures)
+  }
 
-    if (processingFailure) {
+  private throwFinalizationFailure(failures: FinalizationFailures): void {
+    if (failures.processingFailure) {
       // Thrown by processing itself, as before the entry was reported.
-      throw processingFailure.error
+      throw failures.processingFailure.error
+    }
+    if (this.options.failurePolicy !== 'error') {
+      return
     }
     // Already warned when the segment stopped; the partial file stays
     // attached and in the manifest for diagnosis.
-    if (captureFailure && this.options.failurePolicy === 'error') {
-      throw new Error(`[WdioPuppeteerVideoService] ${captureFailure}`)
+    if (failures.captureFailure) {
+      throw new Error(`[WdioPuppeteerVideoService] ${failures.captureFailure}`)
     }
-    if (allureError && this.options.failurePolicy === 'error') {
-      throw allureError
+    if (failures.allureError) {
+      throw failures.allureError
     }
   }
 

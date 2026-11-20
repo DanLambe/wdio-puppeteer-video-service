@@ -33,11 +33,6 @@ const createHarness = () => {
     .mockImplementation(async () => {
       events.push('release')
     })
-  const finalizeKept = vi
-    .spyOn(RecordingController.prototype, 'finalizeWithoutOutcome')
-    .mockImplementation(async () => {
-      events.push('finalize-kept')
-    })
   const reset = vi
     .spyOn(RecordingController.prototype, 'reset')
     .mockImplementation(async () => {
@@ -72,6 +67,9 @@ const createHarness = () => {
     beginWorker: vi.fn(),
     configureSession: vi.fn(),
     endEntity: vi.fn(async () => {}),
+    finalizeInterruptedRecording: vi.fn(async () => {
+      events.push('interrupted')
+    }),
     finalizeSpecRecording: vi.fn(async () => {
       events.push('spec')
     }),
@@ -97,7 +95,6 @@ const createHarness = () => {
     terminate,
     resume,
     release,
-    finalizeKept,
     reset,
     flushMedia,
     flushManifest,
@@ -185,9 +182,9 @@ describe('worker runtime hook sequencing', () => {
   })
 
   it.each([
-    { specScope: false, slug: 'test', expected: ['finalize-kept', 'reset'] },
+    { specScope: false, slug: 'test', expected: ['interrupted'] },
     { specScope: true, slug: 'spec', expected: ['spec'] },
-    { specScope: true, slug: '', expected: ['finalize-kept', 'reset'] },
+    { specScope: true, slug: '', expected: ['interrupted'] },
   ])(
     'finalizes active capture for scope=$specScope slug=$slug',
     async ({ specScope, slug, expected }) => {

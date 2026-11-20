@@ -651,6 +651,8 @@ const createReportingCoordinator = (
     actions: {
       finalizeMedia: (passed, keep) =>
         harness.controller.finalizeMedia(passed, keep),
+      finalizeMediaWithoutOutcome: () =>
+        harness.controller.finalizeWithoutOutcome(),
       getAvailability: () => ({ available: true }),
       getRecordedPaths: () => harness.session.filePaths,
       isRecordingActive: () => harness.session.isRecordingActive,
@@ -678,7 +680,7 @@ const createReportingCoordinator = (
   })
   const endFailedTest = () =>
     coordinator.endEntity({ manifestResult: 'failed', passed: false })
-  return { attach, completeCurrent, endFailedTest }
+  return { attach, completeCurrent, coordinator, endFailedTest }
 }
 
 /** What a kept recording leaves: its result and the files under outputDir. */
@@ -883,6 +885,53 @@ describe('kept deferred recordings', () => {
     ])
     expect(harness.session.heldSegments).toEqual([])
     expect(harness.leases).not.toContain('processing slot while recording')
+  })
+
+  it('lists the encoded parts of a recording a session reload interrupts', async () => {
+    const harness = createHarness({ service: { capture: DEFERRED } })
+    const reporting = createReportingCoordinator(harness)
+    await harness.recordThreeTabs()
+
+    await reporting.coordinator.finalizeInterruptedRecording()
+
+    expect(harness.encodeFfmpeg.run).toHaveBeenCalledTimes(3)
+    expect(reporting.attach).not.toHaveBeenCalled()
+    const entry = reporting.completeCurrent.mock.calls[0]?.[0]
+    expect(entry).toMatchObject({ decision: 'recorded', result: 'unknown' })
+    expect(baseNames(entry?.paths ?? [])).toEqual([
+      expect.stringMatching(/_part1\.webm$/u),
+      expect.stringMatching(/_part2\.webm$/u),
+      expect.stringMatching(/_part3\.webm$/u),
+    ])
+    expect(entry?.tabs?.size).toBe(3)
+    expect(harness.session.isRecordingActive).toBe(false)
+  })
+
+  it('reports an interrupted recording whose spool cannot be encoded as incomplete', async () => {
+    const harness = createHarness({ service: { capture: DEFERRED } })
+    const reporting = createReportingCoordinator(harness)
+    await harness.recordThreeTabs()
+    harness.encodes.failParts.add(2)
+    const framesPath = path.join(
+      outputDir,
+      `${harness.session.currentTestSlug}_part2.frames.mkv`,
+    )
+
+    await reporting.coordinator.finalizeInterruptedRecording()
+
+    const entry = reporting.completeCurrent.mock.calls[0]?.[0]
+    expect(entry).toMatchObject({
+      decision: 'failed',
+      reason: 'capture-incomplete',
+      result: 'unknown',
+    })
+    expect(baseNames(entry?.paths ?? [])).toEqual([
+      expect.stringMatching(/_part1\.webm$/u),
+      expect.stringMatching(/_part3\.webm$/u),
+    ])
+    await expect(fs.readFile(framesPath, 'utf8')).resolves.toBe(
+      'spooled-frames',
+    )
   })
 })
 

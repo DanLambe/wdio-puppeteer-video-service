@@ -267,8 +267,10 @@ Unknown integrations are rejected instead of being silently ignored.
   one is encoded when its test ends. `'auto'` decides when the recording
   starts: `retain: 'all'` is live, `retain: 'failures'` is deferred, and
   `retain: 'retries'` is live on a retry and deferred on a first attempt.
-- A recording whose outcome is never known, because the worker ends or the
-  session reloads mid-test, is kept, and a deferred one is encoded then.
+- A recording stopped before its test's result is known, because the worker
+  ends or the session reloads mid-test, is kept, and a deferred one is encoded
+  then. Its manifest entry lists that media at once, and a result that arrives
+  later, after a reload, is added to the same entry.
 
 ## Deferred Encoding
 

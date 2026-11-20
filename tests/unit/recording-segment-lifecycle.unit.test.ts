@@ -249,6 +249,8 @@ const createReportingCoordinator = (
     actions: {
       finalizeMedia: (passed, keep) =>
         harness.controller.finalizeMedia(passed, keep),
+      finalizeMediaWithoutOutcome: () =>
+        harness.controller.finalizeWithoutOutcome(),
       getAvailability: () => ({ available: true }),
       getRecordedPaths: () => harness.session.filePaths,
       isRecordingActive: () => harness.session.isRecordingActive,

@@ -490,13 +490,34 @@ export class RecordingController implements ContextFollowerTarget {
   }
 
   /**
-   * Ends a recording whose outcome will never be known, as when the worker
-   * ends or the session reloads mid-recording: its media is kept.
+   * Ends a recording before its outcome is known, as when the worker ends or
+   * the session reloads mid-recording: its media is kept, never merged, and a
+   * processing error is returned like `finalizeMedia` returns it.
    */
-  async finalizeWithoutOutcome(): Promise<void> {
+  async finalizeWithoutOutcome(): Promise<RecordingMediaFinalization> {
+    if (!this.captureSession.currentTestSlug) {
+      return { deferred: false, paths: [] }
+    }
+    const deferredTaskCount = this.media.pendingTaskCount
+    this.confirmGap()
     await this.stopRecording()
     await this.encodeHeldSpools()
-    await this.finalizeHeldSegments()
+    const processingFailure = await this.finalizeHeldSegmentsReportingFailure()
+    const paths = processingFailure
+      ? await this.media.findExisting(this.captureSession.filePaths)
+      : this.captureSession.recordedPaths
+    if (processingFailure) {
+      // As in `finalizeMedia`: the files kept so far are never processed again.
+      this.media.dropTasksForPaths(this.captureSession.filePaths)
+    }
+    const tabs = this.readRetainedSegmentTabs(paths)
+    return {
+      ...(this.captureFailure ? { captureFailure: this.captureFailure } : {}),
+      deferred: this.media.pendingTaskCount > deferredTaskCount,
+      paths,
+      ...(processingFailure ? { processingFailure } : {}),
+      ...(tabs.size ? { tabs } : {}),
+    }
   }
 
   /**
