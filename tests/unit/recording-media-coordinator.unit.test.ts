@@ -3,7 +3,11 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nodeFileSystem, nodeProcess } from '../../src/service/boundaries.js'
+import {
+  nodeFileSystem,
+  nodeProcess,
+  systemClock,
+} from '../../src/service/boundaries.js'
 import { CaptureSession } from '../../src/service/capture-session.js'
 import type {
   ActiveSegment,
@@ -1098,6 +1102,59 @@ describe('RecordingMediaCoordinator', () => {
     expect(harness.coordinator.pendingTasks).toEqual([unrelatedTask])
   })
 
+  it('retries a discarded segment that is briefly locked, as on Windows', async () => {
+    const tempDir = await createTempDir()
+    const lockedPath = path.join(tempDir, 'locked.webm')
+    const stuckPath = path.join(tempDir, 'stuck.webm')
+    await Promise.all([
+      fs.writeFile(lockedPath, 'locked', 'utf8'),
+      fs.writeFile(stuckPath, 'stuck', 'utf8'),
+    ])
+    const lockedFailures = new Map([
+      [lockedPath, 2],
+      [stuckPath, Number.POSITIVE_INFINITY],
+    ])
+    const delays: number[] = []
+    const harness = createHarness({}, undefined, {
+      clock: {
+        ...systemClock,
+        delay: async (milliseconds) => {
+          delays.push(milliseconds)
+        },
+      },
+      fileSystem: {
+        ...nodeFileSystem,
+        unlink: async (filePath) => {
+          const remaining = lockedFailures.get(filePath) ?? 0
+          if (remaining > 0) {
+            lockedFailures.set(filePath, remaining - 1)
+            const error = new Error('busy') as NodeJS.ErrnoException
+            error.code = 'EBUSY'
+            throw error
+          }
+          await nodeFileSystem.unlink(filePath)
+        },
+      },
+    })
+    harness.captureSession.beginRecording('locked')
+    harness.captureSession.addRecordedPath(lockedPath)
+    harness.captureSession.addRecordedPath(stuckPath)
+
+    await harness.coordinator.deleteRecordedSegments()
+
+    expect(await fileExists(lockedPath)).toBe(false)
+    // A lock that outlasts the retries leaves the file, and says so.
+    expect(await fileExists(stuckPath)).toBe(true)
+    expect(delays.length).toBeGreaterThan(2)
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({
+        level: 'warn',
+        message: expect.stringContaining(stuckPath),
+      }),
+    )
+    expect(harness.captureSession.recordedPaths).toEqual([])
+  })
+
   it('removes empty captures, reports missing captures, and retains output directly', async () => {
     const tempDir = await createTempDir()
     const emptyPath = path.join(tempDir, 'empty.webm')
@@ -1200,6 +1257,7 @@ describe('RecordingMediaCoordinator', () => {
 const createHarness = (
   serviceOptions: WdioPuppeteerVideoServiceOptions = {},
   manifestRecorder?: ManifestWorkerRecorder,
+  overrides: Partial<RecordingMediaCoordinatorOptions> = {},
 ): CoordinatorHarness => {
   const captureSession = new CaptureSession()
   const logs: CoordinatorHarness['logs'] = []
@@ -1220,6 +1278,7 @@ const createHarness = (
     },
     mediaPipeline: { merge, reportFailure, transcode },
     options: resolveServiceConfiguration(serviceOptions).options,
+    ...overrides,
   }
 
   return {

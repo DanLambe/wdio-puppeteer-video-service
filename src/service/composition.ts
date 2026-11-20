@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Page, Browser as PuppeteerBrowser } from 'puppeteer-core'
+import { removeReporterFragments } from '../reporter/fragments.js'
 import { generateVideoReportForRun } from '../reporter/report-generator.js'
 import type { ResolvedWdioPuppeteerVideoServiceOptions } from '../types.js'
 import { AllureVideoIntegration } from './allure-integration.js'
@@ -196,6 +197,7 @@ export interface LauncherCompositionOverrides {
   readonly createManifestRunContext?: typeof createManifestRunContext
   readonly generateVideoReportForRun?: typeof generateVideoReportForRun
   readonly recoverOrphanedSpools?: typeof recoverOrphanedSpools
+  readonly removeReporterFragments?: typeof removeReporterFragments
   readonly uuid?: UuidFactory
   readonly writeLog?: typeof writeLog
 }
@@ -206,6 +208,7 @@ export interface LauncherCompositionRoot {
   readonly createManifestRunContext: typeof createManifestRunContext
   readonly generateVideoReportForRun: typeof generateVideoReportForRun
   readonly recoverOrphanedSpools: typeof recoverOrphanedSpools
+  readonly removeReporterFragments: typeof removeReporterFragments
   readonly uuid: UuidFactory
   readonly writeLog: typeof writeLog
 }
@@ -224,6 +227,8 @@ export const createLauncherCompositionRoot = (
       overrides.generateVideoReportForRun ?? generateVideoReportForRun,
     recoverOrphanedSpools:
       overrides.recoverOrphanedSpools ?? recoverOrphanedSpools,
+    removeReporterFragments:
+      overrides.removeReporterFragments ?? removeReporterFragments,
     uuid: overrides.uuid ?? randomUUID,
     writeLog: overrides.writeLog ?? writeLog,
   })

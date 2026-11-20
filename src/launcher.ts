@@ -156,13 +156,38 @@ export default class WdioPuppeteerVideoLauncher
     if (!manifest) {
       return
     }
-    await this._runManifestTask('generate the static video report', () =>
-      this._composition.generateVideoReportForRun({
-        outputDir: manifestRunContext.outputDir,
-        runId: manifestRunContext.runId,
-        manifest,
-      }),
+    const report = await this._runManifestTask(
+      'generate the static video report',
+      () =>
+        this._composition.generateVideoReportForRun({
+          outputDir: manifestRunContext.outputDir,
+          runId: manifestRunContext.runId,
+          manifest,
+        }),
     )
+    if (report) {
+      await this._removeReporterFragments(manifestRunContext)
+    }
+  }
+
+  /**
+   * The fragments are only the report's inputs, so they go once it is
+   * written; one that cannot be removed is left with a warning.
+   */
+  private async _removeReporterFragments(
+    manifestRunContext: ManifestRunContext,
+  ): Promise<void> {
+    try {
+      await this._composition.removeReporterFragments(
+        manifestRunContext.outputDir,
+        manifestRunContext.runId,
+      )
+    } catch (error) {
+      this._log(
+        'warn',
+        `[WdioPuppeteerVideoService] Failed to remove the reporter fragments of the completed run: ${normalization.describeError(error)}.`,
+      )
+    }
   }
 
   private async _recoverSpools(runId: string): Promise<void> {

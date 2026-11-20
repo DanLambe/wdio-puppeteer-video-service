@@ -61,6 +61,22 @@ export const writeReporterFragment = async (
   return fragmentPath
 }
 
+/**
+ * Removes a run's fragments, and the reporter's work directory once no other
+ * run's fragments remain in it. A link in their place is removed, not
+ * followed.
+ */
+export const removeReporterFragments = async (
+  outputDir: string,
+  runId: string,
+): Promise<void> => {
+  const runDirectory = path.dirname(
+    getReporterFragmentDirectory(outputDir, runId),
+  )
+  await fs.rm(runDirectory, { force: true, recursive: true })
+  await fs.rmdir(path.dirname(runDirectory)).catch(() => undefined)
+}
+
 export const readReporterFragments = async (
   outputDir: string,
   runId: string,

@@ -653,7 +653,9 @@ without fractional seconds.
 
 The optional reporter writes one fragment per WDIO worker. After Manifest v1 is
 aggregated, the service joins outcomes to captures by run, worker, normalized
-spec/test identity, and attempt, then creates `outputDir/video-report.html`.
+spec/test identity, and attempt, then creates `outputDir/video-report.html` and
+removes the run's fragments (`outputDir/.wdio-video-report/<run>`). If the
+report cannot be written, the fragments stay for diagnosis.
 Full test identities are matched first across the whole run, so a short title
 never takes a capture that another outcome identifies exactly. A short-title
 fallback then requires one side to lack a fuller identity and exactly one

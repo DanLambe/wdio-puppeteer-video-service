@@ -181,6 +181,7 @@ export class WdioPuppeteerVideoWorkerRuntime
     })
     this._mediaCoordinator = new RecordingMediaCoordinator({
       captureSession: this._captureSession,
+      clock: composition.clock,
       ffmpegRuntime: this._ffmpegRuntime,
       fileSystem: this._fileSystem,
       getManifestRecorder: () => this._manifestRecorder,
