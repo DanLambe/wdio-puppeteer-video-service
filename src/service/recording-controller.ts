@@ -397,6 +397,7 @@ export class RecordingController implements ContextFollowerTarget {
     const deferredTaskCount = this.media.pendingTaskCount
     let tabs: ReadonlyMap<number, SegmentTab> | undefined
     let processingFailure: { readonly error: unknown } | undefined
+    let kept: readonly HeldSegment[] = []
     this.confirmGap()
     await this.lifecycle.finalize({
       stopRecording: async () => {
@@ -409,6 +410,7 @@ export class RecordingController implements ContextFollowerTarget {
           // Every spool is encoded first, within its own budget; transcodes
           // and the merge follow under their usual rules.
           await this.encodeHeldSpools()
+          kept = this.captureSession.heldSegments
           processingFailure = await this.finalizeHeldSegmentsReportingFailure()
         }
         if (processingFailure) {
@@ -428,9 +430,9 @@ export class RecordingController implements ContextFollowerTarget {
           await this.media.deleteRecordedSegments()
         }
         if (this.captureFailure) {
-          // A window change may have stopped the failed segment earlier. Keep
-          // retained bytes, but never merge or process them as healthy media.
-          this.media.dropTasksForPaths(this.captureSession.recordedPaths)
+          // An incomplete recording is never merged. Its unclean bytes are
+          // kept as they are; its healthy segments are processed as usual.
+          this.media.keepUnmerged(kept)
           return
         }
         if (!keepArtifacts || !this.options.processing.merge.enabled) {
@@ -502,6 +504,7 @@ export class RecordingController implements ContextFollowerTarget {
     this.confirmGap()
     await this.stopRecording()
     await this.encodeHeldSpools()
+    const kept = this.captureSession.heldSegments
     const processingFailure = await this.finalizeHeldSegmentsReportingFailure()
     const paths = processingFailure
       ? await this.media.findExisting(this.captureSession.filePaths)
@@ -509,6 +512,8 @@ export class RecordingController implements ContextFollowerTarget {
     if (processingFailure) {
       // As in `finalizeMedia`: the files kept so far are never processed again.
       this.media.dropTasksForPaths(this.captureSession.filePaths)
+    } else {
+      this.media.keepUnmerged(kept)
     }
     const tabs = this.readRetainedSegmentTabs(paths)
     return {

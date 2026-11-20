@@ -1,7 +1,7 @@
 import type { ResolvedWdioPuppeteerVideoServiceOptions } from '../types.js'
 import type { FileSystemBoundary } from './boundaries.js'
 import { drainBoundedTaskQueue } from './bounded-task-queue.js'
-import type { CaptureSession } from './capture-session.js'
+import type { CaptureSession, HeldSegment } from './capture-session.js'
 import type {
   ActiveSegment,
   DeferredMergeTask,
@@ -94,6 +94,30 @@ export class RecordingMediaCoordinator {
     this.dropTasksForPaths(filesToDelete)
     this.captureSession.clearRecordedPaths()
     this.captureSession.clearHeldSegments()
+  }
+
+  /**
+   * Settles the segments of a kept recording that is not merged, given as
+   * they were held before finalization. An unclean file is never processed.
+   * A healthy segment is transcoded as at the end of a test: under
+   * `after-worker`, one whose transcode a merge would have done gets a task
+   * of its own, so both timings leave the same files.
+   */
+  keepUnmerged(held: readonly HeldSegment[]): void {
+    this.dropTasksForPaths(
+      held
+        .filter((segment) => !segment.clean)
+        .flatMap(({ segment }) => [segment.recordingPath, segment.outputPath]),
+    )
+    if (!this.shouldDefer || !this.options.processing.merge.enabled) {
+      return
+    }
+    const recorded = new Set(this.captureSession.recordedPaths)
+    for (const { clean, segment } of held) {
+      if (clean && segment.transcode && recorded.has(segment.recordingPath)) {
+        this.enqueueSegmentTranscode(segment)
+      }
+    }
   }
 
   queueDeferredMerge(): void {
@@ -389,9 +413,13 @@ export class RecordingMediaCoordinator {
   private queueSegmentTranscode(segment: ActiveSegment): void {
     this.captureSession.addRecordedPath(segment.recordingPath)
     if (this.options.processing.merge.enabled) {
+      // The merge transcodes its output instead.
       return
     }
+    this.enqueueSegmentTranscode(segment)
+  }
 
+  private enqueueSegmentTranscode(segment: ActiveSegment): void {
     const task = postProcess.createDeferredTranscodeTask(
       segment.recordingPath,
       segment.outputPath,

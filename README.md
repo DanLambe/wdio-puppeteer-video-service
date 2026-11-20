@@ -588,7 +588,10 @@ stop timeout) is recorded in the manifest as `failed` with reason
 `capture-incomplete`, even if it produced a nonempty file or retention
 discarded its media. Retained partial media is still listed, and
 attached to Allure when configured, for diagnosis, but it is not merged or
-otherwise processed; unretained media is discarded normally. The default
+otherwise processed; unretained media is discarded normally. The recording's
+complete segments are still transcoded, when the test ends or, with
+`processing.timing: 'after-worker'`, when the worker ends, but they are not
+merged. The default
 `failurePolicy: 'warn'` logs one warning when the segment stops and does not
 fail the test. With `'error'`, the failure is raised after manifest
 finalization and recording cleanup.

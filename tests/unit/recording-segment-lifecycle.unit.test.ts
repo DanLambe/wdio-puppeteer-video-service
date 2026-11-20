@@ -436,11 +436,16 @@ describe('Segment life cycle', () => {
     )
   })
 
-  it.each(['after-test', 'after-worker'] as const)(
-    'keeps an unclean held segment as unprocessed media with timing=%s',
-    async (timing) => {
+  it.each([
+    { timing: 'after-test', merge: true },
+    { timing: 'after-worker', merge: true },
+    { timing: 'after-test', merge: false },
+    { timing: 'after-worker', merge: false },
+  ] as const)(
+    'keeps an unclean held segment as unprocessed media with timing=$timing merge=$merge',
+    async ({ timing, merge }) => {
       const harness = createHarness({
-        processing: { ...MP4, timing, merge: { enabled: true } },
+        processing: { ...MP4, timing, merge: { enabled: merge } },
       })
       harness.engine.uncleanParts.add(2)
       await harness.recordThreeTabs()
@@ -456,31 +461,69 @@ describe('Segment life cycle', () => {
       ])
 
       const finalized = await harness.controller.finalizeMedia(false, true)
+      const deferred = timing === 'after-worker'
+      expect(finalized).toMatchObject({ captureFailure: failure, deferred })
+      // After-worker transcodes the same segments, once the worker ends.
+      expect(harness.media.pendingTaskCount).toBe(deferred ? 2 : 0)
+      await harness.media.flush()
 
-      // Healthy segments are processed as before; the unclean one never is,
-      // and nothing is merged or left queued.
-      const expectedTranscodes =
-        timing === 'after-test'
-          ? [harness.segmentPath(1, 'webm'), harness.segmentPath(3, 'webm')]
-          : []
+      // Healthy segments are transcoded at either timing; the unclean one
+      // never is, and nothing is merged.
       expect(
         harness.transcode.mock.calls.map(([request]) => request.inputPath),
-      ).toEqual(expectedTranscodes)
+      ).toEqual([
+        harness.segmentPath(1, 'webm'),
+        harness.segmentPath(3, 'webm'),
+      ])
       expect(harness.merge).not.toHaveBeenCalled()
       expect(harness.media.pendingTaskCount).toBe(0)
-      const healthy = timing === 'after-test' ? 'mp4' : 'webm'
-      expect(finalized).toMatchObject({
-        captureFailure: failure,
-        deferred: false,
-        paths: [
-          harness.segmentPath(1, healthy),
-          harness.segmentPath(2, 'webm'),
-          harness.segmentPath(3, healthy),
-        ],
-      })
-      expect(await exists(harness.segmentPath(2, 'webm'))).toBe(true)
+      for (const file of [
+        harness.segmentPath(1, 'mp4'),
+        harness.segmentPath(2, 'webm'),
+        harness.segmentPath(3, 'mp4'),
+      ]) {
+        expect(await exists(file), file).toBe(true)
+      }
     },
   )
+
+  it('never processes a task that touches an unclean segment', async () => {
+    const harness = createHarness({
+      processing: { ...MP4, timing: 'after-worker' },
+    })
+    harness.engine.uncleanParts.add(2)
+    await harness.recordThreeTabs()
+    harness.media.enqueue({
+      kind: 'transcode',
+      inputPath: harness.segmentPath(2, 'webm'),
+      outputPath: harness.segmentPath(2, 'mp4'),
+      deleteOriginal: true,
+    })
+
+    await harness.controller.finalizeMedia(false, true)
+
+    expect(
+      harness.media.pendingTasks.map((task) =>
+        task.kind === 'transcode' ? task.inputPath : task.mergedPath,
+      ),
+    ).toEqual([harness.segmentPath(1, 'webm'), harness.segmentPath(3, 'webm')])
+  })
+
+  it('transcodes the healthy parts of an interrupted after-worker recording that would have been merged', async () => {
+    const harness = createHarness({
+      processing: { ...MP4, timing: 'after-worker', merge: { enabled: true } },
+    })
+    await harness.recordThreeTabs()
+
+    const finalized = await harness.controller.finalizeWithoutOutcome()
+    expect(finalized.deferred).toBe(true)
+    await harness.media.flush()
+
+    expect(harness.merge).not.toHaveBeenCalled()
+    expect(
+      harness.transcode.mock.calls.map(([request]) => request.inputPath),
+    ).toEqual([1, 2, 3].map((part) => harness.segmentPath(part, 'webm')))
+  })
 
   it('reports a held capture failure and deletes its file when discarded', async () => {
     const harness = createHarness({ processing: MP4 })
