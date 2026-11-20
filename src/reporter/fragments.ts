@@ -146,6 +146,8 @@ const isReporterFragment = (
     reportFileNameIsValid &&
     typeof fragment.startedAt === 'string' &&
     typeof fragment.completedAt === 'string' &&
+    (fragment.notRecordedReason === undefined ||
+      typeof fragment.notRecordedReason === 'string') &&
     Array.isArray(fragment.outcomes) &&
     fragment.outcomes.every((outcome) =>
       isReporterOutcome(outcome, expectedRunId, fragment.cid),

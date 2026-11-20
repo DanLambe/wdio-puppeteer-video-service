@@ -1123,3 +1123,172 @@ const assertOfflineFilterScript = (html: string): void => {
   expect(cards.map((card) => card.hidden)).toEqual([true, false])
   expect(empty.hidden).toBe(true)
 }
+
+// The service never runs for a browser it cannot record, so in a suite that
+// also runs Firefox or Safari those workers have no manifest entries. Their
+// outcomes are still reported, as not recorded, without a diagnostic.
+describe('mixed-browser suites', () => {
+  const runWorker = async (
+    outputDir: string,
+    cid: string,
+    capabilities: Record<string, unknown>,
+    isMultiRemote = false,
+  ): Promise<void> => {
+    const context = await createManifestRunContext(outputDir, 'mixed-run')
+    const config: Record<string, unknown> = { framework: 'mocha' }
+    assignManifestRunContext(config, context)
+    assignManifestWorkerContext(config, cid, { specFileRetryAttempt: 0 })
+    const reporter = new WdioPuppeteerVideoReporter({ outputDir })
+    const runner = {
+      cid,
+      config,
+      specs: [path.resolve('tests/specs/mixed.spec.ts')],
+      capabilities,
+      isMultiRemote,
+      start: new Date('2026-11-20T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    reporter.onRunnerStart(runner)
+    reporter.onTestPass({
+      uid: `${cid}-works`,
+      title: 'works',
+      fullTitle: 'suite works',
+      state: 'passed',
+      duration: 5,
+    } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+  }
+
+  it.each([
+    {
+      name: 'Firefox',
+      capabilities: { browserName: 'firefox', browserVersion: '140.0' },
+      multiRemote: false,
+      reason: 'video recording is only supported on Chromium-based browsers',
+    },
+    {
+      name: 'Safari',
+      capabilities: { browserName: 'safari' },
+      multiRemote: false,
+      reason: 'video recording is only supported on Chromium-based browsers',
+    },
+    {
+      name: 'multiremote',
+      capabilities: {
+        one: { browserName: 'chrome', sessionId: 'a' },
+        two: { browserName: 'chrome', sessionId: 'b' },
+      },
+      multiRemote: true,
+      reason:
+        'multiremote sessions are not supported; configure recording for a single-browser WDIO worker',
+    },
+  ])(
+    'reports a $name worker as not recorded',
+    async ({ capabilities, multiRemote, reason }) => {
+      const outputDir = await createTempDir()
+      await runWorker(outputDir, '0-1', capabilities, multiRemote)
+
+      const { fragments } = await readReporterFragments(outputDir, 'mixed-run')
+      expect(fragments[0]?.notRecordedReason).toBe(reason)
+      const model = await createReportModel({
+        outputDir,
+        runId: 'mixed-run',
+        fragments,
+        run: {
+          id: 'mixed-run',
+          startedAt: '2026-11-20T00:00:00.000Z',
+          completedAt: '2026-11-20T00:00:02.000Z',
+          exitCode: 0,
+          tools: {
+            service: '2.0.0',
+            node: process.version,
+            webdriverio: '10.1.0',
+            puppeteer: '25.16.0',
+          },
+          entries: [],
+          diagnostics: [],
+        },
+        initialDiagnostics: [],
+      })
+
+      expect(model.diagnostics).toEqual([])
+      expect(model.items).toEqual([
+        expect.objectContaining({
+          captureDecision: 'skipped',
+          captureReason: reason,
+          media: [],
+          testName: 'works',
+        }),
+      ])
+    },
+  )
+
+  it('still reports a Chromium outcome that has no manifest capture', async () => {
+    const outputDir = await createTempDir()
+    await runWorker(outputDir, '0-0', {
+      browserName: 'chrome',
+      browserVersion: '140.0',
+      'goog:chromeOptions': {},
+    })
+
+    const { fragments } = await readReporterFragments(outputDir, 'mixed-run')
+    expect(fragments[0]?.notRecordedReason).toBeUndefined()
+    const model = await createReportModel({
+      outputDir,
+      runId: 'mixed-run',
+      fragments,
+      run: {
+        id: 'mixed-run',
+        startedAt: '2026-11-20T00:00:00.000Z',
+        completedAt: '2026-11-20T00:00:02.000Z',
+        exitCode: 0,
+        tools: {
+          service: '2.0.0',
+          node: process.version,
+          webdriverio: '10.1.0',
+          puppeteer: '25.16.0',
+        },
+        entries: [],
+        diagnostics: [],
+      },
+      initialDiagnostics: [],
+    })
+
+    expect(model.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      'unmatched-test-outcome',
+    ])
+  })
+
+  it('reads a fragment from before the field as recorded', async () => {
+    const outputDir = await createTempDir()
+    await writeReporterFragment(outputDir, {
+      ...createFragment('mixed-run', '0-0', ['tests/specs/mixed.spec.ts'], []),
+    })
+    await fs.writeFile(
+      path.join(
+        outputDir,
+        '.wdio-video-report',
+        'mixed-run',
+        'fragments',
+        'bad.json',
+      ),
+      JSON.stringify({
+        ...createFragment(
+          'mixed-run',
+          '0-1',
+          ['tests/specs/mixed.spec.ts'],
+          [],
+        ),
+        notRecordedReason: 7,
+      }),
+    )
+
+    const { fragments, invalidFiles } = await readReporterFragments(
+      outputDir,
+      'mixed-run',
+    )
+    expect(fragments).toHaveLength(1)
+    expect(fragments[0]?.notRecordedReason).toBeUndefined()
+    expect(invalidFiles).toEqual(['bad.json'])
+  })
+})

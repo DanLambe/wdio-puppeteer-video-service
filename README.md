@@ -663,7 +663,9 @@ unclaimed capture to match. Cucumber scenarios are recorded under their
 scenario name, so `scenarioLevelReporter` outcomes join through this fallback;
 ambiguous outcomes receive a diagnostic instead of a potentially incorrect
 video.
-Skipped tests and tests without retained video remain visible. The report has
+Skipped tests and tests without retained video remain visible. Tests of a
+worker the service does not record, such as Firefox in a mixed-browser suite,
+are listed with `capture: skipped` and the reason, without a diagnostic. The report has
 status, spec, browser, and retry filters, inline playback, diagnostics, and
 error details. When a recording used more than one segment, each video is
 labelled with its tab, such as "Tab 2 · test command". A merged video lists its

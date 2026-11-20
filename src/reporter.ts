@@ -24,6 +24,10 @@ import {
   readManifestRunContext,
   readManifestWorkerContext,
 } from './service/manifest-runtime.js'
+import {
+  describeUnsupportedWorker,
+  MULTIREMOTE_UNSUPPORTED_REASON,
+} from './service/protocol.js'
 
 interface PendingReporterFragment {
   schemaVersion: typeof REPORTER_FRAGMENT_SCHEMA_VERSION
@@ -34,6 +38,7 @@ interface PendingReporterFragment {
   reportFileName: string
   startedAt: string
   outcomes: ReporterTestOutcome[]
+  notRecordedReason?: string
 }
 
 const stderrWriteStream = {
@@ -79,6 +84,10 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
     this._outputDir = context?.outputDir ?? this._outputDir
     this._runnerRetry = workerContext?.specFileRetryAttempt ?? 0
     this._capturedOutcomes.clear()
+    // The service skips these workers before they start, as `shouldRun` does.
+    const notRecordedReason = runnerStats.isMultiRemote
+      ? MULTIREMOTE_UNSUPPORTED_REASON
+      : describeUnsupportedWorker(runnerStats.capabilities)
     this._fragment = {
       schemaVersion: REPORTER_FRAGMENT_SCHEMA_VERSION,
       runId: context?.runId ?? `unassociated-${randomUUID()}`,
@@ -88,6 +97,7 @@ export class WdioPuppeteerVideoReporter extends WDIOReporter {
       reportFileName: this._reportFileName,
       startedAt: runnerStats.start.toISOString(),
       outcomes: [],
+      ...(notRecordedReason ? { notRecordedReason } : {}),
     }
   }
 
