@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -8,6 +11,7 @@ import {
   probeFfmpegVersion,
   readFfmpegVersion,
   resolveFfmpeg,
+  resolveOptionalFfmpegStaticPath,
 } from '../../src/service/ffmpeg.js'
 
 class FakeProbeProcess extends EventEmitter {
@@ -289,5 +293,82 @@ describe('ffmpeg helpers', () => {
     probeProcess.emit('close', 1)
 
     await expect(supportPromise).resolves.toBe(false)
+  })
+})
+
+// pnpm with an isolated or global store, and Yarn Plug'n'Play, resolve a
+// package only from a project that declares it, so a consumer's own
+// `ffmpeg-static` is not visible from this package's directory.
+describe('ffmpeg-static resolution', () => {
+  const createProject = async (binary: string): Promise<string> => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ffmpeg-static-'))
+    const packageDir = path.join(project, 'node_modules', 'ffmpeg-static')
+    await fs.mkdir(packageDir, { recursive: true })
+    await fs.writeFile(
+      path.join(packageDir, 'package.json'),
+      JSON.stringify({ name: 'ffmpeg-static', main: 'index.js' }),
+    )
+    await fs.writeFile(
+      path.join(packageDir, 'index.js'),
+      `module.exports = ${JSON.stringify(binary)}\n`,
+    )
+    await fs.writeFile(path.join(project, 'package.json'), '{}')
+    return project
+  }
+  const notFound = (): never => {
+    throw Object.assign(new Error('Cannot find module'), {
+      code: 'MODULE_NOT_FOUND',
+    })
+  }
+
+  it("falls back to the consuming project's own installation", async () => {
+    const project = await createProject('/opt/project/ffmpeg')
+    try {
+      expect(
+        resolveOptionalFfmpegStaticPath({
+          cwd: project,
+          requireFromPackage: notFound,
+        }),
+      ).toBe('/opt/project/ffmpeg')
+    } finally {
+      await fs.rm(project, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers the installation this package resolves', async () => {
+    const project = await createProject('/opt/project/ffmpeg')
+    try {
+      expect(
+        resolveOptionalFfmpegStaticPath({
+          cwd: project,
+          requireFromPackage: () => '/opt/package/ffmpeg',
+        }),
+      ).toBe('/opt/package/ffmpeg')
+    } finally {
+      await fs.rm(project, { recursive: true, force: true })
+    }
+  })
+
+  it('finds nothing when neither has it', async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), 'no-ffmpeg-'))
+    try {
+      expect(
+        resolveOptionalFfmpegStaticPath({
+          cwd: project,
+          requireFromPackage: notFound,
+        }),
+      ).toBeUndefined()
+    } finally {
+      await fs.rm(project, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores an installation without a binary for this platform', () => {
+    expect(
+      resolveOptionalFfmpegStaticPath({
+        cwd: os.tmpdir(),
+        requireFromPackage: () => null,
+      }),
+    ).toBeUndefined()
   })
 })

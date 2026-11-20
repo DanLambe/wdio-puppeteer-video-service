@@ -1,12 +1,13 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
+import path from 'node:path'
 import {
   FFMPEG_CHECK_TIMEOUT_MS,
   MP4_DIRECT_PROBE_TIMEOUT_MS,
 } from './constants.js'
 import { Utf8TailBuffer } from './utf8-tail-buffer.js'
 
-const require = createRequire(import.meta.url)
+const requireFromPackage = createRequire(import.meta.url)
 
 interface ProbeProcessLike {
   stdout?: NodeJS.ReadableStream | null
@@ -21,9 +22,18 @@ type SpawnProbeProcess = (
   args: string[],
 ) => ProbeProcessLike
 
-export const resolveOptionalFfmpegStaticPath = (): string | undefined => {
+export interface FfmpegStaticLookup {
+  /** The project whose own `ffmpeg-static` is the fallback. */
+  readonly cwd?: string
+  readonly requireFromPackage?: (id: string) => unknown
+}
+
+/** The binary path an installed `ffmpeg-static` exports, if any. */
+const loadFfmpegStatic = (
+  load: (id: string) => unknown,
+): string | undefined => {
   try {
-    const resolved = require('ffmpeg-static') as string | null
+    const resolved = load('ffmpeg-static')
     if (typeof resolved === 'string' && resolved.trim().length > 0) {
       return resolved
     }
@@ -32,6 +42,20 @@ export const resolveOptionalFfmpegStaticPath = (): string | undefined => {
   }
   return undefined
 }
+
+/**
+ * `ffmpeg-static` as this package resolves it, as with npm's hoisting, or
+ * else as the consuming project does: pnpm with an isolated or global store,
+ * and Yarn Plug'n'Play, resolve a package only from a project that declares
+ * it.
+ */
+export const resolveOptionalFfmpegStaticPath = (
+  lookup: FfmpegStaticLookup = {},
+): string | undefined =>
+  loadFfmpegStatic(lookup.requireFromPackage ?? requireFromPackage) ??
+  loadFfmpegStatic(
+    createRequire(path.join(lookup.cwd ?? process.cwd(), 'package.json')),
+  )
 
 export const getFfmpegCandidates = (
   configuredPath: string | undefined,

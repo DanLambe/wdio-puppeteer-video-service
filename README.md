@@ -132,7 +132,9 @@ FFmpeg is resolved in this order:
 1. `processing.ffmpeg.path`
 2. `FFMPEG_PATH`
 3. `ffmpeg` on `PATH`
-4. `ffmpeg-static` when installed by the consuming project
+4. `ffmpeg-static` when installed by the consuming project, including under
+   pnpm or Yarn Plug'n'Play, which resolve it from the working directory's
+   project
 
 FFmpeg 4.4 (Ubuntu 22.04's package) and later are supported; release
 validation covers 4.4 and the bundled `ffmpeg-static` build. Recordings are
