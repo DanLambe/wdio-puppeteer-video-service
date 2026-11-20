@@ -828,3 +828,124 @@ describe('ContextFollower inside WDIO command wrappers', () => {
     expect(target.followContext).not.toHaveBeenCalled()
   })
 })
+
+// A closed tab must not stay known as an open window: a switch to it would
+// end the recorded tab's segment for a tab that can no longer be filmed.
+describe('ContextFollower after a tab closes', () => {
+  const createClosingBrowser = () => {
+    let open = ['tab-a', 'tab-b']
+    const browser = {
+      browsingContextGetTree: vi.fn(async () => ({
+        contexts: open.map((context) =>
+          context === 'tab-b'
+            ? { context, children: [{ context: 'frame-b1', children: [] }] }
+            : { context, children: [] },
+        ),
+      })),
+      getWindowHandle: vi.fn(async () => 'tab-a'),
+    } satisfies ContextFollowerBrowser
+    return {
+      browser,
+      close: (context: string) => {
+        open = open.filter((candidate) => candidate !== context)
+      },
+    }
+  }
+
+  const visitTabB = async (follower: ContextFollower) => {
+    await follower.afterCommand(
+      'getWindowHandles',
+      [],
+      ['tab-a', 'tab-b'],
+      undefined,
+    )
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+    await follower.afterCommand('switchToWindow', ['tab-b'], null, undefined)
+    await follower.afterCommand(
+      'frame',
+      [],
+      { contextId: 'frame-b1' },
+      undefined,
+    )
+    await follower.beforeCommand('browsingContextLocateNodes', [
+      { context: 'frame-b1' },
+    ])
+    await follower.beforeCommand('switchToWindow', ['tab-a'])
+    await follower.afterCommand('switchToWindow', ['tab-a'], null, undefined)
+  }
+
+  it('does not follow a switch to a tab a BiDi close removed', async () => {
+    const target = createTarget()
+    const tabs = createClosingBrowser()
+    const { follower } = createFollower(target, tabs.browser)
+    await visitTabB(follower)
+    target.calls.length = 0
+
+    const close = [{ context: 'tab-b' }]
+    await follower.beforeCommand('browsingContextClose', close)
+    tabs.close('tab-b')
+    await follower.afterCommand('browsingContextClose', close, null, undefined)
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+
+    expect(target.calls).toEqual(['resume'])
+  })
+
+  it('does not follow a frame of a tab a BiDi close removed', async () => {
+    const target = createTarget()
+    const tabs = createClosingBrowser()
+    const { follower } = createFollower(target, tabs.browser)
+    await visitTabB(follower)
+    target.calls.length = 0
+
+    const close = [{ context: 'tab-b' }]
+    await follower.beforeCommand('browsingContextClose', close)
+    tabs.close('tab-b')
+    await follower.afterCommand('browsingContextClose', close, null, undefined)
+    await follower.beforeCommand('browsingContextLocateNodes', [
+      { context: 'frame-b1' },
+    ])
+
+    expect(target.calls).toEqual(['resume'])
+  })
+
+  it('does not follow a switch to a tab a Classic close removed', async () => {
+    const target = createTarget()
+    const tabs = createClosingBrowser()
+    const { follower } = createFollower(target, tabs.browser)
+    await visitTabB(follower)
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+    await follower.afterCommand('switchToWindow', ['tab-b'], null, undefined)
+    target.calls.length = 0
+
+    await follower.beforeCommand('closeWindow', [])
+    tabs.close('tab-b')
+    await follower.afterCommand('closeWindow', [], ['tab-a'], undefined)
+    // The controller stopped the closed tab's capture, and WDIO has no current
+    // window until the test switches.
+    target.capture = false
+    await follower.beforeCommand('switchToWindow', ['tab-b'])
+
+    expect(target.calls).toEqual(['resume'])
+  })
+
+  it('still follows a tab that stays open after another closes', async () => {
+    const target = createTarget('tab-b')
+    const tabs = createClosingBrowser()
+    const { follower } = createFollower(target, tabs.browser)
+    await follower.afterCommand(
+      'getWindowHandles',
+      [],
+      ['tab-a', 'tab-b'],
+      undefined,
+    )
+
+    const close = [{ context: 'tab-b' }]
+    await follower.beforeCommand('browsingContextClose', close)
+    tabs.close('tab-b')
+    await follower.afterCommand('browsingContextClose', close, null, undefined)
+    target.calls.length = 0
+    await follower.beforeCommand('switchToWindow', ['tab-a'])
+
+    expect(target.calls).toEqual(['follow:tab-a:switch-to-window'])
+  })
+})
