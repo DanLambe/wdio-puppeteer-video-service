@@ -7,6 +7,7 @@ import {
   type ClockBoundary,
   nodeFileSystem,
   type ProcessBoundary,
+  systemClock,
 } from '../../src/service/boundaries.js'
 import { OWNED_FILE_LEASE_SCHEMA_VERSION } from '../../src/service/owned-file-lease.js'
 import {
@@ -504,5 +505,175 @@ describe('recording slot scheduler', () => {
     await expect(scheduler.acquire()).rejects.toBeInstanceOf(AggregateError)
     expect(state.activeSlots).toBe(0)
     expect(scheduler.ownsRecordingSlot).toBe(false)
+  })
+})
+
+// A wait the caller has given up on must stop: a poll that kept going would
+// hold the worker's event loop open and could take a slot nobody uses.
+describe('cancelling a slot wait', () => {
+  const sleep = (milliseconds: number): Promise<void> =>
+    new Promise((resolve) => {
+      setTimeout(resolve, milliseconds)
+    })
+
+  it('stops polling a contended global slot as soon as the wait is cancelled', async () => {
+    await withTempDir(async (tempDir) => {
+      const options = {
+        globalRecordingLockDir: tempDir,
+        maxGlobalRecordings: 1,
+        recordingStartMode: 'blocking' as const,
+        resourceLabel: 'post-processing' as const,
+        runId: 'cancel-run',
+      }
+      const holder = new RecordingSlotScheduler(options, noopLogger, {
+        clock: systemClock,
+        inProcessState: createInProcessRecordingSlotState(),
+      })
+      await expect(holder.acquire()).resolves.toBe(true)
+      let opens = 0
+      const waiter = new RecordingSlotScheduler(options, noopLogger, {
+        clock: systemClock,
+        fileSystem: {
+          ...nodeFileSystem,
+          openExclusive: async (filePath) => {
+            opens += 1
+            return nodeFileSystem.openExclusive(filePath)
+          },
+        },
+        inProcessState: createInProcessRecordingSlotState(),
+      })
+      const controller = new AbortController()
+
+      const waiting = waiter.acquire({ signal: controller.signal })
+      await vi.waitFor(() => {
+        expect(opens).toBeGreaterThan(0)
+      })
+      const started = Date.now()
+      controller.abort()
+      await expect(waiting).resolves.toBe(false)
+      // Woken by the abort, not by the next 100 ms poll.
+      expect(Date.now() - started).toBeLessThan(80)
+      const opensAtCancel = opens
+
+      await sleep(250)
+      await holder.release()
+      await sleep(150)
+      expect(opens).toBe(opensAtCancel)
+      expect(waiter.ownsGlobalRecordingSlot).toBe(false)
+      expect(waiter.ownsRecordingSlot).toBe(false)
+    })
+  })
+
+  it('never asks for a slot once the wait is cancelled', async () => {
+    const state = createInProcessRecordingSlotState()
+    const openExclusive = vi.fn(nodeFileSystem.openExclusive)
+    const scheduler = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1, maxGlobalRecordings: 1, runId: 'run' },
+      noopLogger,
+      {
+        fileSystem: { ...nodeFileSystem, openExclusive },
+        inProcessState: state,
+      },
+    )
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      scheduler.acquire({ signal: controller.signal }),
+    ).resolves.toBe(false)
+    expect(state.activeSlots).toBe(0)
+    expect(openExclusive).not.toHaveBeenCalled()
+  })
+
+  it('removes a cancelled in-process waiter so a freed slot is never taken for it', async () => {
+    const state = createInProcessRecordingSlotState()
+    const create = () =>
+      new RecordingSlotScheduler({ maxConcurrentRecordings: 1 }, noopLogger, {
+        inProcessState: state,
+      })
+    const holder = create()
+    const cancelled = create()
+    await holder.acquire()
+    const controller = new AbortController()
+
+    const waiting = cancelled.acquire({ signal: controller.signal })
+    await Promise.resolve()
+    expect(state.waiters).toHaveLength(1)
+    controller.abort()
+    await expect(waiting).resolves.toBe(false)
+    expect(state.waiters).toHaveLength(0)
+
+    await holder.release()
+    await Promise.resolve()
+    expect(cancelled.ownsRecordingSlot).toBe(false)
+    expect(state.activeSlots).toBe(0)
+  })
+
+  it('passes a wake-up to the next waiter when the woken one was cancelled', async () => {
+    const state = createInProcessRecordingSlotState()
+    const create = () =>
+      new RecordingSlotScheduler({ maxConcurrentRecordings: 1 }, noopLogger, {
+        inProcessState: state,
+      })
+    const holder = create()
+    const cancelled = create()
+    const next = create()
+    await holder.acquire()
+    const controller = new AbortController()
+    const cancelledWait = cancelled.acquire({ signal: controller.signal })
+    const nextWait = next.acquire()
+    await Promise.resolve()
+    expect(state.waiters).toHaveLength(2)
+
+    // The release queues the first waiter's wake-up; the abort lands before
+    // it runs.
+    const released = holder.release()
+    controller.abort()
+    await released
+
+    await expect(cancelledWait).resolves.toBe(false)
+    await expect(nextWait).resolves.toBe(true)
+    expect(cancelled.ownsRecordingSlot).toBe(false)
+    expect(next.ownsRecordingSlot).toBe(true)
+    expect(state.activeSlots).toBe(1)
+    await next.release()
+  })
+
+  it('stops a fast-fail in-process wait when cancelled', async () => {
+    const state = createInProcessRecordingSlotState()
+    state.activeSlots = 1
+    const scheduler = new RecordingSlotScheduler(
+      {
+        maxConcurrentRecordings: 1,
+        recordingStartMode: 'fast-fail',
+        recordingStartTimeoutMs: 60_000,
+      },
+      noopLogger,
+      { clock: systemClock, inProcessState: state },
+    )
+    const controller = new AbortController()
+
+    const waiting = scheduler.acquire({ signal: controller.signal })
+    await sleep(40)
+    const started = Date.now()
+    controller.abort()
+    await expect(waiting).resolves.toBe(false)
+    expect(Date.now() - started).toBeLessThan(80)
+  })
+
+  it('passes the signal through the post-processing scheduler', async () => {
+    const state = createInProcessRecordingSlotState()
+    state.activeSlots = 1
+    const scheduler = new PostProcessSlotScheduler(
+      { maxConcurrentPostProcesses: 1 },
+      noopLogger,
+      { inProcessState: state },
+    )
+    const controller = new AbortController()
+
+    const waiting = scheduler.acquire({ signal: controller.signal })
+    controller.abort()
+    await expect(waiting).resolves.toBe(false)
+    expect(state.waiters).toHaveLength(0)
   })
 })

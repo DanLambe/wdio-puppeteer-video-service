@@ -20,11 +20,16 @@ import {
 } from '../../src/service/ffmpeg-runtime.js'
 import type { ServiceLogger } from '../../src/service/logging.js'
 import { resolveServiceConfiguration } from '../../src/service/options.js'
-import type { PostProcessSlotScheduler } from '../../src/service/recording-slots.js'
+import type {
+  PostProcessSlotScheduler,
+  SlotWaitOptions,
+} from '../../src/service/recording-slots.js'
 import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 
 interface SchedulerHarness {
-  acquire: ReturnType<typeof vi.fn<() => Promise<boolean>>>
+  acquire: ReturnType<
+    typeof vi.fn<(options?: SlotWaitOptions) => Promise<boolean>>
+  >
   ownsGlobalPostProcessSlot: boolean
   ownsPostProcessSlot: boolean
   release: ReturnType<typeof vi.fn<() => Promise<void>>>
@@ -784,6 +789,40 @@ describe('FfmpegRuntime cancellable admission', () => {
     expect(task).not.toHaveBeenCalled()
     // A cancellation is not a capacity problem.
     expect(harness.log).not.toHaveBeenCalled()
+  })
+
+  it('cancels the slot wait itself when the admission ends', async () => {
+    vi.useFakeTimers()
+    try {
+      const expired = createHarness()
+      pendingGrant(expired)
+      const expiring = expired.runtime.withPostProcessSlot(
+        'spool encode',
+        async () => 'never',
+        { signal: new AbortController().signal, waitMs: 30_000 },
+      )
+      const expiredWait = expired.scheduler.acquire.mock.calls[0]?.[0]
+      expect(expiredWait?.signal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await expect(expiring).resolves.toBeUndefined()
+      expect(expiredWait?.signal?.aborted).toBe(true)
+
+      const cancelled = createHarness()
+      pendingGrant(cancelled)
+      const controller = new AbortController()
+      const cancelling = cancelled.runtime.withPostProcessSlot(
+        'spool encode',
+        async () => 'never',
+        { signal: controller.signal, waitMs: 30_000 },
+      )
+      controller.abort()
+      await expect(cancelling).resolves.toBeUndefined()
+      expect(
+        cancelled.scheduler.acquire.mock.calls[0]?.[0]?.signal?.aborted,
+      ).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('releases nothing for a late refusal or a late storage error', async () => {

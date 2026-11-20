@@ -47,6 +47,11 @@ export interface RecordingSlotSchedulerOptions {
   runId?: string
 }
 
+/** Ends a slot wait early: an aborted wait acquires nothing. */
+export interface SlotWaitOptions {
+  readonly signal?: AbortSignal
+}
+
 export const createInProcessRecordingSlotState =
   (): InProcessRecordingSlotState => ({
     activeSlots: 0,
@@ -113,23 +118,30 @@ export class RecordingSlotScheduler {
     return this.options.recordingStartTimeoutMs
   }
 
-  async acquire(): Promise<boolean> {
+  async acquire(options: SlotWaitOptions = {}): Promise<boolean> {
     if (
       this.ownsInProcessSlot &&
       ((this.options.maxGlobalRecordings ?? 0) <= 0 || this.ownsGlobalSlot)
     ) {
       return true
     }
+    const { signal } = options
+    if (signal?.aborted) {
+      return false
+    }
 
     const inProcessSlotAcquired = await this.acquireInProcess(
       this.startTimeoutMs,
+      signal,
     )
     if (!inProcessSlotAcquired) {
       return false
     }
 
     try {
-      const globalSlotAcquired = await this.acquireGlobal(this.startTimeoutMs)
+      const globalSlotAcquired =
+        !signal?.aborted &&
+        (await this.acquireGlobal(this.startTimeoutMs, signal))
       if (globalSlotAcquired) {
         return true
       }
@@ -142,7 +154,10 @@ export class RecordingSlotScheduler {
     }
   }
 
-  async acquireInProcess(timeoutMs: number | undefined): Promise<boolean> {
+  async acquireInProcess(
+    timeoutMs: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const maxConcurrentRecordings = this.options.maxConcurrentRecordings ?? 0
     if (maxConcurrentRecordings <= 0 || this.ownsInProcessSlot) {
       return true
@@ -150,33 +165,59 @@ export class RecordingSlotScheduler {
 
     if (timeoutMs !== undefined) {
       const deadline = this.clock.now() + Math.max(0, timeoutMs)
-      while (this.clock.now() <= deadline) {
+      while (this.clock.now() <= deadline && !signal?.aborted) {
         if (this.tryAcquireInProcess(maxConcurrentRecordings)) {
           return true
         }
-        await this.clock.delay(IN_PROCESS_RECORDING_SLOT_POLL_MS)
+        await this.clock.delay(IN_PROCESS_RECORDING_SLOT_POLL_MS, signal)
       }
 
       return false
     }
 
-    await new Promise<void>((resolve) => {
-      const tryAcquire = (): void => {
-        if (this.tryAcquireInProcess(maxConcurrentRecordings)) {
-          resolve()
-          return
-        }
-
-        this.inProcessState.waiters.push(tryAcquire)
-      }
-
-      tryAcquire()
-    })
-
-    return true
+    return this.waitForInProcessSlot(maxConcurrentRecordings, signal)
   }
 
-  async acquireGlobal(timeoutMs: number | undefined): Promise<boolean> {
+  /**
+   * Queues for the next freed slot. A cancelled waiter leaves the queue, and
+   * a wake-up that reaches it after the cancellation passes to the next one,
+   * so a freed slot is never lost.
+   */
+  private waitForInProcessSlot(
+    maxConcurrentRecordings: number,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const { waiters } = this.inProcessState
+      const onAbort = (): void => {
+        const index = waiters.indexOf(tryAcquire)
+        if (index !== -1) {
+          waiters.splice(index, 1)
+        }
+        resolve(false)
+      }
+      const tryAcquire = (): void => {
+        if (signal?.aborted) {
+          this.wakeNextWaiter()
+          return
+        }
+        if (this.tryAcquireInProcess(maxConcurrentRecordings)) {
+          signal?.removeEventListener('abort', onAbort)
+          resolve(true)
+          return
+        }
+        waiters.push(tryAcquire)
+      }
+
+      signal?.addEventListener('abort', onAbort, { once: true })
+      tryAcquire()
+    })
+  }
+
+  async acquireGlobal(
+    timeoutMs: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const maxGlobalRecordings = this.options.maxGlobalRecordings ?? 0
     if (maxGlobalRecordings <= 0 || this.ownsGlobalSlot) {
       return true
@@ -204,14 +245,19 @@ export class RecordingSlotScheduler {
         break
       }
 
+      // An aborted wait wakes at once, and polls no more.
       await this.clock.delay(
         Math.min(
           GLOBAL_RECORDING_SLOT_POLL_MS,
           Math.max(0, deadline - this.clock.now()),
         ),
+        signal,
       )
-    } while (this.clock.now() <= deadline)
+    } while (this.clock.now() <= deadline && !signal?.aborted)
 
+    if (signal?.aborted) {
+      return false
+    }
     if (attempt.failures.length > 0) {
       throw new AggregateError(
         attempt.failures,
@@ -314,6 +360,10 @@ export class RecordingSlotScheduler {
       `[WdioPuppeteerVideoService] Released in-process ${this.resourceLabel} slot (${this.inProcessState.activeSlots}/${this.options.maxConcurrentRecordings ?? 0}).`,
     )
 
+    this.wakeNextWaiter()
+  }
+
+  private wakeNextWaiter(): void {
     const nextWaiter = this.inProcessState.waiters.shift()
     if (nextWaiter) {
       this.clock.queueMicrotask(nextWaiter)
@@ -420,8 +470,8 @@ export class PostProcessSlotScheduler {
     return this.scheduler.ownedGlobalRecordingSlotPath
   }
 
-  acquire(): Promise<boolean> {
-    return this.scheduler.acquire()
+  acquire(options?: SlotWaitOptions): Promise<boolean> {
+    return this.scheduler.acquire(options)
   }
 
   release(): Promise<void> {
