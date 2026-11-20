@@ -116,7 +116,7 @@ describe('post-process helpers', () => {
     ).toEqual([
       '-n',
       '-i',
-      'input.webm',
+      path.resolve('input.webm'),
       '-an',
       '-c:v',
       'libx264',
@@ -135,7 +135,7 @@ describe('post-process helpers', () => {
       // Configured arguments come last, so FFmpeg resolves this to `slow`.
       '-preset',
       'slow',
-      'output.mp4',
+      path.resolve('output.mp4'),
     ])
   })
 
@@ -148,7 +148,7 @@ describe('post-process helpers', () => {
     ).toEqual([
       '-n',
       '-i',
-      'input.webm',
+      path.resolve('input.webm'),
       '-an',
       '-c:v',
       'libx264',
@@ -164,7 +164,7 @@ describe('post-process helpers', () => {
       'veryfast',
       '-crf',
       '23',
-      'output.mp4',
+      path.resolve('output.mp4'),
     ])
   })
 
@@ -178,12 +178,36 @@ describe('post-process helpers', () => {
       '-safe',
       '0',
       '-i',
-      'merge_concat.txt',
+      path.resolve('merge_concat.txt'),
       '-c',
       'copy',
-      'merged_output.webm',
+      path.resolve('merged_output.webm'),
     ])
   })
+
+  it.each(['-f', 'ci:1'])(
+    'passes FFmpeg absolute file paths under %s',
+    (directory) => {
+      // A relative name starting with `-` reads as an option, one with a colon
+      // as a protocol.
+      const file = (name: string): string => `${directory}/${name}`
+      const absolute = (name: string): string => path.resolve(file(name))
+
+      const transcode = buildH264TranscodeArgs(
+        file('input.webm'),
+        file('output.mp4'),
+        undefined,
+      )
+      expect(transcode.at(2)).toBe(absolute('input.webm'))
+      expect(transcode.at(-1)).toBe(absolute('output.mp4'))
+      const merge = buildConcatMergeArgs(file('list.txt'), file('merged.webm'))
+      expect(merge.at(6)).toBe(absolute('list.txt'))
+      expect(merge.at(-1)).toBe(absolute('merged.webm'))
+      expect(buildMediaValidationArgs(file('candidate.mp4')).at(4)).toBe(
+        absolute('candidate.mp4'),
+      )
+    },
+  )
 
   it('builds a full video decode validation command', () => {
     expect(buildMediaValidationArgs('candidate.mp4')).toEqual([
@@ -191,7 +215,7 @@ describe('post-process helpers', () => {
       'error',
       '-xerror',
       '-i',
-      'candidate.mp4',
+      path.resolve('candidate.mp4'),
       '-map',
       '0:v:0',
       '-f',
