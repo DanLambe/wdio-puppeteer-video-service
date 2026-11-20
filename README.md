@@ -228,7 +228,12 @@ timeout. Directory-creation failures fail immediately with the path and cause.
 `artifacts.naming`:
 
 - `style` (`'test' | 'test-full' | 'session' | 'session-full'`, default `'test'`).
-- `maxLength` (default `180` on Windows and `255` elsewhere).
+- `maxLength` (default `180` on Windows and `255` elsewhere). The service also
+  writes files whose names add up to 76 characters to a segment's name, such as
+  the temporary file a transcode or merge writes before publishing, and every
+  one of them must fit the file system's 255-character limit. So the test's
+  part of a name is at most 179 characters whatever `maxLength` allows, and a
+  longer title is shortened as `overflow` says.
 - `overflow` (`'truncate' | 'session'`, default `'truncate'`).
 
 `integrations.allure`:

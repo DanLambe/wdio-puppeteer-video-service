@@ -5,6 +5,8 @@ import type {
 } from '../types.js'
 import {
   DEFAULT_MAX_FILENAME_LENGTH,
+  DERIVED_NAME_SUFFIX_MAX_LENGTH,
+  FILE_NAME_COMPONENT_MAX_LENGTH,
   MIN_SAFE_FILENAME_LENGTH,
   SEGMENT_SUFFIX_MAX_LENGTH,
   WINDOWS_DEFAULT_MAX_FILENAME_LENGTH,
@@ -176,7 +178,15 @@ export const computeMaxSlugLength = (
     options,
     platform,
   )
-  return Math.max(16, effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH)
+  // The segment fits the configured length, and every name derived from it,
+  // such as an atomic temporary, still fits one path component.
+  return Math.max(
+    16,
+    Math.min(
+      effectiveMaxFilenameLength - SEGMENT_SUFFIX_MAX_LENGTH,
+      FILE_NAME_COMPONENT_MAX_LENGTH - DERIVED_NAME_SUFFIX_MAX_LENGTH,
+    ),
+  )
 }
 
 const normalizeStringList = (value: unknown): string[] | undefined => {
