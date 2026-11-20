@@ -31,6 +31,7 @@ type AdvancedMode =
   | 'ffmpeg-failure'
   | 'failure-burst'
   | 'tail-frame'
+  | 'session-reload'
 
 const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
@@ -75,6 +76,9 @@ const toMode = (value: string | undefined): AdvancedMode => {
   }
   if (normalized === 'tail-frame') {
     return 'tail-frame'
+  }
+  if (normalized === 'session-reload') {
+    return 'session-reload'
   }
   return 'retry'
 }
@@ -150,6 +154,9 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
     path.resolve('tests/advanced/specs/failure-burst-c.spec.ts'),
   ],
   'tail-frame': [path.resolve('tests/advanced/specs/tail-frame.spec.ts')],
+  'session-reload': [
+    path.resolve('tests/advanced/specs/session-reload.spec.ts'),
+  ],
 }
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
@@ -187,6 +194,10 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
   'tail-frame': [
     'should film the last paint before a kept test ends',
     'should film the last paint before recording moves to another tab',
+  ],
+  'session-reload': [
+    'should keep the video recorded before a mid-test session reload',
+    'should record the next test on the reloaded session',
   ],
 }
 
@@ -259,6 +270,7 @@ const VP9_MODES: ReadonlySet<AdvancedMode> = new Set<AdvancedMode>([
   'failure-burst',
   'ffmpeg-failure',
   'retry',
+  'session-reload',
   'tail-frame',
 ])
 
@@ -342,6 +354,10 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   }),
   // The runner decodes each part's last frames; the encoder's WebM will do.
   'tail-frame': createServiceOptions({
+    processing: { format: 'webm', transcode: { enabled: false } },
+  }),
+  'session-reload': createServiceOptions({
+    recording: { retain: 'failures' },
     processing: { format: 'webm', transcode: { enabled: false } },
   }),
 }
@@ -570,6 +586,8 @@ const modeAssertions: Record<
   'failure-burst': assertFailureBurstMode,
   // The runner checks the parts' colors from the manifest.
   'tail-frame': () => {},
+  // The runner checks the entries against the files.
+  'session-reload': () => {},
 }
 
 const assertAdvancedModeExpectations = async (

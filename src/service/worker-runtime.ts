@@ -89,6 +89,9 @@ export class WdioPuppeteerVideoWorkerRuntime
   private _followContexts = false
   private _isChromium = false
   private _recordingDisabledReason: string | undefined
+  // Set by `deleteSession`: the session's commands no longer drive recording
+  // until a reload or a new worker session replaces it.
+  private _sessionDeleted = false
   private _logLevel: LogLevel = 'warn'
   private readonly _hasExplicitLogLevel: boolean
   private _teardownTask: Promise<void> | undefined
@@ -321,6 +324,7 @@ export class WdioPuppeteerVideoWorkerRuntime
   ): Promise<void> {
     this._captureSession.setBrowser(browser)
     this._recordingDisabledReason = undefined
+    this._sessionDeleted = false
     this._recordingCoordinator.beginWorker(specs)
 
     if (!this._hasExplicitLogLevel) {
@@ -469,6 +473,7 @@ export class WdioPuppeteerVideoWorkerRuntime
 
   async onReload(oldSessionId: string, newSessionId: string): Promise<void> {
     await this._teardownRecording('onReload')
+    this._sessionDeleted = false
     this._ffmpegRuntime.resumeAfterTeardown()
     this._captureEngine.resetConnection()
     this._recordingController.setSessionId(newSessionId)
@@ -564,7 +569,12 @@ export class WdioPuppeteerVideoWorkerRuntime
     commandName: string,
     args: readonly unknown[] = [],
   ): Promise<void> {
-    if (isInternalOperation() || !this._canUseRecordingHooks()) {
+    if (commandName === 'deleteSession') {
+      // `browser.reloadSession()` sets the new session up with commands of its
+      // own before onReload ends this recording; they must not move it.
+      this._sessionDeleted = true
+    }
+    if (!this._canRouteCommand()) {
       return
     }
     if (this._followContexts) {
@@ -580,7 +590,7 @@ export class WdioPuppeteerVideoWorkerRuntime
     result?: unknown,
     error?: unknown,
   ): Promise<void> {
-    if (isInternalOperation() || !this._canUseRecordingHooks()) {
+    if (!this._canRouteCommand()) {
       return
     }
     if (this._followContexts) {
@@ -614,6 +624,14 @@ export class WdioPuppeteerVideoWorkerRuntime
 
   private _log(level: LogLevel, message: string, details?: unknown): void {
     this._writeLog(this._logLevel, level, message, details)
+  }
+
+  private _canRouteCommand(): boolean {
+    return (
+      !isInternalOperation() &&
+      !this._sessionDeleted &&
+      this._canUseRecordingHooks()
+    )
   }
 
   private _canUseRecordingHooks(): boolean {

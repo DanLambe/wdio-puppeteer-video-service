@@ -41,6 +41,7 @@ type AdvancedMode =
   | 'ffmpeg-failure'
   | 'failure-burst'
   | 'tail-frame'
+  | 'session-reload'
 
 // Each test moves tab twice: part 1 on the first tab, part 2 on the second,
 // part 3 back on the first.
@@ -255,6 +256,57 @@ const assertTailFrameEntries = async (
   console.log('[e2e:advanced] tail-frame: every part ends on its last paint.')
 }
 
+// Both tests fail, so both are kept: the first stopped at its session reload,
+// the second recorded on the reloaded session. Each entry lists the files on
+// disk and its test's result.
+const assertSessionReloadEntries = async (
+  resultsDir: string,
+): Promise<void> => {
+  const manifestValue: unknown = JSON.parse(
+    await readFile(path.join(resultsDir, 'manifest.json'), 'utf8'),
+  )
+  if (!isVideoManifest(manifestValue)) {
+    throw new TypeError(
+      '[e2e:advanced] session-reload mode produced an invalid manifest',
+    )
+  }
+  const entries = manifestValue.runs.flatMap((run) => run.entries)
+  const listed = new Set<string>()
+  // One segment each: the new session's own setup commands, sent before
+  // onReload, never start a segment of the reloading test.
+  for (const title of [
+    'should keep the video recorded before a mid-test session reload',
+    'should record the next test on the reloaded session',
+  ]) {
+    const entry = entries.find((candidate) => candidate.test?.name === title)
+    const segments = entry?.capture.segments ?? []
+    if (
+      entry?.capture.decision !== 'recorded' ||
+      entry.result !== 'failed' ||
+      segments.length !== 1
+    ) {
+      throw new Error(
+        `[e2e:advanced] session-reload entry "${title}" should be recorded and failed with its video, got ${JSON.stringify({ result: entry?.result, capture: entry?.capture })}`,
+      )
+    }
+    for (const segment of segments) {
+      listed.add(path.basename(segment.path))
+    }
+  }
+  const videos = (await readdir(resultsDir)).filter((name) =>
+    /\.(webm|mp4)$/u.test(name),
+  )
+  if (
+    videos.length !== listed.size ||
+    videos.some((name) => !listed.has(name))
+  ) {
+    throw new Error(
+      `[e2e:advanced] session-reload videos on disk ${JSON.stringify(videos)} should be the ones the manifest lists ${JSON.stringify([...listed])}`,
+    )
+  }
+  console.log('[e2e:advanced] session-reload: both entries list their videos.')
+}
+
 const requestedMode = process.argv[2] || 'all'
 
 const resolveModeOrder = (mode: string): AdvancedMode[] => {
@@ -286,6 +338,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
       'ffmpeg-failure',
       'failure-burst',
       'tail-frame',
+      'session-reload',
     ]
   }
 
@@ -306,7 +359,8 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
     mode === 'global-concurrency' ||
     mode === 'ffmpeg-failure' ||
     mode === 'failure-burst' ||
-    mode === 'tail-frame'
+    mode === 'tail-frame' ||
+    mode === 'session-reload'
   ) {
     return [mode]
   }
@@ -317,7 +371,7 @@ const resolveModeOrder = (mode: string): AdvancedMode[] => {
 const modeOrder = resolveModeOrder(requestedMode)
 if (modeOrder.length === 0) {
   console.error(
-    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, failure-burst, or tail-frame. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
+    `[e2e:advanced] Invalid mode "${requestedMode}". Use all, windows, retry, spec-file-retry, spec-level, no-segment, test-full-style, session-style, session-full-style, deferred-merge, include-spec, exclude-spec, include-tag, exclude-tag, retention, global-concurrency, ffmpeg-failure, failure-burst, tail-frame, or session-reload. Set WDIO_CAPTURE_ENCODING to live, auto or deferred to choose capture.encoding.`,
   )
   process.exit(1)
 }
@@ -355,7 +409,11 @@ const runMode = async (
     child,
     (code) => `[e2e:advanced] ${mode} run failed with code ${code}`,
     5 * 60_000,
-    mode === 'retention' || mode === 'failure-burst' ? [1] : [0],
+    mode === 'retention' ||
+      mode === 'failure-burst' ||
+      mode === 'session-reload'
+      ? [1]
+      : [0],
   )
   await assertSpoolDirectoryRemoved(resultsDir)
 
@@ -364,6 +422,9 @@ const runMode = async (
   }
   if (mode === 'failure-burst') {
     await assertFailureBurstEntries(resultsDir)
+  }
+  if (mode === 'session-reload') {
+    await assertSessionReloadEntries(resultsDir)
   }
   if (mode === 'tail-frame') {
     await assertTailFrameEntries(
