@@ -363,6 +363,33 @@ describe('ffmpeg-static resolution', () => {
     }
   })
 
+  it('resolves a relative project directory from the working directory', async () => {
+    const project = await createProject('/opt/relative/ffmpeg')
+    try {
+      expect(
+        resolveOptionalFfmpegStaticPath({
+          cwd: path.relative(process.cwd(), project),
+          requireFromPackage: notFound,
+        }),
+      ).toBe('/opt/relative/ffmpeg')
+    } finally {
+      await fs.rm(project, { recursive: true, force: true })
+    }
+  })
+
+  it('finds nothing, without throwing, when the working directory is gone', () => {
+    const cwd = vi.spyOn(process, 'cwd').mockImplementation(() => {
+      throw Object.assign(new Error('uv_cwd'), { code: 'ENOENT' })
+    })
+    try {
+      expect(
+        resolveOptionalFfmpegStaticPath({ requireFromPackage: notFound }),
+      ).toBeUndefined()
+    } finally {
+      cwd.mockRestore()
+    }
+  })
+
   it('ignores an installation without a binary for this platform', () => {
     expect(
       resolveOptionalFfmpegStaticPath({

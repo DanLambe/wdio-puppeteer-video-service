@@ -53,8 +53,12 @@ export const resolveOptionalFfmpegStaticPath = (
   lookup: FfmpegStaticLookup = {},
 ): string | undefined =>
   loadFfmpegStatic(lookup.requireFromPackage ?? requireFromPackage) ??
-  loadFfmpegStatic(
-    createRequire(path.join(lookup.cwd ?? process.cwd(), 'package.json')),
+  // Built inside the guarded load: a working directory that is gone, or a
+  // path `createRequire` refuses, means only that nothing is found there.
+  loadFfmpegStatic((id) =>
+    createRequire(path.resolve(lookup.cwd ?? process.cwd(), 'package.json'))(
+      id,
+    ),
   )
 
 export const getFfmpegCandidates = (
