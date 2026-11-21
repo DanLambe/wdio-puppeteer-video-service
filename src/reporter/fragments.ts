@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import {
+  arePlainDirectories,
   isDirectChildDirectory,
   isSafeGlobalSlotRunId,
 } from '../service/global-slot-directory.js'
@@ -90,32 +91,16 @@ export const removeReporterFragments = async (
       '[WdioPuppeteerVideoService] Refusing to remove reporter fragments outside their work directory.',
     )
   }
-  for (const directory of [workDirectory, runDirectory]) {
-    const stats = await lstatIfPresent(directory)
-    if (stats === undefined) {
-      return
-    }
-    if (!stats.isDirectory()) {
-      throw new TypeError(
-        `[WdioPuppeteerVideoService] Refusing to remove ${directory}: it is not a plain directory.`,
-      )
-    }
+  const present = await arePlainDirectories(
+    [workDirectory, runDirectory],
+    (directory) =>
+      `[WdioPuppeteerVideoService] Refusing to remove ${directory}`,
+  )
+  if (!present) {
+    return
   }
   await fs.rm(runDirectory, { force: true, recursive: true })
   await fs.rmdir(workDirectory).catch(() => undefined)
-}
-
-const lstatIfPresent = async (
-  filePath: string,
-): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> => {
-  try {
-    return await fs.lstat(filePath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return undefined
-    }
-    throw error
-  }
 }
 
 export const readReporterFragments = async (

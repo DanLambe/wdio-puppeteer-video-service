@@ -28,6 +28,41 @@ export const isDirectChildDirectory = (
   directory: string,
 ): boolean => path.dirname(path.resolve(directory)) === path.resolve(root)
 
+/**
+ * Whether each directory, in order, is present as a plain directory: `false`
+ * at the first that is missing. One that is a link, a junction or a file is
+ * refused with a `TypeError`, since a link could lead anywhere; `refusal`
+ * describes the refused operation for the message.
+ */
+export const arePlainDirectories = async (
+  directories: readonly string[],
+  refusal: (directory: string) => string,
+): Promise<boolean> => {
+  for (const directory of directories) {
+    const stats = await lstatIfPresent(directory)
+    if (stats === undefined) {
+      return false
+    }
+    if (!stats.isDirectory()) {
+      throw new TypeError(`${refusal(directory)}: it is not a plain directory.`)
+    }
+  }
+  return true
+}
+
+const lstatIfPresent = async (
+  filePath: string,
+): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> => {
+  try {
+    return await fs.lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined
+    }
+    throw error
+  }
+}
+
 export const resolveGlobalSlotRunDirectories = (
   options: GlobalSlotRunDirectoryOptions,
 ): GlobalSlotRunDirectories => {
