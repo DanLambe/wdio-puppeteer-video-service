@@ -2,6 +2,25 @@ const pauseForRecording = async (ms = 1200) => {
   await browser.pause(ms)
 }
 
+/**
+ * Dismisses the dialog a click opened. Under WebDriver BiDi, WebdriverIO
+ * dismisses a dialog nothing listens for. A Classic session leaves it open,
+ * and from WebdriverIO 10.2 the next command fails with "unexpected alert
+ * open" instead of being retried, so the test answers it itself.
+ */
+const dismissDialog = async (): Promise<void> => {
+  if (browser.isBidi) {
+    return
+  }
+  await browser.waitUntil(async () =>
+    browser.getAlertText().then(
+      () => true,
+      () => false,
+    ),
+  )
+  await browser.dismissAlert()
+}
+
 describe('Video Recording Service E2E Verification - Windows', () => {
   it('should handle multiple tabs and closing tabs', async () => {
     await browser.url('/windows')
@@ -63,12 +82,15 @@ describe('Video Recording Service E2E Verification - Windows', () => {
     await browser.url('/alerts')
 
     await $('#show-alert').click()
+    await dismissDialog()
     await expect($('#alert-result')).toHaveText('Alert accepted')
 
     await $('#show-confirm').click()
+    await dismissDialog()
     await expect($('#alert-result')).toHaveText('Confirm dismissed')
 
     await $('#show-prompt').click()
+    await dismissDialog()
     await expect($('#alert-result')).toHaveText('Prompt: null')
     await pauseForRecording()
   })

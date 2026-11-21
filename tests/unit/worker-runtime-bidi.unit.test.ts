@@ -54,6 +54,7 @@ const createWorker = async (
     beginWorker: vi.fn(),
     configureSession: vi.fn(),
     endEntity: vi.fn(async () => {}),
+    finalizeInterruptedRecording: vi.fn(async () => {}),
     finalizeSpecRecording: vi.fn(async () => {}),
     resetWorkerState: vi.fn(),
   }
@@ -155,6 +156,32 @@ describe('worker runtime in WebDriver BiDi sessions', () => {
     await ignoring.worker.beforeCommand('switchToWindow', ['a'])
     expect(ignoring.follower.before).not.toHaveBeenCalled()
   })
+
+  it.each([true, false])(
+    'ignores the commands of a deleted session until it reloads (BiDi %s)',
+    async (isBidi) => {
+      const { follower, windows, worker } = await createWorker({ isBidi })
+      const routed = () =>
+        follower.before.mock.calls.length + windows.before.mock.calls.length
+
+      // `browser.reloadSession()` deletes the session, then sets the new one
+      // up with commands of its own before WDIO calls onReload.
+      await worker.beforeCommand('deleteSession', [])
+      await worker.afterCommand('deleteSession', [], null)
+      await worker.beforeCommand('browsingContextNavigate', [
+        { context: 'new-tab' },
+      ])
+      await worker.beforeCommand('switchToWindow', ['new-tab'])
+      expect(routed()).toBe(0)
+
+      await worker.onReload('session-1', 'session-2')
+      await worker.beforeCommand('browsingContextNavigate', [
+        { context: 'new-tab' },
+      ])
+      await worker.beforeCommand('switchToWindow', ['new-tab'])
+      expect(routed()).toBeGreaterThan(0)
+    },
+  )
 
   it('never routes the service’s own commands', async () => {
     const { follower, windows, worker } = await createWorker()

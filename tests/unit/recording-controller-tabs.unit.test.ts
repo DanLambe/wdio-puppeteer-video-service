@@ -98,6 +98,7 @@ const createHarness = (options: WdioPuppeteerVideoServiceOptions = {}) => {
     maxSlugLength: resolved.maxSlugLength,
     media: {
       dropTasksForPaths: vi.fn(),
+      keepUnmerged: vi.fn(),
       pendingTaskCount: 0,
     } as unknown as RecordingMediaCoordinator,
     options: { ...resolved.options, outputDir: 'tab-videos' },

@@ -58,6 +58,8 @@ export interface ReportModel {
   readonly generatedAt: string
   readonly items: ReportItem[]
   readonly diagnostics: ReporterDiagnostic[]
+  /** The manifest beside the report, linked from it. */
+  readonly manifestFileName?: string
 }
 
 export const createReportModel = async (options: {
@@ -79,11 +81,21 @@ export const createReportModel = async (options: {
   const entries = options.run?.entries ?? []
   const matcher = new ManifestMatcher(entries)
   const outcomes = options.fragments.flatMap((fragment) => fragment.outcomes)
+  // A worker the service never records has no manifest entries by design.
+  const notRecorded = new Map<ReporterTestOutcome, string>()
+  for (const fragment of options.fragments) {
+    if (fragment.notRecordedReason !== undefined) {
+      for (const outcome of fragment.outcomes) {
+        notRecorded.set(outcome, fragment.notRecordedReason)
+      }
+    }
+  }
   const items = matcher.matchAll(outcomes).map(({ outcome, match }) =>
     createOutcomeReportItem({
       diagnostics,
       hasManifest: options.run !== undefined,
       match,
+      notRecordedReason: notRecorded.get(outcome),
       outcome,
     }),
   )
@@ -107,10 +119,18 @@ const createOutcomeReportItem = (options: {
   readonly diagnostics: ReporterDiagnostic[]
   readonly hasManifest: boolean
   readonly match: ManifestMatch
+  readonly notRecordedReason: string | undefined
   readonly outcome: ReporterTestOutcome
 }): ReportItem => {
   const entry =
     options.match.kind === 'matched' ? options.match.entry : undefined
+  if (!entry && options.notRecordedReason !== undefined) {
+    return {
+      ...createReportItem(options.outcome, undefined),
+      captureDecision: 'skipped',
+      captureReason: options.notRecordedReason,
+    }
+  }
   if (!entry && options.hasManifest) {
     const ambiguous = options.match.kind === 'ambiguous'
     options.diagnostics.push({

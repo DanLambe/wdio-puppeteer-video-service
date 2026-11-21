@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import {
+  arePlainDirectories,
+  isDirectChildDirectory,
+  isSafeGlobalSlotRunId,
+} from '../service/global-slot-directory.js'
 import { writeFileAtomically } from './atomic-write.js'
 import {
   DEFAULT_REPORT_FILE_NAME,
@@ -59,6 +64,43 @@ export const writeReporterFragment = async (
   const fragmentPath = path.join(fragmentDir, fileName)
   await writeFileAtomically(fragmentPath, `${JSON.stringify(fragment)}\n`)
   return fragmentPath
+}
+
+/**
+ * Removes a run's fragments, and the reporter's work directory once no other
+ * run's fragments remain in it. Only a run ID the launcher could have made is
+ * accepted, and only plain directories are removed: a work or run directory
+ * that is a link or junction could lead anywhere, so it is refused, as spool
+ * recovery refuses one.
+ */
+export const removeReporterFragments = async (
+  outputDir: string,
+  runId: string,
+): Promise<void> => {
+  if (!isSafeGlobalSlotRunId(runId)) {
+    throw new TypeError(
+      '[WdioPuppeteerVideoService] The run ID is unsafe for reporter fragment cleanup.',
+    )
+  }
+  const workDirectory = path.join(path.resolve(outputDir), REPORTER_WORK_DIR)
+  const runDirectory = path.dirname(
+    getReporterFragmentDirectory(outputDir, runId),
+  )
+  if (!isDirectChildDirectory(workDirectory, runDirectory)) {
+    throw new TypeError(
+      '[WdioPuppeteerVideoService] Refusing to remove reporter fragments outside their work directory.',
+    )
+  }
+  const present = await arePlainDirectories(
+    [workDirectory, runDirectory],
+    (directory) =>
+      `[WdioPuppeteerVideoService] Refusing to remove ${directory}`,
+  )
+  if (!present) {
+    return
+  }
+  await fs.rm(runDirectory, { force: true, recursive: true })
+  await fs.rmdir(workDirectory).catch(() => undefined)
 }
 
 export const readReporterFragments = async (
@@ -130,6 +172,8 @@ const isReporterFragment = (
     reportFileNameIsValid &&
     typeof fragment.startedAt === 'string' &&
     typeof fragment.completedAt === 'string' &&
+    (fragment.notRecordedReason === undefined ||
+      typeof fragment.notRecordedReason === 'string') &&
     Array.isArray(fragment.outcomes) &&
     fragment.outcomes.every((outcome) =>
       isReporterOutcome(outcome, expectedRunId, fragment.cid),
@@ -199,7 +243,8 @@ const isReporterStatus = (value: unknown): boolean => {
 
 const sanitizeFileToken = (value: string): string => {
   const token = trimBoundaryUnderscores(value.replace(/[^a-z0-9._-]+/giu, '_'))
-  return token || 'unknown'
+  // A name of dots alone is a path step, not a directory of its own.
+  return token && !/^\.+$/u.test(token) ? token : 'unknown'
 }
 
 const trimBoundaryUnderscores = (value: string): string => {

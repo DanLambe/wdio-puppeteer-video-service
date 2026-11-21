@@ -1,7 +1,11 @@
 import type { ResolvedWdioPuppeteerVideoServiceOptions } from '../types.js'
-import type { FileSystemBoundary } from './boundaries.js'
+import {
+  type ClockBoundary,
+  type FileSystemBoundary,
+  systemClock,
+} from './boundaries.js'
 import { drainBoundedTaskQueue } from './bounded-task-queue.js'
-import type { CaptureSession } from './capture-session.js'
+import type { CaptureSession, HeldSegment } from './capture-session.js'
 import type {
   ActiveSegment,
   DeferredMergeTask,
@@ -9,6 +13,7 @@ import type {
   DeferredTranscodeTask,
 } from './constants.js'
 import type { FfmpegRuntime } from './ffmpeg-runtime.js'
+import { removeFileWithRetry } from './file-removal.js'
 import type { ServiceLogger } from './logging.js'
 import type { ManifestWorkerRecorder } from './manifest-runtime.js'
 import type { MediaPipeline } from './media-pipeline.js'
@@ -18,6 +23,8 @@ import * as postProcess from './post-process.js'
 
 export interface RecordingMediaCoordinatorOptions {
   readonly captureSession: CaptureSession
+  /** Paces retries of a locked file's removal; the system's by default. */
+  readonly clock?: ClockBoundary
   readonly ffmpegRuntime: Pick<FfmpegRuntime, 'shouldTranscode'>
   readonly fileSystem: FileSystemBoundary
   readonly getManifestRecorder: () => ManifestWorkerRecorder | undefined
@@ -32,6 +39,7 @@ export interface RecordingMediaCoordinatorOptions {
 /** Owns immediate and deferred publication of captured media. */
 export class RecordingMediaCoordinator {
   private readonly captureSession: CaptureSession
+  private readonly clock: ClockBoundary
   private readonly ffmpegRuntime: Pick<FfmpegRuntime, 'shouldTranscode'>
   private readonly fileSystem: FileSystemBoundary
   private readonly getManifestRecorder: () => ManifestWorkerRecorder | undefined
@@ -53,6 +61,7 @@ export class RecordingMediaCoordinator {
 
   constructor(options: RecordingMediaCoordinatorOptions) {
     this.captureSession = options.captureSession
+    this.clock = options.clock ?? systemClock
     this.ffmpegRuntime = options.ffmpegRuntime
     this.fileSystem = options.fileSystem
     this.getManifestRecorder = options.getManifestRecorder
@@ -81,19 +90,49 @@ export class RecordingMediaCoordinator {
     this.tasks.push(task)
   }
 
-  /** Deletes every file of the recording, finalized or still held. */
+  /**
+   * Deletes every file of the recording, finalized or still held. A file
+   * FFmpeg has just closed can stay locked on Windows for a moment, so a lock
+   * is retried; one that outlasts the retries leaves the file, with a warning.
+   */
   async deleteRecordedSegments(): Promise<void> {
     const filesToDelete = [...this.captureSession.filePaths]
     await Promise.all(
       filesToDelete.map((file) =>
-        this.fileSystem.unlink(file).catch(() => {
-          // The artifact may already have been removed during cleanup.
-        }),
+        removeFileWithRetry(
+          { clock: this.clock, fileSystem: this.fileSystem, log: this.log },
+          file,
+          'discarded recording segment',
+        ),
       ),
     )
     this.dropTasksForPaths(filesToDelete)
     this.captureSession.clearRecordedPaths()
     this.captureSession.clearHeldSegments()
+  }
+
+  /**
+   * Settles the segments of a kept recording that is not merged, given as
+   * they were held before finalization. An unclean file is never processed.
+   * A healthy segment is transcoded as at the end of a test: under
+   * `after-worker`, one whose transcode a merge would have done gets a task
+   * of its own, so both timings leave the same files.
+   */
+  keepUnmerged(held: readonly HeldSegment[]): void {
+    this.dropTasksForPaths(
+      held
+        .filter((segment) => !segment.clean)
+        .flatMap(({ segment }) => [segment.recordingPath, segment.outputPath]),
+    )
+    if (!this.shouldDefer || !this.options.processing.merge.enabled) {
+      return
+    }
+    const recorded = new Set(this.captureSession.recordedPaths)
+    for (const { clean, segment } of held) {
+      if (clean && segment.transcode && recorded.has(segment.recordingPath)) {
+        this.enqueueSegmentTranscode(segment)
+      }
+    }
   }
 
   queueDeferredMerge(): void {
@@ -389,9 +428,13 @@ export class RecordingMediaCoordinator {
   private queueSegmentTranscode(segment: ActiveSegment): void {
     this.captureSession.addRecordedPath(segment.recordingPath)
     if (this.options.processing.merge.enabled) {
+      // The merge transcodes its output instead.
       return
     }
+    this.enqueueSegmentTranscode(segment)
+  }
 
+  private enqueueSegmentTranscode(segment: ActiveSegment): void {
     const task = postProcess.createDeferredTranscodeTask(
       segment.recordingPath,
       segment.outputPath,

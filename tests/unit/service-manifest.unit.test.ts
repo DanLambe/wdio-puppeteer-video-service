@@ -255,6 +255,8 @@ describe('service manifest hooks', () => {
             configureSession: (session) =>
               coordinator.configureSession(session),
             endEntity: (outcome) => coordinator.endEntity(outcome),
+            finalizeInterruptedRecording: () =>
+              coordinator.finalizeInterruptedRecording(),
             finalizeSpecRecording: () => coordinator.finalizeSpecRecording(),
             resetWorkerState() {
               coordinator.resetWorkerState()

@@ -49,6 +49,8 @@ const exists = async (filePath: string): Promise<boolean> =>
 interface HarnessOptions {
   /** Fails the reservation as a full or read-only disk would. */
   readonly reserveError?: Error
+  /** The path the reservation returns, unwritten, instead of the planned one. */
+  readonly reservedPath?: string
   readonly openFile?: (filePath: string) => SpoolFileStream
 }
 
@@ -75,6 +77,9 @@ const createHarness = (options: HarnessOptions = {}) => {
     reserveOutput: vi.fn(async (plannedPath: string) => {
       if (options.reserveError) {
         throw options.reserveError
+      }
+      if (options.reservedPath !== undefined) {
+        return options.reservedPath
       }
       await fs.writeFile(plannedPath, '', { flag: 'wx' })
       return plannedPath
@@ -187,6 +192,24 @@ describe('spool promotion replay', () => {
     expect(harness.removed).toEqual([harness.spoolPath])
     expect(harness.warnings).toEqual([])
   })
+
+  it.each(['-f/segment_part1.webm', 'ci:1/segment_part1.webm'])(
+    'gives the encoder an absolute output path for %s',
+    async (reserved) => {
+      // FFmpeg reads a name that starts with `-` as an option, and one with a
+      // colon as a protocol; neither may reach it relative.
+      const harness = createHarness({ reservedPath: reserved })
+      const spool = await harness.create()
+      spool.write(Buffer.from('header|'))
+      const promotion = harness.promotionFor(spool)
+
+      promotion.start()
+      await harness.started()
+
+      expect(harness.processes[0]?.args.at(-1)).toBe(path.resolve(reserved))
+      await promotion.cancel()
+    },
+  )
 
   it('delivers one continuous stream when the recorder keeps appending during the replay', async () => {
     const harness = createHarness()
