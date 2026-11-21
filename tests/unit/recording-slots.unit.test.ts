@@ -646,6 +646,58 @@ describe('cancelling a slot wait', () => {
     await next.release()
   })
 
+  it('settles an unbounded in-process wait that was cancelled before it began', async () => {
+    const state = createInProcessRecordingSlotState()
+    state.activeSlots = 1
+    const scheduler = new RecordingSlotScheduler(
+      { maxConcurrentRecordings: 1 },
+      noopLogger,
+      { inProcessState: state },
+    )
+    const controller = new AbortController()
+    controller.abort()
+
+    const settled = await Promise.race([
+      scheduler.acquireInProcess(undefined, controller.signal),
+      sleep(200).then(() => 'unsettled' as const),
+    ])
+
+    expect(settled).toBe(false)
+    expect(state.waiters).toHaveLength(0)
+  })
+
+  it('takes no global slot when the wait is cancelled while its directory is made', async () => {
+    await withTempDir(async (tempDir) => {
+      const controller = new AbortController()
+      const openExclusive = vi.fn(nodeFileSystem.openExclusive)
+      const scheduler = new RecordingSlotScheduler(
+        {
+          globalRecordingLockDir: tempDir,
+          maxGlobalRecordings: 1,
+          runId: 'cancel-mkdir',
+        },
+        noopLogger,
+        {
+          fileSystem: {
+            ...nodeFileSystem,
+            mkdir: async (directory) => {
+              await nodeFileSystem.mkdir(directory)
+              controller.abort()
+            },
+            openExclusive,
+          },
+          inProcessState: createInProcessRecordingSlotState(),
+        },
+      )
+
+      await expect(
+        scheduler.acquireGlobal(undefined, controller.signal),
+      ).resolves.toBe(false)
+      expect(openExclusive).not.toHaveBeenCalled()
+      expect(scheduler.ownsGlobalRecordingSlot).toBe(false)
+    })
+  })
+
   it('stops a fast-fail in-process wait when cancelled', async () => {
     const state = createInProcessRecordingSlotState()
     state.activeSlots = 1

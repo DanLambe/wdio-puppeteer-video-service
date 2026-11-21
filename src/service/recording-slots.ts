@@ -162,6 +162,9 @@ export class RecordingSlotScheduler {
     if (maxConcurrentRecordings <= 0 || this.ownsInProcessSlot) {
       return true
     }
+    if (signal?.aborted) {
+      return false
+    }
 
     if (timeoutMs !== undefined) {
       const deadline = this.clock.now() + Math.max(0, timeoutMs)
@@ -231,6 +234,10 @@ export class RecordingSlotScheduler {
         error,
       )
     })
+    // A wait cancelled while the directory was made takes no slot.
+    if (signal?.aborted) {
+      return false
+    }
 
     const timeout = timeoutMs ?? GLOBAL_RECORDING_SLOT_TIMEOUT_MS
     const deadline = this.clock.now() + Math.max(0, timeout)
