@@ -283,7 +283,9 @@ export class WorkerRecordingCoordinator
     }
 
     if (this.isSpecScope) {
-      if (!nonFailing) {
+      // A failure counts toward the spec recording it happened in; one that
+      // arrives after a reload ended that recording belongs to no other.
+      if (!nonFailing && this.actions.isRecordingActive()) {
         this.specHadFailure = true
       }
     } else {
@@ -489,6 +491,8 @@ export class WorkerRecordingCoordinator
     } finally {
       await this.actions.resetRecording()
       this.activeRecordingRetryCount = 0
+      // A later spec recording, as after a reload, is judged on its own.
+      this.specHadFailure = false
     }
     this.throwFinalizationFailure(failures)
   }

@@ -532,7 +532,11 @@ export class WdioPuppeteerVideoWorkerRuntime
         this._ffmpegRuntime.resumeAfterTeardown()
         try {
           if (this._captureSession.isRecordingActive) {
+            // Only the worker's end leaves a spec recording with its outcome.
+            // A reload interrupts the test in flight, whose result is not
+            // known yet, so its recording is kept as a test-scoped one is.
             if (
+              source !== 'onReload' &&
               this._recordingCoordinator.isSpecScope &&
               this._captureSession.currentTestSlug
             ) {
@@ -549,7 +553,11 @@ export class WdioPuppeteerVideoWorkerRuntime
           if (this._recordingController.ownsResources) {
             await this._recordingController.reset()
           }
-          this._recordingCoordinator.resetWorkerState()
+          // A reload continues the same spec, so what the worker has counted,
+          // such as each Cucumber scenario's runs for retries, stays.
+          if (source !== 'onReload') {
+            this._recordingCoordinator.resetWorkerState()
+          }
           this._log(
             'trace',
             `[WdioPuppeteerVideoService] Recording teardown completed from ${source}.`,

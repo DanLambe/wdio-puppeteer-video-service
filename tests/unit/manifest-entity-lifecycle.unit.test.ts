@@ -397,122 +397,283 @@ describe('manifest entries of recordings stopped before their result', () => {
   })
 })
 
+/** A worker over fake Puppeteer and screencast, with a launcher for its run. */
+const createReloadingWorker = async (
+  framework: 'cucumber' | 'mocha',
+  service: WdioPuppeteerVideoServiceOptions,
+) => {
+  const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'reload-entry-'))
+  tempDirs.push(outputDir)
+  const config = { framework, logLevel: 'silent' }
+  const capabilities = { browserName: 'chrome' }
+  const specs =
+    framework === 'cucumber'
+      ? ['features/reload.feature']
+      : ['tests/reload.spec.ts']
+  const options: WdioPuppeteerVideoServiceOptions = {
+    ...service,
+    outputDir,
+    logLevel: 'silent',
+    capture: { encoding: 'live', framePriming: false },
+  }
+  const launcher = new WdioPuppeteerVideoLauncher(options, undefined, config)
+  await launcher.onPrepare()
+  launcher.onWorkerStart('0-0', capabilities, specs, config)
+
+  const markers = new Map<string, unknown>()
+  const page = {
+    isClosed: () => false,
+    url: () => 'http://example.test/',
+    bringToFront: async () => {},
+    on() {},
+    off() {},
+    target: () => ({ _targetId: 'ctx-1' }),
+    evaluate: async (_script: unknown, marker: string) => markers.get(marker),
+    createCDPSession: async () => ({
+      send: async () => ({ targetInfo: { targetId: 'ctx-1' } }),
+      detach: async () => {},
+    }),
+  }
+  const puppeteer = {
+    connected: true,
+    on() {},
+    off() {},
+    once() {},
+    pages: async () => [page],
+    targets: () => [
+      { type: () => 'page', _targetId: 'ctx-1', page: async () => page },
+    ],
+  }
+  const starts: string[] = []
+  const overrides = {
+    connectPuppeteer: async () => puppeteer,
+    startScreencast: async (
+      _page: unknown,
+      start: { readonly outputPath: string },
+    ) => {
+      starts.push(path.basename(start.outputPath))
+      await fs.writeFile(start.outputPath, 'video')
+      // The recorder members the capture engine reads.
+      return {
+        frameCount: 2,
+        ffmpegResult: { code: 0, signal: null },
+        incompleteReason: undefined,
+        output: { kind: 'encoder', outputPath: start.outputPath },
+        queueStats: {
+          highWaterBlocks: 0,
+          highWaterBytes: 0,
+          highWaterLagSeconds: 0,
+          pendingBlocks: 0,
+          pendingBytes: 0,
+        },
+        async stop() {},
+        async abort() {},
+      }
+    },
+  } as unknown as WorkerCompositionOverrides
+  const worker = new WdioPuppeteerVideoWorkerRuntime(
+    options,
+    capabilities,
+    config,
+    overrides,
+  )
+  const browser = {
+    sessionId: 'session-before-reload',
+    capabilities: { browserName: 'chrome', browserVersion: '150.0' },
+    isBidi: false,
+    options: { logLevel: 'silent' },
+    getPuppeteer: async () => puppeteer,
+    getWindowHandle: async () => 'ctx-1',
+    getWindowHandles: async () => ['ctx-1'],
+    execute: async (_script: unknown, marker: string, value: unknown) => {
+      markers.set(marker, value)
+    },
+  } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2]
+  await worker.beforeSession(config, capabilities, specs, '0-0')
+  await worker.before(capabilities, specs, browser)
+
+  return {
+    specFile: specs[0] ?? '',
+    starts,
+    worker,
+    reload: () =>
+      worker.onReload('session-before-reload', 'session-after-reload'),
+    /** Ends the worker and the run, then reads what it left. */
+    async finish() {
+      await worker.after()
+      await worker.afterSession()
+      await launcher.onComplete(0)
+      const videos = (await fs.readdir(outputDir)).filter((file) =>
+        file.endsWith('.webm'),
+      )
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(outputDir, 'manifest.json'), 'utf8'),
+      ) as VideoManifestV1
+      const entries = (manifest.runs[0]?.entries ?? [])
+        .toSorted((left, right) =>
+          left.timings.startedAt.localeCompare(right.timings.startedAt),
+        )
+        .map((entry) => ({
+          name: entry.test?.name ?? entry.scope,
+          attempt: entry.attempt,
+          result: entry.result,
+          decision: entry.capture.decision,
+          segments: entry.capture.segments.map((segment) => segment.path),
+        }))
+      return { entries, videos }
+    },
+  }
+}
+
+const mochaTest = (title: string, file: string): Frameworks.Test =>
+  ({ title, parent: 'suite', file }) as Frameworks.Test
+
 describe('a worker whose session reloads mid test', () => {
   it('lists the video it kept in the test entry the reporter joins', async () => {
-    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'reload-entry-'))
-    tempDirs.push(outputDir)
-    const config = { framework: 'mocha', logLevel: 'silent' }
-    const capabilities = { browserName: 'chrome' }
-    const specs = ['tests/reload.spec.ts']
-    const options: WdioPuppeteerVideoServiceOptions = {
-      outputDir,
-      logLevel: 'silent',
+    const run = await createReloadingWorker('mocha', {
       recording: { retain: 'failures' },
-      capture: { encoding: 'live', framePriming: false },
-    }
-    const launcher = new WdioPuppeteerVideoLauncher(options, undefined, config)
-    await launcher.onPrepare()
-    launcher.onWorkerStart('0-0', capabilities, specs, config)
+    })
+    const test = mochaTest('reloads mid test', run.specFile)
 
-    const markers = new Map<string, unknown>()
-    const page = {
-      isClosed: () => false,
-      url: () => 'http://example.test/',
-      bringToFront: async () => {},
-      on() {},
-      off() {},
-      target: () => ({ _targetId: 'ctx-1' }),
-      evaluate: async (_script: unknown, marker: string) => markers.get(marker),
-      createCDPSession: async () => ({
-        send: async () => ({ targetInfo: { targetId: 'ctx-1' } }),
-        detach: async () => {},
-      }),
-    }
-    const puppeteer = {
-      connected: true,
-      on() {},
-      off() {},
-      once() {},
-      pages: async () => [page],
-      targets: () => [
-        { type: () => 'page', _targetId: 'ctx-1', page: async () => page },
-      ],
-    }
-    const overrides = {
-      connectPuppeteer: async () => puppeteer,
-      startScreencast: async (
-        _page: unknown,
-        start: { readonly outputPath: string },
-      ) => {
-        await fs.writeFile(start.outputPath, 'video')
-        // The recorder members the capture engine reads.
-        return {
-          frameCount: 2,
-          ffmpegResult: { code: 0, signal: null },
-          incompleteReason: undefined,
-          output: { kind: 'encoder', outputPath: start.outputPath },
-          queueStats: {
-            highWaterBlocks: 0,
-            highWaterBytes: 0,
-            highWaterLagSeconds: 0,
-            pendingBlocks: 0,
-            pendingBytes: 0,
-          },
-          async stop() {},
-          async abort() {},
-        }
-      },
-    } as unknown as WorkerCompositionOverrides
-    const worker = new WdioPuppeteerVideoWorkerRuntime(
-      options,
-      capabilities,
-      config,
-      overrides,
-    )
-    const browser = {
-      sessionId: 'session-before-reload',
-      capabilities: { browserName: 'chrome', browserVersion: '150.0' },
-      isBidi: false,
-      options: { logLevel: 'silent' },
-      getPuppeteer: async () => puppeteer,
-      getWindowHandle: async () => 'ctx-1',
-      getWindowHandles: async () => ['ctx-1'],
-      execute: async (_script: unknown, marker: string, value: unknown) => {
-        markers.set(marker, value)
-      },
-    } as unknown as Parameters<WdioPuppeteerVideoWorkerRuntime['before']>[2]
-    const test = {
-      title: 'reloads mid test',
-      parent: 'suite',
-      file: specs[0],
-    } as Frameworks.Test
+    await run.worker.beforeTest(test, undefined)
+    await run.reload()
+    await run.worker.afterTest(test, undefined, { passed: true } as never)
+    const { entries, videos } = await run.finish()
 
-    await worker.beforeSession(config, capabilities, specs, '0-0')
-    await worker.before(capabilities, specs, browser)
-    await worker.beforeTest(test, undefined)
-    await worker.onReload('session-before-reload', 'session-after-reload')
-    await worker.afterTest(test, undefined, { passed: true } as never)
-    await worker.after()
-    await worker.afterSession()
-    await launcher.onComplete(0)
-
-    const videos = (await fs.readdir(outputDir)).filter((file) =>
-      file.endsWith('.webm'),
-    )
     expect(videos).toHaveLength(1)
-    const manifest = JSON.parse(
-      await fs.readFile(path.join(outputDir, 'manifest.json'), 'utf8'),
-    ) as VideoManifestV1
-    expect(
-      manifest.runs[0]?.entries.map((entry) => ({
-        test: entry.test?.name,
-        result: entry.result,
-        decision: entry.capture.decision,
-        segments: entry.capture.segments.map((segment) => segment.path),
-      })),
-    ).toEqual([
+    expect(entries).toEqual([
       {
-        test: 'reloads mid test',
+        name: 'reloads mid test',
+        attempt: 1,
+        result: 'passed',
+        decision: 'recorded',
+        segments: videos,
+      },
+    ])
+  })
+
+  // The spec's outcome is not known at a reload, so its recording so far is
+  // kept, as a test-scoped one is; it never waits on retention there.
+  it('keeps a spec recording that a reload interrupts, with the failure that follows', async () => {
+    const run = await createReloadingWorker('mocha', {
+      recording: { scope: 'spec', retain: 'failures' },
+    })
+    const test = mochaTest('fails after a reload', run.specFile)
+
+    await run.worker.beforeTest(test, undefined)
+    await run.reload()
+    await run.worker.afterTest(test, undefined, { passed: false } as never)
+    const { entries, videos } = await run.finish()
+
+    expect(videos).toHaveLength(1)
+    expect(entries).toEqual([
+      {
+        name: 'spec',
+        attempt: 1,
+        result: 'failed',
+        decision: 'recorded',
+        segments: videos,
+      },
+    ])
+  })
+
+  it('judges the spec recording after a reload by its own tests only', async () => {
+    const run = await createReloadingWorker('mocha', {
+      recording: { scope: 'spec', retain: 'failures' },
+    })
+    const reloading = mochaTest('fails after a reload', run.specFile)
+    const next = mochaTest('passes on the new session', run.specFile)
+
+    await run.worker.beforeTest(reloading, undefined)
+    await run.reload()
+    await run.worker.afterTest(reloading, undefined, { passed: false } as never)
+    await run.worker.beforeTest(next, undefined)
+    await run.worker.afterTest(next, undefined, { passed: true } as never)
+    const { entries, videos } = await run.finish()
+
+    // The first recording is kept for the failure; the second, whose only
+    // test passed, is discarded.
+    expect(run.starts).toHaveLength(2)
+    expect(videos).toHaveLength(1)
+    expect(entries).toEqual([
+      {
+        name: 'spec',
+        attempt: 1,
+        result: 'failed',
+        decision: 'recorded',
+        segments: videos,
+      },
+      expect.objectContaining({
+        name: 'spec',
+        result: 'passed',
+        decision: 'discarded',
+        segments: [],
+      }),
+    ])
+  })
+
+  it('does not carry a failure from before a reload into the next spec recording', async () => {
+    const run = await createReloadingWorker('mocha', {
+      recording: { scope: 'spec', retain: 'failures' },
+    })
+    const failing = mochaTest('fails before the reload', run.specFile)
+    const reloading = mochaTest('reloads and passes', run.specFile)
+    const next = mochaTest('passes on the new session', run.specFile)
+
+    await run.worker.beforeTest(failing, undefined)
+    await run.worker.afterTest(failing, undefined, { passed: false } as never)
+    await run.worker.beforeTest(reloading, undefined)
+    await run.reload()
+    await run.worker.afterTest(reloading, undefined, { passed: true } as never)
+    await run.worker.beforeTest(next, undefined)
+    await run.worker.afterTest(next, undefined, { passed: true } as never)
+    const { entries, videos } = await run.finish()
+
+    expect(videos).toHaveLength(1)
+    expect(entries).toEqual([
+      {
+        name: 'spec',
+        attempt: 1,
+        result: 'failed',
+        decision: 'recorded',
+        segments: videos,
+      },
+      expect.objectContaining({
+        result: 'passed',
+        decision: 'discarded',
+        segments: [],
+      }),
+    ])
+  })
+
+  // Cucumber gives no attempt number: a retry is the scenario's next run in
+  // the worker, so a reload must not forget the runs before it.
+  it('still recognizes a Cucumber retry after a reload', async () => {
+    const run = await createReloadingWorker('cucumber', {
+      recording: { attempts: 'retries', retain: 'retries' },
+    })
+    const world = {
+      pickle: {
+        id: 'pickle-1',
+        name: 'flaky reload scenario',
+        uri: run.specFile,
+      },
+    } as unknown as Frameworks.World
+
+    await run.worker.beforeScenario(world, {})
+    await run.reload()
+    await run.worker.afterScenario(world, { passed: false } as never)
+    await run.worker.beforeScenario(world, {})
+    await run.worker.afterScenario(world, { passed: true } as never)
+    const { entries, videos } = await run.finish()
+
+    expect(run.starts).toHaveLength(1)
+    expect(videos).toHaveLength(1)
+    expect(entries).toEqual([
+      expect.objectContaining({ attempt: 1, decision: 'skipped' }),
+      {
+        name: 'flaky reload scenario',
+        attempt: 2,
         result: 'passed',
         decision: 'recorded',
         segments: videos,

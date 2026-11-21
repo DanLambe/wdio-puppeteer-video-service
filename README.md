@@ -327,7 +327,10 @@ Unknown integrations are rejected instead of being silently ignored.
 - A recording stopped before its test's result is known, because the worker
   ends or the session reloads mid-test, is kept, and a deferred one is encoded
   then. Its manifest entry lists that media at once, and a result that arrives
-  later, after a reload, is added to the same entry.
+  later, after a reload, is added to the same entry. With `scope: 'spec'`, a
+  reload ends the spec's recording this way too; the spec's later tests start
+  a new recording, kept or discarded by their own results. Retries are still
+  counted across a reload.
 
 ## Deferred Encoding
 
