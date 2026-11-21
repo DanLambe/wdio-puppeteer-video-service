@@ -32,6 +32,7 @@ type AdvancedMode =
   | 'failure-burst'
   | 'tail-frame'
   | 'session-reload'
+  | 'session-reload-spec'
 
 const toMode = (value: string | undefined): AdvancedMode => {
   const normalized = (value ?? '').trim().toLowerCase()
@@ -79,6 +80,9 @@ const toMode = (value: string | undefined): AdvancedMode => {
   }
   if (normalized === 'session-reload') {
     return 'session-reload'
+  }
+  if (normalized === 'session-reload-spec') {
+    return 'session-reload-spec'
   }
   return 'retry'
 }
@@ -157,6 +161,9 @@ const modeSpecs: Record<AdvancedMode, string[]> = {
   'session-reload': [
     path.resolve('tests/advanced/specs/session-reload.spec.ts'),
   ],
+  'session-reload-spec': [
+    path.resolve('tests/advanced/specs/session-reload.spec.ts'),
+  ],
 }
 
 const modeExpectedTitles: Record<AdvancedMode, string[]> = {
@@ -199,6 +206,8 @@ const modeExpectedTitles: Record<AdvancedMode, string[]> = {
     'should keep the video recorded before a mid-test session reload',
     'should record the next test on the reloaded session',
   ],
+  // Spec-scoped videos are named after the spec, not a test.
+  'session-reload-spec': [],
 }
 
 const fileStyleTitleToken =
@@ -271,6 +280,7 @@ const VP9_MODES: ReadonlySet<AdvancedMode> = new Set<AdvancedMode>([
   'ffmpeg-failure',
   'retry',
   'session-reload',
+  'session-reload-spec',
   'tail-frame',
 ])
 
@@ -358,6 +368,10 @@ const serviceOptionsByMode: Record<AdvancedMode, ServiceOptions> = {
   }),
   'session-reload': createServiceOptions({
     recording: { retain: 'failures' },
+    processing: { format: 'webm', transcode: { enabled: false } },
+  }),
+  'session-reload-spec': createServiceOptions({
+    recording: { scope: 'spec', retain: 'failures' },
     processing: { format: 'webm', transcode: { enabled: false } },
   }),
 }
@@ -588,6 +602,7 @@ const modeAssertions: Record<
   'tail-frame': () => {},
   // The runner checks the entries against the files.
   'session-reload': () => {},
+  'session-reload-spec': () => {},
 }
 
 const assertAdvancedModeExpectations = async (
