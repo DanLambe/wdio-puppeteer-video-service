@@ -15,6 +15,7 @@ import {
   getReporterFragmentDirectory,
   normalizeReportFileName,
   readReporterFragments,
+  removeReporterFragments,
   writeReporterFragment,
 } from '../../src/reporter/fragments.js'
 import { generateVideoReportForRun } from '../../src/reporter/report-generator.js'
@@ -1307,5 +1308,100 @@ describe('mixed-browser suites', () => {
     expect(fragments).toHaveLength(1)
     expect(fragments[0]?.notRecordedReason).toBeUndefined()
     expect(invalidFiles).toEqual(['bad.json'])
+  })
+})
+
+// The cleanup deletes recursively, so it must stay inside the reporter's own
+// work directory: never a parent of it, and never through a link or junction.
+describe("removing a run's reporter fragments", () => {
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  const exists = (filePath: string): Promise<boolean> =>
+    fs.stat(filePath).then(
+      () => true,
+      () => false,
+    )
+
+  it.each(['..', '.', '../outside', 'run/nested', ''])(
+    'refuses the unsafe run ID %j and touches nothing',
+    async (runId) => {
+      const outputDir = await createTempDir()
+      await fs.writeFile(path.join(outputDir, 'keep-me.webm'), 'video')
+
+      await expect(removeReporterFragments(outputDir, runId)).rejects.toThrow(
+        TypeError,
+      )
+      expect(await exists(path.join(outputDir, 'keep-me.webm'))).toBe(true)
+    },
+  )
+
+  it('never resolves a fragment directory outside the work directory', () => {
+    const outputDir = path.resolve('videos')
+    const workDirectory = path.join(outputDir, '.wdio-video-report')
+    for (const runId of ['..', '.', '...']) {
+      expect(
+        path.dirname(
+          path.dirname(getReporterFragmentDirectory(outputDir, runId)),
+        ),
+      ).toBe(workDirectory)
+    }
+  })
+
+  it('refuses a linked work directory and leaves its target alone', async () => {
+    const root = await createTempDir()
+    const outputDir = path.join(root, 'videos')
+    const victim = path.join(root, 'victim', 'run-123')
+    await fs.mkdir(outputDir, { recursive: true })
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'important.txt'), 'keep')
+    await fs.symlink(
+      path.join(root, 'victim'),
+      path.join(outputDir, '.wdio-video-report'),
+      linkType,
+    )
+
+    await expect(removeReporterFragments(outputDir, 'run-123')).rejects.toThrow(
+      'not a plain directory',
+    )
+    expect(await exists(path.join(victim, 'important.txt'))).toBe(true)
+  })
+
+  it('refuses a linked run directory and leaves its target alone', async () => {
+    const root = await createTempDir()
+    const outputDir = path.join(root, 'videos')
+    const victim = path.join(root, 'victim')
+    await fs.mkdir(path.join(outputDir, '.wdio-video-report'), {
+      recursive: true,
+    })
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'important.txt'), 'keep')
+    await fs.symlink(
+      victim,
+      path.join(outputDir, '.wdio-video-report', 'run-123'),
+      linkType,
+    )
+
+    await expect(removeReporterFragments(outputDir, 'run-123')).rejects.toThrow(
+      'not a plain directory',
+    )
+    expect(await exists(path.join(victim, 'important.txt'))).toBe(true)
+  })
+
+  it('removes a run with fragments and an empty work directory', async () => {
+    const outputDir = await createTempDir()
+    await writeReporterFragment(outputDir, {
+      ...createFragment('run-123', '0-0', ['tests/specs/a.ts'], []),
+    })
+
+    await removeReporterFragments(outputDir, 'run-123')
+
+    expect(await exists(path.join(outputDir, '.wdio-video-report'))).toBe(false)
+  })
+
+  it('does nothing when the run left no fragments', async () => {
+    const outputDir = await createTempDir()
+
+    await expect(
+      removeReporterFragments(outputDir, 'run-123'),
+    ).resolves.toBeUndefined()
   })
 })
