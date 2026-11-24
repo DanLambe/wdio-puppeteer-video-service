@@ -55,6 +55,11 @@ export interface ReporterFragmentV1 {
   startedAt: string
   completedAt: string
   outcomes: ReporterTestOutcome[]
+  /**
+   * Why the service never records this worker's browser, such as Firefox or
+   * a multiremote session. Its outcomes have no manifest entries by design.
+   */
+  notRecordedReason?: string
 }
 
 export interface ReporterDiagnostic {

@@ -290,7 +290,8 @@ workspace or credential files. GitHub documents these
 Each of these warnings marks the recording as incomplete. The manifest entry is
 `failed` with reason `capture-incomplete`, the file is kept as an unclean
 segment without merging or transcoding, and `failurePolicy: 'error'` raises the
-failure after cleanup.
+failure after cleanup. The recording's other segments are still transcoded at
+either `processing.timing`, and none of them is merged.
 
 - `The encoder fell behind the screencast (… frames waiting for the encoder
   reached the limit of 1024)` or `(… MiB of frames waiting for the encoder

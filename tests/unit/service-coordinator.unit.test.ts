@@ -10,6 +10,7 @@ const createCoordinator = (): WorkerRecordingCoordinatorPort => ({
   beginWorker: vi.fn(),
   configureSession: vi.fn(),
   endEntity: vi.fn(async () => {}),
+  finalizeInterruptedRecording: vi.fn(async () => {}),
   finalizeSpecRecording: vi.fn(async () => {}),
   resetWorkerState: vi.fn(),
 })

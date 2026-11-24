@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import fs from 'node:fs/promises'
+import path from 'node:path'
 import type { ClockBoundary } from './boundaries.js'
 import { EncoderSink, type SpoolSink } from './frame-sink.js'
 import { createFfmpegArguments } from './screencast-arguments.js'
@@ -136,8 +137,10 @@ export class SpoolPromotion {
       return undefined
     }
     const { canvas, crop, format, quality, scale } = this.spool.spool.settings
+    // FFmpeg reads a name that starts with `-` as an option, and one with a
+    // colon as a protocol. An absolute path is neither.
     const args = createFfmpegArguments(
-      { format, outputPath: output, quality, scale },
+      { format, outputPath: path.resolve(output), quality, scale },
       canvas,
       crop,
     )

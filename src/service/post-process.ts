@@ -107,6 +107,9 @@ export const resolveTimestampPassthroughArgs = (
     : FPS_MODE_PASSTHROUGH
 }
 
+// FFmpeg reads a file name that starts with `-` as an option, and one with a
+// colon as a protocol, so every file reaches it as an absolute path.
+
 export const buildH264TranscodeArgs = (
   inputPath: string,
   outputPath: string,
@@ -116,7 +119,7 @@ export const buildH264TranscodeArgs = (
   return [
     '-n',
     '-i',
-    inputPath,
+    path.resolve(inputPath),
     '-an',
     '-c:v',
     'libx264',
@@ -134,7 +137,7 @@ export const buildH264TranscodeArgs = (
     // follow, so callers can still override both the preset and quality.
     ...DEFAULT_H264_TRANSCODE_ARGS,
     ...(ffmpegArgs ?? []),
-    outputPath,
+    path.resolve(outputPath),
   ]
 }
 
@@ -149,10 +152,10 @@ export const buildConcatMergeArgs = (
     '-safe',
     '0',
     '-i',
-    concatListPath,
+    path.resolve(concatListPath),
     '-c',
     'copy',
-    mergedPath,
+    path.resolve(mergedPath),
   ]
 }
 
@@ -162,7 +165,7 @@ export const buildMediaValidationArgs = (inputPath: string): string[] => {
     'error',
     '-xerror',
     '-i',
-    inputPath,
+    path.resolve(inputPath),
     '-map',
     '0:v:0',
     '-f',

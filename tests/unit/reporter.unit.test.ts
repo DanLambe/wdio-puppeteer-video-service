@@ -15,6 +15,7 @@ import {
   getReporterFragmentDirectory,
   normalizeReportFileName,
   readReporterFragments,
+  removeReporterFragments,
   writeReporterFragment,
 } from '../../src/reporter/fragments.js'
 import { generateVideoReportForRun } from '../../src/reporter/report-generator.js'
@@ -1000,9 +1001,10 @@ describe('static report generation', () => {
       outputDir,
       runId,
     })
-    expect(await fs.readFile(invalidManifest?.path ?? '', 'utf8')).toContain(
-      'invalid-manifest',
-    )
+    const invalidHtml = await fs.readFile(invalidManifest?.path ?? '', 'utf8')
+    expect(invalidHtml).toContain('invalid-manifest')
+    // Only a manifest the report could read is linked.
+    expect(invalidHtml).not.toContain('href="./manifest.json"')
 
     await fs.writeFile(path.join(outputDir, 'manifest.json'), '{', 'utf8')
     const corruptManifest = await generateVideoReportForRun({
@@ -1086,6 +1088,7 @@ const assertOfflineFilterScript = (html: string): void => {
     ['#spec-filter', createFilter('spec')],
     ['#browser-filter', createFilter('browser')],
     ['#retry-filter', createFilter('retry')],
+    ['#search-filter', { ...createFilter('search'), value: '' }],
   ])
   const cards = [
     {
@@ -1094,6 +1097,7 @@ const assertOfflineFilterScript = (html: string): void => {
         spec: 'one.ts',
         browser: 'chrome',
         retried: 'false',
+        search: 'opens checkout one.ts chrome',
       },
       hidden: false,
     },
@@ -1103,6 +1107,7 @@ const assertOfflineFilterScript = (html: string): void => {
         spec: 'two.ts',
         browser: 'edge',
         retried: 'true',
+        search: 'pays by card two.ts edge expected total',
       },
       hidden: false,
     },
@@ -1122,4 +1127,281 @@ const assertOfflineFilterScript = (html: string): void => {
   listeners.get('status')?.()
   expect(cards.map((card) => card.hidden)).toEqual([true, false])
   expect(empty.hidden).toBe(true)
+
+  const searchFilter = filters.get('#search-filter')
+  if (!searchFilter) {
+    throw new TypeError('Expected search filter')
+  }
+  statusFilter.value = 'all'
+  searchFilter.value = '  Checkout '
+  listeners.get('search')?.()
+  expect(cards.map((card) => card.hidden)).toEqual([false, true])
+  searchFilter.value = 'nothing matches'
+  listeners.get('search')?.()
+  expect(cards.map((card) => card.hidden)).toEqual([true, true])
+  expect(empty.hidden).toBe(false)
 }
+
+// The service never runs for a browser it cannot record, so in a suite that
+// also runs Firefox or Safari those workers have no manifest entries. Their
+// outcomes are still reported, as not recorded, without a diagnostic.
+describe('mixed-browser suites', () => {
+  const runWorker = async (
+    outputDir: string,
+    cid: string,
+    capabilities: Record<string, unknown>,
+    isMultiRemote = false,
+  ): Promise<void> => {
+    const context = await createManifestRunContext(outputDir, 'mixed-run')
+    const config: Record<string, unknown> = { framework: 'mocha' }
+    assignManifestRunContext(config, context)
+    assignManifestWorkerContext(config, cid, { specFileRetryAttempt: 0 })
+    const reporter = new WdioPuppeteerVideoReporter({ outputDir })
+    const runner = {
+      cid,
+      config,
+      specs: [path.resolve('tests/specs/mixed.spec.ts')],
+      capabilities,
+      isMultiRemote,
+      start: new Date('2026-11-20T00:00:00.000Z'),
+    } as unknown as RunnerStats
+    reporter.onRunnerStart(runner)
+    reporter.onTestPass({
+      uid: `${cid}-works`,
+      title: 'works',
+      fullTitle: 'suite works',
+      state: 'passed',
+      duration: 5,
+    } as unknown as TestStats)
+    reporter.onRunnerEnd(runner)
+    await vi.waitFor(() => expect(reporter.isSynchronised).toBe(true))
+  }
+
+  it.each([
+    {
+      name: 'Firefox',
+      capabilities: { browserName: 'firefox', browserVersion: '140.0' },
+      multiRemote: false,
+      reason: 'video recording is only supported on Chromium-based browsers',
+    },
+    {
+      name: 'Safari',
+      capabilities: { browserName: 'safari' },
+      multiRemote: false,
+      reason: 'video recording is only supported on Chromium-based browsers',
+    },
+    {
+      name: 'multiremote',
+      capabilities: {
+        one: { browserName: 'chrome', sessionId: 'a' },
+        two: { browserName: 'chrome', sessionId: 'b' },
+      },
+      multiRemote: true,
+      reason:
+        'multiremote sessions are not supported; configure recording for a single-browser WDIO worker',
+    },
+  ])(
+    'reports a $name worker as not recorded',
+    async ({ capabilities, multiRemote, reason }) => {
+      const outputDir = await createTempDir()
+      await runWorker(outputDir, '0-1', capabilities, multiRemote)
+
+      const { fragments } = await readReporterFragments(outputDir, 'mixed-run')
+      expect(fragments[0]?.notRecordedReason).toBe(reason)
+      const model = await createReportModel({
+        outputDir,
+        runId: 'mixed-run',
+        fragments,
+        run: {
+          id: 'mixed-run',
+          startedAt: '2026-11-20T00:00:00.000Z',
+          completedAt: '2026-11-20T00:00:02.000Z',
+          exitCode: 0,
+          tools: {
+            service: '2.0.0',
+            node: process.version,
+            webdriverio: '10.1.0',
+            puppeteer: '25.16.0',
+          },
+          entries: [],
+          diagnostics: [],
+        },
+        initialDiagnostics: [],
+      })
+
+      expect(model.diagnostics).toEqual([])
+      expect(model.items).toEqual([
+        expect.objectContaining({
+          captureDecision: 'skipped',
+          captureReason: reason,
+          media: [],
+          testName: 'works',
+        }),
+      ])
+    },
+  )
+
+  it('still reports a Chromium outcome that has no manifest capture', async () => {
+    const outputDir = await createTempDir()
+    await runWorker(outputDir, '0-0', {
+      browserName: 'chrome',
+      browserVersion: '140.0',
+      'goog:chromeOptions': {},
+    })
+
+    const { fragments } = await readReporterFragments(outputDir, 'mixed-run')
+    expect(fragments[0]?.notRecordedReason).toBeUndefined()
+    const model = await createReportModel({
+      outputDir,
+      runId: 'mixed-run',
+      fragments,
+      run: {
+        id: 'mixed-run',
+        startedAt: '2026-11-20T00:00:00.000Z',
+        completedAt: '2026-11-20T00:00:02.000Z',
+        exitCode: 0,
+        tools: {
+          service: '2.0.0',
+          node: process.version,
+          webdriverio: '10.1.0',
+          puppeteer: '25.16.0',
+        },
+        entries: [],
+        diagnostics: [],
+      },
+      initialDiagnostics: [],
+    })
+
+    expect(model.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      'unmatched-test-outcome',
+    ])
+  })
+
+  it('reads a fragment from before the field as recorded', async () => {
+    const outputDir = await createTempDir()
+    await writeReporterFragment(outputDir, {
+      ...createFragment('mixed-run', '0-0', ['tests/specs/mixed.spec.ts'], []),
+    })
+    await fs.writeFile(
+      path.join(
+        outputDir,
+        '.wdio-video-report',
+        'mixed-run',
+        'fragments',
+        'bad.json',
+      ),
+      JSON.stringify({
+        ...createFragment(
+          'mixed-run',
+          '0-1',
+          ['tests/specs/mixed.spec.ts'],
+          [],
+        ),
+        notRecordedReason: 7,
+      }),
+    )
+
+    const { fragments, invalidFiles } = await readReporterFragments(
+      outputDir,
+      'mixed-run',
+    )
+    expect(fragments).toHaveLength(1)
+    expect(fragments[0]?.notRecordedReason).toBeUndefined()
+    expect(invalidFiles).toEqual(['bad.json'])
+  })
+})
+
+// The cleanup deletes recursively, so it must stay inside the reporter's own
+// work directory: never a parent of it, and never through a link or junction.
+describe("removing a run's reporter fragments", () => {
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  const exists = (filePath: string): Promise<boolean> =>
+    fs.stat(filePath).then(
+      () => true,
+      () => false,
+    )
+
+  it.each(['..', '.', '../outside', 'run/nested', ''])(
+    'refuses the unsafe run ID %j and touches nothing',
+    async (runId) => {
+      const outputDir = await createTempDir()
+      await fs.writeFile(path.join(outputDir, 'keep-me.webm'), 'video')
+
+      await expect(removeReporterFragments(outputDir, runId)).rejects.toThrow(
+        TypeError,
+      )
+      expect(await exists(path.join(outputDir, 'keep-me.webm'))).toBe(true)
+    },
+  )
+
+  it('never resolves a fragment directory outside the work directory', () => {
+    const outputDir = path.resolve('videos')
+    const workDirectory = path.join(outputDir, '.wdio-video-report')
+    for (const runId of ['..', '.', '...']) {
+      expect(
+        path.dirname(
+          path.dirname(getReporterFragmentDirectory(outputDir, runId)),
+        ),
+      ).toBe(workDirectory)
+    }
+  })
+
+  it('refuses a linked work directory and leaves its target alone', async () => {
+    const root = await createTempDir()
+    const outputDir = path.join(root, 'videos')
+    const victim = path.join(root, 'victim', 'run-123')
+    await fs.mkdir(outputDir, { recursive: true })
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'important.txt'), 'keep')
+    await fs.symlink(
+      path.join(root, 'victim'),
+      path.join(outputDir, '.wdio-video-report'),
+      linkType,
+    )
+
+    await expect(removeReporterFragments(outputDir, 'run-123')).rejects.toThrow(
+      'not a plain directory',
+    )
+    expect(await exists(path.join(victim, 'important.txt'))).toBe(true)
+  })
+
+  it('refuses a linked run directory and leaves its target alone', async () => {
+    const root = await createTempDir()
+    const outputDir = path.join(root, 'videos')
+    const victim = path.join(root, 'victim')
+    await fs.mkdir(path.join(outputDir, '.wdio-video-report'), {
+      recursive: true,
+    })
+    await fs.mkdir(victim, { recursive: true })
+    await fs.writeFile(path.join(victim, 'important.txt'), 'keep')
+    await fs.symlink(
+      victim,
+      path.join(outputDir, '.wdio-video-report', 'run-123'),
+      linkType,
+    )
+
+    await expect(removeReporterFragments(outputDir, 'run-123')).rejects.toThrow(
+      'not a plain directory',
+    )
+    expect(await exists(path.join(victim, 'important.txt'))).toBe(true)
+  })
+
+  it('removes a run with fragments and an empty work directory', async () => {
+    const outputDir = await createTempDir()
+    await writeReporterFragment(outputDir, {
+      ...createFragment('run-123', '0-0', ['tests/specs/a.ts'], []),
+    })
+
+    await removeReporterFragments(outputDir, 'run-123')
+
+    expect(await exists(path.join(outputDir, '.wdio-video-report'))).toBe(false)
+  })
+
+  it('does nothing when the run left no fragments', async () => {
+    const outputDir = await createTempDir()
+
+    await expect(
+      removeReporterFragments(outputDir, 'run-123'),
+    ).resolves.toBeUndefined()
+  })
+})

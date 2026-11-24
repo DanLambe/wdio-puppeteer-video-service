@@ -496,6 +496,7 @@ describe('WdioPuppeteerVideoLauncher', () => {
         hydratedRetryAttempt = session.specFileRetryAttempt
       },
       endEntity: vi.fn(async () => {}),
+      finalizeInterruptedRecording: vi.fn(async () => {}),
       finalizeSpecRecording: vi.fn(async () => {}),
       resetWorkerState: vi.fn(),
     }
@@ -740,5 +741,99 @@ describe('WdioPuppeteerVideoLauncher', () => {
     await expect(
       (await createFailingLauncher('error')).onComplete(0),
     ).rejects.toBeDefined()
+  })
+})
+
+// Fragments are the reporter's working files: once the run's report is
+// written they are removed, so an output directory uploaded from CI holds
+// the report, the manifest and the videos only.
+describe('reporter fragments after the report', () => {
+  const fragmentFor = (runId: string) => ({
+    schemaVersion: 1 as const,
+    runId,
+    cid: '0-0',
+    specs: ['tests/specs/example.ts'],
+    browser: { name: 'chrome' },
+    reportFileName: 'video-report.html',
+    startedAt: '2026-11-20T00:00:00.000Z',
+    completedAt: '2026-11-20T00:00:01.000Z',
+    outcomes: [],
+  })
+
+  const prepare = async (
+    outputDir: string,
+    overrides: LauncherCompositionOverrides = {},
+  ) => {
+    const writeLog = vi.fn()
+    const launcher = new WdioPuppeteerVideoLauncher(
+      { outputDir, logLevel: 'warn' },
+      undefined,
+      undefined,
+      { uuid: () => 'current-run', writeLog, ...overrides },
+    )
+    await launcher.onPrepare()
+    return { launcher, writeLog }
+  }
+
+  it("removes the run's fragments once its report is written", async () => {
+    const outputDir = await createTempDir()
+    const { launcher } = await prepare(outputDir)
+    await writeReporterFragment(outputDir, fragmentFor('current-run'))
+
+    await launcher.onComplete(0)
+
+    const entries = await fs.readdir(outputDir)
+    expect(entries).toContain('video-report.html')
+    expect(entries).not.toContain('.wdio-video-report')
+  })
+
+  it("keeps another run's fragments", async () => {
+    const outputDir = await createTempDir()
+    const { launcher } = await prepare(outputDir)
+    await writeReporterFragment(outputDir, fragmentFor('current-run'))
+    await writeReporterFragment(outputDir, fragmentFor('other-run'))
+
+    await launcher.onComplete(0)
+
+    expect(
+      await fs.readdir(path.join(outputDir, '.wdio-video-report')),
+    ).toEqual(['other-run'])
+  })
+
+  it('keeps the fragments when the report could not be written', async () => {
+    const outputDir = await createTempDir()
+    const { launcher } = await prepare(outputDir, {
+      generateVideoReportForRun: async () => {
+        throw new Error('disk full')
+      },
+    })
+    await writeReporterFragment(outputDir, fragmentFor('current-run'))
+
+    await launcher.onComplete(0)
+
+    expect(
+      await fs.readdir(
+        path.join(outputDir, '.wdio-video-report', 'current-run', 'fragments'),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('warns, and still completes, when the fragments cannot be removed', async () => {
+    const outputDir = await createTempDir()
+    const { launcher, writeLog } = await prepare(outputDir, {
+      removeReporterFragments: async () => {
+        throw new Error('locked')
+      },
+    })
+    await writeReporterFragment(outputDir, fragmentFor('current-run'))
+
+    await expect(launcher.onComplete(0)).resolves.toBeUndefined()
+    expect(
+      writeLog.mock.calls.some(
+        (call) =>
+          call[1] === 'warn' &&
+          String(call[2]).includes('remove the reporter fragments'),
+      ),
+    ).toBe(true)
   })
 })

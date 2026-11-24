@@ -15,6 +15,7 @@ import {
   moveSpoolToFramesFile,
 } from './frames-file.js'
 import {
+  arePlainDirectories,
   isDirectChildDirectory,
   isSafeGlobalSlotRunId,
 } from './global-slot-directory.js'
@@ -272,31 +273,11 @@ const resolveRunDirectory = async (
   }
   // Both the service's spool root and the run's directory must be the plain
   // directories the workers made: a link or junction could lead anywhere.
-  for (const directory of [root, runDirectory]) {
-    const stats = await lstatIfPresent(directory)
-    if (stats === undefined) {
-      return undefined
-    }
-    if (!stats.isDirectory()) {
-      throw new TypeError(
-        `${LOG_PREFIX} Refusing to recover ${directory}: it is not a plain directory.`,
-      )
-    }
-  }
-  return runDirectory
-}
-
-const lstatIfPresent = async (
-  filePath: string,
-): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> => {
-  try {
-    return await fs.lstat(filePath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return undefined
-    }
-    throw error
-  }
+  const present = await arePlainDirectories(
+    [root, runDirectory],
+    (directory) => `${LOG_PREFIX} Refusing to recover ${directory}`,
+  )
+  return present ? runDirectory : undefined
 }
 
 interface SpoolFile {

@@ -46,6 +46,9 @@ const isMultiRemoteCapabilities = (capabilities: unknown): boolean => {
   )
 }
 
+export const MULTIREMOTE_UNSUPPORTED_REASON =
+  'multiremote sessions are not supported; configure recording for a single-browser WDIO worker'
+
 /**
  * Why a worker's requested capabilities can never be recorded, decided before
  * WDIO constructs the worker service.
@@ -54,7 +57,7 @@ export const describeUnsupportedWorker = (
   capabilities: unknown,
 ): string | undefined => {
   if (isMultiRemoteCapabilities(capabilities)) {
-    return 'multiremote sessions are not supported; configure recording for a single-browser WDIO worker'
+    return MULTIREMOTE_UNSUPPORTED_REASON
   }
   if (
     !capabilities ||

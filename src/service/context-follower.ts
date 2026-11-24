@@ -253,6 +253,7 @@ export class ContextFollower {
       // its answer is dropped. A different known current window stays.
       const closedCurrent = signal.contextId === this.currentWindow
       this.setCurrentWindow(closedCurrent ? undefined : this.currentWindow)
+      this.forgetTopLevel(signal.contextId)
     }
     await this.target.resumeAfterClose()
   }
@@ -262,8 +263,20 @@ export class ContextFollower {
     // WDIO switches to another, which the next switchToWindow reports.
     if (error === undefined) {
       this.setCurrentWindow(undefined)
+      // The closed window is not named, so the next lookup reads the tree.
+      this.topLevelByContext.clear()
     }
     await this.target.resumeAfterClose()
+  }
+
+  /** Forgets a closed tab and its frames, so a lookup no longer finds them. */
+  private forgetTopLevel(contextId: string): void {
+    for (const [context, topLevel] of this.topLevelByContext) {
+      if (topLevel === contextId) {
+        this.topLevelByContext.delete(context)
+      }
+    }
+    this.topLevelByContext.delete(contextId)
   }
 
   /**

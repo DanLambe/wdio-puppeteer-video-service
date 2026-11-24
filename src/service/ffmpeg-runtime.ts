@@ -262,17 +262,20 @@ export class FfmpegRuntime {
       return undefined
     }
     const slotScheduler = this.createPostProcessSlotScheduler()
-    const acquiring = slotScheduler.acquire().catch((error: unknown) => {
-      this.log(
-        'warn',
-        `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
-        error,
-      )
-      return undefined
-    })
+    const acquire = (signal?: AbortSignal): Promise<boolean | undefined> =>
+      slotScheduler
+        .acquire(signal ? { signal } : {})
+        .catch((error: unknown) => {
+          this.log(
+            'warn',
+            `[WdioPuppeteerVideoService] Failed to acquire post-processing capacity for ${operation}:`,
+            error,
+          )
+          return undefined
+        })
     const acquired = admission
-      ? await this.admit(slotScheduler, acquiring, admission, operation)
-      : await acquiring
+      ? await this.admit(slotScheduler, acquire, admission, operation)
+      : await acquire()
     if (acquired === undefined) {
       // Let the media coordinator preserve sources and record the failed outcome
       // before applying failurePolicy, just as it does for FFmpeg failures.
@@ -299,15 +302,18 @@ export class FfmpegRuntime {
   }
 
   /**
-   * Waits for a slot until the admission's wait ends or its signal aborts.
-   * A grant that arrives after that is released, unused, when it arrives.
+   * Waits for a slot until the admission's wait ends or its signal aborts,
+   * then cancels the scheduler's own wait, so it stops polling. A grant that
+   * arrives after that anyway is released, unused, when it arrives.
    */
   private async admit(
     slotScheduler: PostProcessSlotScheduler,
-    acquiring: Promise<boolean | undefined>,
+    acquire: (signal: AbortSignal) => Promise<boolean | undefined>,
     admission: PostProcessAdmission,
     operation: string,
   ): Promise<boolean | undefined> {
+    const stopWaiting = new AbortController()
+    const acquiring = acquire(stopWaiting.signal)
     const ended = Promise.withResolvers<'aborted' | 'expired'>()
     const onAbort = (): void => {
       ended.resolve('aborted')
@@ -322,6 +328,7 @@ export class FfmpegRuntime {
       if (outcome !== 'aborted' && outcome !== 'expired') {
         return outcome
       }
+      stopWaiting.abort()
       void acquiring.then(async (granted) => {
         if (granted) {
           await slotScheduler.release()

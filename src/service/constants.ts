@@ -83,6 +83,17 @@ export const WINDOWS_DEFAULT_MAX_FILENAME_LENGTH = 180
 export const DEFAULT_MAX_FILENAME_LENGTH = 255
 export const WINDOWS_MAX_PATH_LENGTH = 259
 export const SEGMENT_SUFFIX_MAX_LENGTH: number = '_part9999.webm'.length
+// One path component: 255 bytes on ext4, APFS and overlayfs, 255 UTF-16 units
+// on NTFS. Slugs are ASCII, so a name's length is its size in either.
+export const FILE_NAME_COMPONENT_MAX_LENGTH = 255
+// The longest name the service derives from a segment's slug is the atomic
+// temporary of a collision-renamed part (`_run1000` is the last collision
+// candidate), with the widest process ID a platform hands out:
+// `.<slug>_run1000_part9999.wdio-<pid>-<uuid>.webm`. Reservations, frames
+// files, spools and merge lists are shorter.
+export const DERIVED_NAME_SUFFIX_MAX_LENGTH: number =
+  '._run1000_part9999.wdio-4294967295-00000000-0000-0000-0000-000000000000.webm'
+    .length
 export const MIN_SAFE_FILENAME_LENGTH = 40
 export const MP4_DIRECT_PROBE_TIMEOUT_MS = 5_000
 export const IN_PROCESS_RECORDING_SLOT_POLL_MS = 25

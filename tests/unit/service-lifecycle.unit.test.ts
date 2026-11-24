@@ -14,6 +14,7 @@ const createCoordinator = (
   beginWorker: vi.fn(),
   configureSession: vi.fn(),
   endEntity: vi.fn(async () => {}),
+  finalizeInterruptedRecording: vi.fn(async () => {}),
   finalizeSpecRecording: vi.fn(async () => {}),
   resetWorkerState,
 })
@@ -38,7 +39,13 @@ describe('WdioPuppeteerVideoService teardown lifecycle', () => {
     expect(resetWorkerState).toHaveBeenCalledOnce()
 
     await service.after()
+    expect(resetWorkerState).toHaveBeenCalledTimes(2)
+
+    // A reload continues the same spec, so its teardown keeps the worker's
+    // state; a later teardown still resets it.
     await service.onReload('old-session', 'new-session')
+    expect(resetWorkerState).toHaveBeenCalledTimes(2)
+    await service.afterSession()
     expect(resetWorkerState).toHaveBeenCalledTimes(3)
   })
 

@@ -118,6 +118,56 @@ class registration is rejected before browser startup because it cannot load
 the launcher. Configuration is validated during plugin initialization. Unknown
 keys, invalid values, and removed 0.8 aliases throw a path-specific `TypeError`.
 
+### Running on GitHub Actions
+
+The `ci` profile suits a standard hosted runner (see
+[Parallel Performance Tuning](#parallel-performance-tuning)), and the reporter
+adds a report you can open from the downloaded artifact:
+
+```typescript
+import WdioPuppeteerVideoReporter from 'wdio-puppeteer-video-service/reporter'
+
+const outputDir = 'videos'
+
+export const config: WebdriverIO.Config = {
+  services: [
+    [
+      'puppeteer-video',
+      {
+        outputDir,
+        profile: process.env.CI ? 'ci' : 'default',
+        // For a suite that mostly passes, see "Choosing the capture encoding":
+        // capture: { encoding: 'auto' },
+      },
+    ],
+  ],
+  reporters: ['spec', [WdioPuppeteerVideoReporter, { outputDir }]],
+}
+```
+
+FFmpeg must be available to the job ([Prerequisites](#prerequisites)), for
+example from the runner's package manager. Upload `outputDir` in a step of its
+own with a status condition, so a failing test step does not skip it:
+
+```yaml
+- name: Install FFmpeg
+  run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+- name: Run tests
+  run: npx wdio run wdio.conf.ts
+- name: Upload videos
+  if: ${{ !cancelled() }}
+  uses: actions/upload-artifact@v4
+  with:
+    name: test-videos
+    path: videos/
+    if-no-files-found: ignore
+    retention-days: 7
+```
+
+The directory holds the kept videos, `manifest.json` and `video-report.html`,
+which links the videos by relative path, so the downloaded artifact opens
+offline. The service removes its own working files when the run ends.
+
 ## Prerequisites
 
 - Node.js 24 is certified. Newer versions are permitted by the package engine range and supported on a best-effort basis.
@@ -132,7 +182,9 @@ FFmpeg is resolved in this order:
 1. `processing.ffmpeg.path`
 2. `FFMPEG_PATH`
 3. `ffmpeg` on `PATH`
-4. `ffmpeg-static` when installed by the consuming project
+4. `ffmpeg-static` when installed by the consuming project, including under
+   pnpm or Yarn Plug'n'Play, which resolve it from the working directory's
+   project
 
 FFmpeg 4.4 (Ubuntu 22.04's package) and later are supported; release
 validation covers 4.4 and the bundled `ffmpeg-static` build. Recordings are
@@ -228,7 +280,12 @@ timeout. Directory-creation failures fail immediately with the path and cause.
 `artifacts.naming`:
 
 - `style` (`'test' | 'test-full' | 'session' | 'session-full'`, default `'test'`).
-- `maxLength` (default `180` on Windows and `255` elsewhere).
+- `maxLength` (default `180` on Windows and `255` elsewhere). The service also
+  writes files whose names add up to 76 characters to a segment's name, such as
+  the temporary file a transcode or merge writes before publishing, and every
+  one of them must fit the file system's 255-character limit. So the test's
+  part of a name is at most 179 characters whatever `maxLength` allows, and a
+  longer title is shortened as `overflow` says.
 - `overflow` (`'truncate' | 'session'`, default `'truncate'`).
 
 `integrations.allure`:
@@ -267,8 +324,13 @@ Unknown integrations are rejected instead of being silently ignored.
   one is encoded when its test ends. `'auto'` decides when the recording
   starts: `retain: 'all'` is live, `retain: 'failures'` is deferred, and
   `retain: 'retries'` is live on a retry and deferred on a first attempt.
-- A recording whose outcome is never known, because the worker ends or the
-  session reloads mid-test, is kept, and a deferred one is encoded then.
+- A recording stopped before its test's result is known, because the worker
+  ends or the session reloads mid-test, is kept, and a deferred one is encoded
+  then. Its manifest entry lists that media at once, and a result that arrives
+  later, after a reload, is added to the same entry. With `scope: 'spec'`, a
+  reload ends the spec's recording this way too; the spec's later tests start
+  a new recording, kept or discarded by their own results. Retries are still
+  counted across a reload.
 
 ## Deferred Encoding
 
@@ -581,7 +643,10 @@ stop timeout) is recorded in the manifest as `failed` with reason
 `capture-incomplete`, even if it produced a nonempty file or retention
 discarded its media. Retained partial media is still listed, and
 attached to Allure when configured, for diagnosis, but it is not merged or
-otherwise processed; unretained media is discarded normally. The default
+otherwise processed; unretained media is discarded normally. The recording's
+complete segments are still transcoded, when the test ends or, with
+`processing.timing: 'after-worker'`, when the worker ends, but they are not
+merged. The default
 `failurePolicy: 'warn'` logs one warning when the segment stops and does not
 fail the test. With `'error'`, the failure is raised after manifest
 finalization and recording cleanup.
@@ -643,7 +708,9 @@ without fractional seconds.
 
 The optional reporter writes one fragment per WDIO worker. After Manifest v1 is
 aggregated, the service joins outcomes to captures by run, worker, normalized
-spec/test identity, and attempt, then creates `outputDir/video-report.html`.
+spec/test identity, and attempt, then creates `outputDir/video-report.html` and
+removes the run's fragments (`outputDir/.wdio-video-report/<run>`). If the
+report cannot be written, the fragments stay for diagnosis.
 Full test identities are matched first across the whole run, so a short title
 never takes a capture that another outcome identifies exactly. A short-title
 fallback then requires one side to lack a fuller identity and exactly one
@@ -651,9 +718,13 @@ unclaimed capture to match. Cucumber scenarios are recorded under their
 scenario name, so `scenarioLevelReporter` outcomes join through this fallback;
 ambiguous outcomes receive a diagnostic instead of a potentially incorrect
 video.
-Skipped tests and tests without retained video remain visible. The report has
-status, spec, browser, and retry filters, inline playback, diagnostics, and
-error details. When a recording used more than one segment, each video is
+Skipped tests and tests without retained video remain visible. Tests of a
+worker the service does not record, such as Firefox in a mixed-browser suite,
+are listed with `capture: skipped` and the reason, without a diagnostic. The report has
+status, spec, browser, and retry filters, a search box over test names, specs,
+browsers and error messages, a count and total size of its videos, a link to
+`manifest.json`, inline playback, diagnostics, and error details. In a report
+with more than 20 videos, each loads only when played. When a recording used more than one segment, each video is
 labelled with its tab, such as "Tab 2 · test command". A merged video lists its
 tab sequence, such as "Tabs 1 → 2 → 1".
 

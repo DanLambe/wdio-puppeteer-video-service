@@ -126,6 +126,13 @@ const createHarness = (
       }
       return { deferred: false, paths: keepArtifacts ? paths : [] }
     },
+    finalizeMediaWithoutOutcome: async () => {
+      events.push('media:finalize-without-outcome')
+      if (harnessOptions.finalizeError) {
+        throw harnessOptions.finalizeError
+      }
+      return harnessOptions.finalization ?? { deferred: false, paths }
+    },
     getAvailability: () => harnessOptions.availability ?? { available: true },
     getRecordedPaths: () => paths,
     isRecordingActive: () => active,
