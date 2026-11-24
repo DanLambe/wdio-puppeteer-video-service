@@ -2,10 +2,11 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Frameworks } from '@wdio/types'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import WdioPuppeteerVideoLauncher from '../../src/launcher.js'
 import type { VideoManifestV1 } from '../../src/manifest.js'
 import type { WorkerCompositionOverrides } from '../../src/service/composition.js'
+import { FfmpegRuntime } from '../../src/service/ffmpeg-runtime.js'
 import { parseManifestJournals } from '../../src/service/manifest-journal.js'
 import {
   createManifestRunContext,
@@ -28,6 +29,7 @@ import type { WdioPuppeteerVideoServiceOptions } from '../../src/types.js'
 const tempDirs: string[] = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(
     tempDirs
       .splice(0)
@@ -402,6 +404,9 @@ const createReloadingWorker = async (
   framework: 'cucumber' | 'mocha',
   service: WdioPuppeteerVideoServiceOptions,
 ) => {
+  // The screencast is fake, so no FFmpeg runs, and CI's unit job has none to
+  // find: recording must not wait on looking for it.
+  vi.spyOn(FfmpegRuntime.prototype, 'ensureReady').mockResolvedValue(true)
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'reload-entry-'))
   tempDirs.push(outputDir)
   const config = { framework, logLevel: 'silent' }

@@ -116,7 +116,10 @@ describe('file name budget', () => {
   )
 
   it('keeps the Windows default slug length', () => {
-    expect(computeMaxSlugLength({ outputDir: 'videos' }, 'win32')).toBe(166)
+    // On Windows the whole path also counts, so a short absolute output
+    // directory isolates the default from where the tests run.
+    const outputDir = path.join(path.parse(process.cwd()).root, 'v')
+    expect(computeMaxSlugLength({ outputDir }, 'win32')).toBe(166)
   })
 
   it('opens every derived file of a long retried test title', async () => {
